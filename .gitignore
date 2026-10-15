@@ -1,0 +1,6 @@
+/target
+# Never commit game data, extracted assets, or decompiled sources.
+*.SFS
+*.sfs
+/extracted/
+/re/

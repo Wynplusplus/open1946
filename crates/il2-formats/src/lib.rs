@@ -1,0 +1,12 @@
+//! Parsers for IL-2 1946 asset formats. Specifications live in `docs/formats/`.
+
+pub mod binsect;
+pub mod him;
+pub mod imf;
+pub mod map;
+pub mod mat;
+pub mod msh;
+pub mod sectfile;
+
+pub use binsect::{RowFile, RowSection, Value};
+pub use sectfile::{Section, SectFile};

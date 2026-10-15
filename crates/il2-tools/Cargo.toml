@@ -1,0 +1,15 @@
+[package]
+name = "il2-tools"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "il2"
+path = "src/main.rs"
+
+[dependencies]
+il2-sfs = { path = "../il2-sfs" }
+il2-vfs = { path = "../il2-vfs" }
+il2-formats = { path = "../il2-formats" }
+clap = { version = "4", features = ["derive", "env"] }
