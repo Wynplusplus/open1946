@@ -2,6 +2,7 @@
 
 use crate::aircraft::{Aircraft, ContactKind};
 use crate::atmosphere::{self, G};
+use crate::engine::EngineState;
 use crate::polar::Polar;
 use glam::{DQuat, DVec3};
 
@@ -43,6 +44,7 @@ pub struct Sim {
     /// Angular velocity, body frame.
     pub w: DVec3,
     pub fuel: f64,
+    pub engines: Vec<EngineState>,
     /// Control surface positions (lagged inputs).
     pub ct: Inputs,
     wing: Polar,
@@ -71,7 +73,9 @@ impl Sim {
     pub fn new(ac: Aircraft, pos: DVec3, ori: DQuat, speed: f64) -> Self {
         let wing = ac.wing_polar();
         let fuel = ac.fuel_max;
+        let engines = ac.engines.iter().map(|p| EngineState::new(p, p.w_nom)).collect();
         Sim {
+            engines,
             vel: ori * DVec3::new(speed, 0.0, 0.0),
             ac,
             pos,
@@ -89,6 +93,13 @@ impl Sim {
             aoa: 0.0,
             ias: 0.0,
             thrust: 0.0,
+        }
+    }
+
+    /// Running engines at idle (ground start) or nominal RPM (air start).
+    pub fn set_engines_idle(&mut self, idle: bool) {
+        for (p, st) in self.ac.engines.iter().zip(&mut self.engines) {
+            *st = EngineState::new(p, if idle { p.w_min } else { p.w_nom });
         }
     }
 
@@ -111,7 +122,8 @@ impl Sim {
         self.ct.aileron = approach(self.ct.aileron, input.aileron, 4.0, dt);
         self.ct.elevator = approach(self.ct.elevator, input.elevator, 4.0, dt);
         self.ct.rudder = approach(self.ct.rudder, input.rudder, 4.0, dt);
-        self.ct.throttle = approach(self.ct.throttle, input.throttle, 1.0, dt);
+        let max_throttle = self.ac.engines.iter().map(|e| e.max_throttle()).fold(1.0, f64::max);
+        self.ct.throttle = approach(self.ct.throttle, input.throttle.min(max_throttle), 1.0, dt);
         self.ct.flaps = approach(self.ct.flaps, input.flaps, 0.2, dt);
         self.ct.brakes = input.brakes;
         // OpenIL2 simplification: gear travels in about 6 s.
@@ -137,29 +149,20 @@ impl Sim {
         let ground_z = ground.height(self.pos.x, self.pos.y);
         let height = (self.pos.z - ground_z).max(0.0);
 
-        // Engine (simplified, see spec).
+        // Engines (docs/behavior/engine.md).
         let mut thrust = 0.0;
         let mut torque = 0.0;
-        let mut power_out = 0.0;
-        for e in &ac.engines {
-            let alt_factor = if self.pos.z <= e.compressor_alt {
-                1.0
-            } else {
-                rho / atmosphere::density(e.compressor_alt)
-            };
-            let p = e.power_w * self.ct.throttle * alt_factor * if self.fuel > 0.0 { 1.0 } else { 0.0 };
-            let t = (0.8 * p / v.max(1.0)).min(0.0164 * p);
-            thrust += t;
-            torque += e.prop_sign * p / e.prop_omega;
-            power_out += self.ct.throttle;
+        let throttle = if self.fuel > 0.0 { self.ct.throttle } else { 0.0 };
+        for (p, st) in ac.engines.iter().zip(&mut self.engines) {
+            st.step(p, throttle, vflow.x, v, self.pos.z, dt);
+            thrust += st.thrust;
+            torque += st.torque;
             let denom = 6.0 * rho * (vflow.x + self.add_vflow).max(1.0);
-            self.add_vflow = 0.95 * self.add_vflow + 0.05 * t / denom;
-            self.add_vside = (0.95 * self.add_vside + 0.05 * (p / e.prop_omega / e.prop_radius) / denom).max(0.0);
+            self.add_vflow = 0.95 * self.add_vflow + 0.05 * st.thrust / denom;
+            self.add_vside = (0.95 * self.add_vside + 0.05 * (st.prop_torque / p.prop_r) / denom).max(0.0);
         }
-        if !ac.engines.is_empty() {
-            power_out /= ac.engines.len() as f64;
-        }
-        let prop_sign = ac.engines.first().map_or(1.0, |e| e.prop_sign);
+        let power_out = throttle.min(1.0);
+        let prop_sign = ac.engines.first().map_or(1.0, |e| e.direction);
         let single_prop = ac.engines.len() == 1;
 
         // Wing halves.

@@ -1,5 +1,6 @@
 //! Aircraft parameters from flight-model and engine files (`docs/behavior/flight-model.md`, "Data").
 
+use crate::engine::EngineParams;
 use crate::polar::{Polar, PolarCfg, PolarParams};
 use glam::DVec3;
 use il2_formats::sectfile::atof;
@@ -11,18 +12,6 @@ pub enum Error {
     Missing(&'static str, &'static str),
     #[error("flight model: {0}")]
     Bad(String),
-}
-
-#[derive(Clone, Debug)]
-pub struct Engine {
-    pub power_w: f64,
-    pub compressor_alt: f64,
-    pub prop_omega: f64,
-    pub prop_radius: f64,
-    /// +1 or −1, sign of the torque reaction about body x.
-    pub prop_sign: f64,
-    /// Position of the propeller hub in body coordinates (for torque arms; currently on the x axis).
-    pub pos: DVec3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,7 +60,7 @@ pub struct Aircraft {
     pub spin_cx_loss: f64,
     pub spin_cy_loss: f64,
     pub wing: PolarParams,
-    pub engines: Vec<Engine>,
+    pub engines: Vec<EngineParams>,
     pub gear: Vec<GearPoint>,
 }
 
@@ -88,6 +77,43 @@ fn num_or(f: &SectFile, s: &'static str, k: &'static str, d: f64) -> f64 {
 }
 
 impl Aircraft {
+    /// Placeholder without data, for tooling that needs an `Aircraft` value.
+    pub fn empty() -> Self {
+        let cfg = PolarCfg { cy0: 0.0, aoa_crit_h: 16.0, aoa_crit_l: -16.0, cy_crit_h: 1.0, cy_crit_l: -1.0, cx_min: 0.02, parab_cx: 8e-4 };
+        Aircraft {
+            length: 1.0,
+            wingspan: 1.0,
+            mass_empty: 1.0,
+            fuel_max: 0.0,
+            j0: DVec3::ONE,
+            wing_area: 1.0,
+            wing_sections: [1.0 / 6.0; 3],
+            stab_area: 0.0,
+            elevator_area: 0.0,
+            keel_area: 0.0,
+            rudder_area: 0.0,
+            airbrake_cx: 0.0,
+            arm_stab: 0.0,
+            arm_keel: 0.0,
+            arm_rudder: 0.0,
+            arm_wing_mid: 0.0,
+            arm_wing_out: 0.0,
+            wing_v: 0.0,
+            gcenter: 0.0,
+            gcenter_z: 0.0,
+            gc_aoa_shift: 0.0,
+            gc_flaps_shift: 0.0,
+            sens_roll: 1.0,
+            sens_pitch: 1.0,
+            sens_yaw: 1.0,
+            spin_cx_loss: 0.0,
+            spin_cy_loss: 0.0,
+            wing: PolarParams { line_cy: 0.09, aoa_min_cx_shift: 0.0, decline: 0.007, max_dist_ang: 30.0, parab_angle: 5.0, cfg: [cfg, cfg] },
+            engines: Vec::new(),
+            gear: Vec::new(),
+        }
+    }
+
     /// `fmd`: the flight model; `emd(family)`: loads an engine family file.
     pub fn load(
         fmd: &SectFile,
@@ -166,18 +192,11 @@ impl Aircraft {
                 break;
             };
             let e = emd(fam).ok_or_else(|| Error::Bad(format!("engine family {fam} not found")))?;
-            let es = e.section_ci(sub).ok_or_else(|| Error::Bad(format!("engine {fam}/{sub} not found")))?;
-            let g = |k: &str, d: f64| es.get_ci(k).and_then(atof).map(f64::from).unwrap_or(d);
-            let hp = g("HorsePowers", 1000.0);
-            let rpm = g("RPMNom", 2500.0) * g("Reductor", 1.0);
-            engines.push(Engine {
-                power_w: hp * 745.7,
-                compressor_alt: g("CompressorAltitude0", 0.0),
-                prop_omega: (rpm * std::f64::consts::TAU / 60.0).max(1.0),
-                prop_radius: 0.5 * g("PropDiameter", 3.0),
-                prop_sign: if g("Direction", 0.0) == 1.0 { -1.0 } else { 1.0 },
-                pos: DVec3::ZERO,
-            });
+            let p = EngineParams::load(&e, sub).ok_or_else(|| Error::Bad(format!("engine {fam}/{sub} not found")))?;
+            if !p.piston {
+                return Err(Error::Bad(format!("engine {fam}/{sub}: only piston engines are supported yet")));
+            }
+            engines.push(p);
         }
 
         Ok(Aircraft {

@@ -159,20 +159,14 @@ any wheel touches the ground, otherwise 1. Each sub-step:
 3. Velocity `+=` `R·F/m · dt/n`, then position `+=` velocity · `dt/n`.
 4. Gear forces are recomputed between sub-steps.
 
-## Engine and propeller — *OpenIL2 simplification*
-The original simulates engine RPM dynamics (engine torque against propeller torque, governor, supercharger
-stages, mixture and temperatures). Until that is specified, OpenIL2 uses:
-- Power = `HorsePowers · 745.7 · throttle · altitude factor`. The factor is 1 up to `CompressorAltitude0`, then
-  decays with density, `ρ(h)/ρ(CompressorAltitude0)`.
-- Thrust = `min(η·P/max(V, 1), 0.0164·P)` with `η = 0.8`. The second term approximates static thrust,
-  about 16 N per kW. Thrust acts along body +x.
-- Torque reaction = `P/ω_prop` about x, with a sign from the propeller direction.
-- Slipstream (original rule): `addVflow ← 0.95·addVflow + 0.05·T/(6ρ·max(1, Vflow.x + addVflow))`, and
-  `addVside` likewise with `torque/prop radius` in place of T.
+## Engine and propeller
+See `engine.md`. Thrust acts along body +x. The torque reaction acts about body x. Slipstream terms feed the
+wing and tail flow as described above.
 
 ## Landing gear — *OpenIL2 simplification*
-Contact points are the hooks `_ClipLGear`, `_ClipRGear`, `_ClipCGear` of the aircraft's hierarchy. In the
-model's default pose the gear is retracted, so only the hooks' x and y are used. Each wheel's z is solved
+Contact points are the hooks `_ClipLGear`, `_ClipRGear`, `_ClipCGear` of the aircraft's hierarchy, taken with
+the gear animation at "down" (`animation.md`), because the meshes are modelled with the gear retracted. Only
+the hooks' x and y are used. Each wheel's z is solved
 so the aircraft rests at `[Gear] H` (origin height) and `Pitch` (nose-up angle):
 `z = −(H + x·sin Pitch)/cos Pitch − 0.08`, where 0.08 m is the springs' static compression.
 Each point is a spring-damper:

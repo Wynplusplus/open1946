@@ -181,11 +181,25 @@ impl<'a> Loader<'a> {
         Ok(())
     }
 
-    /// Hook positions of a hierarchical mesh in object coordinates, from LOD 0 of every node's mesh.
+    /// Hook positions of a hierarchical mesh in object coordinates (rest pose), from every node's mesh.
     pub fn hier_hooks(&self, him_path: &str) -> Result<Vec<(String, Vec3)>, String> {
         let data = self.vfs.read(him_path).map_err(|e| e.to_string())?;
         let hier = Hier::parse(&data).map_err(|e| e.to_string())?;
         let world = node_transforms(&hier)?;
+        self.hooks_with(him_path, &hier, &world)
+    }
+
+    /// Hook positions with the nodes posed by `world` (e.g. from `Rig::pose`).
+    pub fn hier_hooks_posed(&self, him_path: &str, world: &[Mat4]) -> Result<Vec<(String, Vec3)>, String> {
+        let data = self.vfs.read(him_path).map_err(|e| e.to_string())?;
+        let hier = Hier::parse(&data).map_err(|e| e.to_string())?;
+        if world.len() != hier.nodes.len() {
+            return Err("pose does not match hierarchy".into());
+        }
+        self.hooks_with(him_path, &hier, world)
+    }
+
+    fn hooks_with(&self, him_path: &str, hier: &Hier, world: &[Mat4]) -> Result<Vec<(String, Vec3)>, String> {
         let dir = dir_of(him_path).to_owned();
         let mut out = Vec::new();
         for (i, n) in hier.nodes.iter().enumerate() {

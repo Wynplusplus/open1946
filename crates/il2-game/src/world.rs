@@ -71,7 +71,17 @@ pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Re
     loader.season = Some("summer".into());
     let mut mesh = loader.load_hier(&him, false)?;
     let rig = loader.hier_rig(&him)?;
-    let hooks = loader.hier_hooks(&him)?;
+    // Wheel hooks are taken with the gear extended (the meshes are modelled retracted).
+    let mut assets_for_pose = AircraftAssets {
+        mesh: MeshData::default(),
+        rig: rig.clone(),
+        tracks: tracks.clone(),
+        fm: Aircraft::empty(),
+        parked: (0.0, 0.0),
+    };
+    let down = pose(&assets_for_pose, &il2_fm::Inputs { gear: 1.0, ..Default::default() });
+    assets_for_pose.tracks.clear();
+    let hooks = loader.hier_hooks_posed(&him, &down)?;
     mesh.textures = loader.take_images();
     let fmd = fms.sect_file(fmd_name).map_err(|e| e.to_string())?;
     let gear = gear_points(&hooks, &fmd);
@@ -149,7 +159,9 @@ pub fn takeoff_spot(ends: &[il2_formats::statics::Placed], x: f64, y: f64) -> Op
 pub fn spawn_on_ground(ac: Aircraft, field: &HeightField, x: f64, y: f64, heading: f64, h: f64, pitch_deg: f64) -> Sim {
     let z = field.height_at(x, y) + h;
     let ori = DQuat::from_rotation_z(heading) * DQuat::from_rotation_y(-pitch_deg.to_radians());
-    Sim::new(ac, DVec3::new(x, y, z), ori, 0.0)
+    let mut sim = Sim::new(ac, DVec3::new(x, y, z), ori, 0.0);
+    sim.set_engines_idle(true);
+    sim
 }
 
 /// Starts airborne at a point, heading towards another.

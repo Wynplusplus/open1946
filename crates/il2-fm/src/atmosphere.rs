@@ -18,6 +18,19 @@ pub fn density(h: f64) -> f64 {
     }
 }
 
+/// Static pressure in Pa.
+pub fn pressure(h: f64) -> f64 {
+    let h = h.max(0.0);
+    if h <= 11000.0 {
+        101325.0 * (temperature(h) / 288.15).powf(5.2559)
+    } else {
+        pressure(11000.0) * (-(h - 11000.0) / 6341.6).exp()
+    }
+}
+
+/// Reference sea-level pressure used by the engine model (`docs/behavior/engine.md`).
+pub const P0: f64 = 101300.0;
+
 pub fn sonic_speed(h: f64) -> f64 {
     (1.4 * 287.053 * temperature(h)).sqrt()
 }

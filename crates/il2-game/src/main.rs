@@ -103,7 +103,7 @@ impl Game {
         i.aileron = key_axis(i.aileron, k(KeyCode::ArrowLeft), k(KeyCode::ArrowRight), dt);
         i.rudder = key_axis(i.rudder, k(KeyCode::KeyZ), k(KeyCode::KeyX), dt);
         if k(KeyCode::PageUp) || k(KeyCode::Equal) {
-            i.throttle = (i.throttle + 0.5 * dt).min(1.0);
+            i.throttle = (i.throttle + 0.5 * dt).min(1.1);
         }
         if k(KeyCode::PageDown) || k(KeyCode::Minus) {
             i.throttle = (i.throttle - 0.5 * dt).max(0.0);
@@ -201,6 +201,8 @@ impl ApplicationHandler for Game {
                             KeyCode::KeyV => self.inputs.flaps = (self.inputs.flaps - 1.0 / 3.0).max(0.0),
                             KeyCode::KeyG => self.inputs.gear = if self.inputs.gear > 0.5 { 0.0 } else { 1.0 },
                             KeyCode::Digit0 => self.inputs.throttle = 1.0,
+                            // Boost (110 %) for engines that allow it.
+                            KeyCode::KeyW => self.inputs.throttle = 1.1,
                             KeyCode::Digit1 => self.inputs.throttle = 0.0,
                             c @ (KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6
                             | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9) => {
@@ -225,7 +227,7 @@ impl ApplicationHandler for Game {
 fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
     let ground = |_: f64, _: f64| 0.0;
     sim.pos.z = alt;
-    let mut inputs = Inputs { throttle: 1.0, ..Default::default() };
+    let mut inputs = Inputs { throttle: 1.1, ..Default::default() };
     let mut last = Vec::new();
     for step in 0..(240.0 / TICK) as usize {
         let vz = sim.vel.z;
@@ -250,6 +252,12 @@ fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
             last.push((sim.vel.length(), sim.pos.z));
         }
     }
+    if let Some(e) = sim.engines.first() {
+        eprintln!(
+            "  engine at {alt:.0} m: {:.0} rpm, manifold {:.2} ata, pitch {:.1} deg, thrust {:.0} N, prop torque {:.0} N·m",
+            e.rpm(), e.manifold, e.phi.to_degrees(), e.thrust, e.prop_torque
+        );
+    }
     let n = last.len() as f64;
     (last.iter().map(|v| v.0).sum::<f64>() / n * 3.6, last.iter().map(|v| v.1).sum::<f64>() / n)
 }
@@ -259,7 +267,7 @@ fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
 fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
     let start = sim.pos;
     let heading0 = (sim.ori * DVec3::X).truncate().normalize();
-    let mut inputs = Inputs { throttle: 1.0, ..Default::default() };
+    let mut inputs = Inputs { throttle: 1.1, gear: 1.0, ..Default::default() };
     let ground = |x: f64, y: f64| field.height_at(x, y);
     let mut t = 0.0;
     for _ in 0..(90.0 / TICK) as usize {
@@ -299,11 +307,15 @@ fn parked_test(mut sim: Sim) -> (f64, f64, f64) {
     sim.ori = glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2) * glam::DQuat::from_rotation_y(-pitch0);
     sim.pos.z = 2.2;
     sim.vel = DVec3::ZERO;
-    let inputs = Inputs { brakes: 1.0, ..Default::default() };
+    sim.set_engines_idle(true);
+    let inputs = Inputs { brakes: 1.0, gear: 1.0, ..Default::default() };
     for _ in 0..(10.0 / TICK) as usize {
         sim.tick(&inputs, &ground);
     }
     let pitch = (sim.ori * DVec3::X).z.asin().to_degrees();
+    if let Some(e) = sim.engines.first() {
+        eprintln!("  parked: engine {:.0} rpm, thrust {:.0} N", e.rpm(), e.thrust);
+    }
     (pitch, sim.pos.z, sim.vel.length())
 }
 
@@ -347,7 +359,6 @@ fn main() {
     let assets = world::load_aircraft(&vfs, &fms, &args.aircraft).unwrap_or_else(|e| fail(e));
     let fmd_name = il2_data::Classes::new(&vfs, &fms.keys).aircraft(&args.aircraft).map(|c| c.flight_model).unwrap_or_default();
     let field = world::load_heights(&vfs, &args.map).unwrap_or_else(|e| fail(e));
-    eprintln!("gear contact points: {:?}", assets.fm.gear.iter().map(|g| g.pos).collect::<Vec<_>>());
 
     if args.test && !matches!(start, Start::Takeoff { .. }) {
         let fmd = fms.sect_file(&fmd_name).unwrap_or_else(|e| fail(e));
