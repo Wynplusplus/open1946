@@ -70,6 +70,16 @@ pub fn normalize_path(path: &str) -> Vec<u8> {
         .collect()
 }
 
+/// 32-bit string hash used by the runtime for class and stream names (`IntHash` in
+/// `docs/formats/krypto.md`): the low lane over UTF-16 code units, low byte first, as a signed int.
+pub fn int_hash(s: &str) -> i32 {
+    let mut h = HashState::default();
+    for u in s.encode_utf16() {
+        h.update(&u.to_le_bytes());
+    }
+    h.lo as i32
+}
+
 /// Hash key of a game path as stored in SFS indices.
 pub fn path_hash(path: &str) -> u64 {
     HashState::of(&normalize_path(path)).key()
@@ -86,6 +96,13 @@ mod tests {
                 assert_eq!(TABLE_LO[a ^ b], TABLE_LO[a] ^ TABLE_LO[b]);
             }
         }
+    }
+
+    #[test]
+    fn int_hash_is_low_lane_over_utf16() {
+        let mut h = HashState::default();
+        h.update(&[b'a', 0, b'b', 0]);
+        assert_eq!(int_hash("ab"), h.lo as i32);
     }
 
     #[test]

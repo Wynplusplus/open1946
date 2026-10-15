@@ -3,7 +3,7 @@
 mod hash;
 mod lzss;
 
-pub use hash::{normalize_path, path_hash, HashState};
+pub use hash::{int_hash, normalize_path, path_hash, HashState};
 
 use memmap2::Mmap;
 use std::fs::File;

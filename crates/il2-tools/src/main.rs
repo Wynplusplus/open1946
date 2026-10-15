@@ -24,6 +24,8 @@ enum Cmd {
     Stat,
     /// Write a file from the archives to stdout.
     Cat { path: String },
+    /// Print a decoded flight-model or engine file (e.g. FlightModels/Bf-109G-6Early.fmd).
+    Fm { name: String },
     /// Parse every named .msh/.him/.mat file and report failures.
     ParseAll {
         /// Name list produced by `il2 names`.
@@ -113,6 +115,20 @@ fn main() -> ExitCode {
                 failures += 1;
             }
         },
+        Cmd::Fm { name } => {
+            match il2_vfs::Vfs::open_install(&cli.root)
+                .map_err(il2_data::Error::from)
+                .and_then(|v| il2_data::FlightModels::open(&v)?.read(&name))
+            {
+                Ok(d) => {
+                    std::io::stdout().write_all(&d).ok();
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    failures += 1;
+                }
+            }
+        }
         Cmd::ParseAll { names } => {
             let vfs = match il2_vfs::Vfs::open_install(&cli.root) {
                 Ok(v) => v,
