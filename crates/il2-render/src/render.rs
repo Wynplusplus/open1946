@@ -12,6 +12,8 @@ pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    /// Index into the mesh's node transforms (0 for unanimated geometry).
+    pub node: u32,
 }
 
 #[cfg(test)]
@@ -89,6 +91,10 @@ pub struct MeshData {
     pub textures: Vec<Image>,
     /// Per LOD group, the distance up to which each level is used.
     pub lod_distances: Vec<Vec<f32>>,
+    /// Number of node transforms the vertices refer to (at least 1).
+    pub node_count: usize,
+    /// Initial node transforms; identity when empty.
+    pub node_init: Vec<Mat4>,
 }
 
 /// Level used at `distance`: the first whose limit is beyond it; `None` past the last (culled).
@@ -108,6 +114,8 @@ pub struct GpuMesh {
     lod_distances: Vec<Vec<f32>>,
     /// Per-mesh model transform.
     instance: wgpu::Buffer,
+    nodes: wgpu::Buffer,
+    node_count: usize,
     instance_bg: wgpu::BindGroup,
 }
 
@@ -160,6 +168,19 @@ fn uniform_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
     })
 }
 
+fn instance_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let buf = |binding, ty| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX,
+        ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("instance"),
+        entries: &[buf(0, wgpu::BufferBindingType::Uniform), buf(1, wgpu::BufferBindingType::Storage { read_only: true })],
+    })
+}
+
 impl Renderer {
     pub fn new(window: Arc<Window>) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone())));
@@ -208,7 +229,7 @@ impl Renderer {
         let depth = create_depth(&device, config.width, config.height);
 
         let globals_layout = uniform_layout(&device, "globals");
-        let instance_layout = uniform_layout(&device, "instance");
+        let instance_layout = instance_layout(&device);
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("texture"),
             entries: &[
@@ -281,7 +302,7 @@ impl Renderer {
                         buffers: &[Some(wgpu::VertexBufferLayout {
                             array_stride: std::mem::size_of::<Vertex>() as u64,
                             step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Uint32],
                         })],
                         compilation_options: Default::default(),
                     },
@@ -405,10 +426,22 @@ impl Renderer {
             contents: bytemuck::cast_slice(&Mat4::IDENTITY.to_cols_array_2d()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let node_count = mesh.node_count.max(1);
+        let init: Vec<[[f32; 4]; 4]> = (0..node_count)
+            .map(|i| mesh.node_init.get(i).copied().unwrap_or(Mat4::IDENTITY).to_cols_array_2d())
+            .collect();
+        let nodes = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("nodes"),
+            contents: bytemuck::cast_slice(&init),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
         let instance_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("instance"),
             layout: &self.instance_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: instance.as_entire_binding() }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: instance.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: nodes.as_entire_binding() },
+            ],
         });
         let views: Vec<wgpu::TextureView> = mesh.textures.iter().map(|t| self.upload_texture(t)).collect();
         let mut keys: Vec<(usize, u32, bool)> = Vec::new();
@@ -427,7 +460,14 @@ impl Renderer {
                 (*b, idx)
             })
             .collect();
-        GpuMesh { vbuf, ibuf, batches, materials, lod_distances: mesh.lod_distances.clone(), instance, instance_bg }
+        GpuMesh { vbuf, ibuf, batches, materials, lod_distances: mesh.lod_distances.clone(), instance, nodes, node_count, instance_bg }
+    }
+
+    /// Sets a mesh's node transforms (extra entries are ignored).
+    pub fn set_nodes(&self, mesh: &GpuMesh, nodes: &[Mat4]) {
+        let n = nodes.len().min(mesh.node_count);
+        let data: Vec<[[f32; 4]; 4]> = nodes[..n].iter().map(|m| m.to_cols_array_2d()).collect();
+        self.queue.write_buffer(&mesh.nodes, 0, bytemuck::cast_slice(&data));
     }
 
     /// Sets a mesh's model transform.

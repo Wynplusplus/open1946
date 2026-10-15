@@ -23,3 +23,21 @@ fn aircraft_class_assets() {
     assert_eq!(c.flight_model, "FlightModels/Bf-109G-6Early.fmd");
     assert!(c.meshes[0].to_ascii_lowercase().ends_with("bf-109g-6early/hier.him"), "{:?}", c.meshes);
 }
+
+#[test]
+#[ignore]
+fn bf109_animations_import() {
+    let vfs = il2_vfs::Vfs::open_install(std::env::var("IL2_ROOT").unwrap()).unwrap();
+    let fms = FlightModels::open(&vfs).unwrap();
+    let tracks = il2_data::Classes::new(&vfs, &fms.keys).animations("air.BF_109F4");
+    for t in &tracks {
+        println!("{:?} imported={} nodes={:?}", t.channel, t.imported, t.nodes.keys().collect::<Vec<_>>());
+    }
+    let gear = tracks.iter().find(|t| t.channel == il2_data::anim::Channel::Gear).unwrap();
+    assert!(gear.imported);
+    let down: Vec<_> = gear.eval(1.0).collect();
+    let l3 = down.iter().find(|(n, _)| *n == "GearL3_D0").unwrap().1;
+    assert!((l3.angles[1] + 77.5).abs() < 0.01, "{l3:?}");
+    let flaps = tracks.iter().find(|t| t.channel == il2_data::anim::Channel::Flaps).unwrap();
+    assert!(flaps.imported);
+}

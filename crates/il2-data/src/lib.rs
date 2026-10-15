@@ -1,6 +1,7 @@
 //! Game data that the runtime keeps scrambled: flight models and engine definitions.
 //! Formats: `docs/formats/krypto.md`. All key material is read from the user's install.
 
+pub mod anim;
 mod classfile;
 pub mod container;
 pub mod keys;
@@ -50,6 +51,31 @@ impl<'a> Classes<'a> {
         let mut class = keys::CLASS_HEADER.to_vec();
         class.extend(data.iter().enumerate().map(|(i, b)| b ^ key[i % key.len()]));
         classfile::ClassFile::parse(&class).ok()
+    }
+
+    /// The class and its superclasses, most derived first, as far as they are stored in the install.
+    fn chain(&self, full: &str) -> Vec<classfile::ClassFile> {
+        let mut out = Vec::new();
+        let mut name = Some(full.replace('/', "."));
+        while let Some(n) = name.take() {
+            if !n.starts_with("com.maddox") || out.len() > 16 {
+                break;
+            }
+            let Some(c) = self.load(&n) else { break };
+            name = c.super_class.as_ref().map(|s| s.replace('/', "."));
+            out.push(c);
+        }
+        out
+    }
+
+    /// Part animation tracks of an aircraft class, imported where possible, else the generic defaults.
+    pub fn animations(&self, class: &str) -> Vec<anim::Track> {
+        let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };
+        let chain = self.chain(&full);
+        anim::Channel::ALL
+            .iter()
+            .map(|&ch| anim::sample(&chain, ch).unwrap_or_else(|| anim::default_track(ch)))
+            .collect()
     }
 
     /// `air.BF_109G6` or `com.maddox.il2.objects.air.BF_109G6`.

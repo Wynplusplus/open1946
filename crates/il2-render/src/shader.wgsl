@@ -8,6 +8,8 @@ struct Instance {
     model: mat4x4<f32>,
 };
 @group(1) @binding(0) var<uniform> instance: Instance;
+// Per-node transforms of an animated hierarchy (node 0 is identity for plain meshes).
+@group(1) @binding(1) var<storage, read> nodes: array<mat4x4<f32>>;
 
 @group(2) @binding(0) var tex: texture_2d<f32>;
 @group(2) @binding(1) var samp: sampler;
@@ -21,6 +23,7 @@ struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) node: u32,
 };
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -31,9 +34,10 @@ struct VsOut {
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
     var o: VsOut;
-    let world = instance.model * vec4<f32>(v.pos, 1.0);
+    let m = instance.model * nodes[v.node];
+    let world = m * vec4<f32>(v.pos, 1.0);
     o.clip = globals.view_proj * world;
-    o.normal = normalize((instance.model * vec4<f32>(v.normal, 0.0)).xyz);
+    o.normal = normalize((m * vec4<f32>(v.normal, 0.0)).xyz);
     o.uv = v.uv;
     return o;
 }

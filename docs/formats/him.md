@@ -12,7 +12,8 @@ A section file (`sectfile.md`) that describes an object as a tree of mesh parts.
   - `Parent <node>`: `_ROOT_` or the name of another node.
   - `Attaching m00 m01 m02 m10 m11 m12 m20 m21 m22 tx ty tz`: the node's transform relative to its
     parent. The engine reads numbers C-`atof` style; at least one shipped file has trailing junk (`0.12'`).
-  - `Hidden`: the node is hidden initially. Damage-state variants (`*_D1`, `*_D2`, …) start hidden.
+  - `Hidden`: the node's own mesh starts hidden. Its children are *not* affected (for example, a main gear
+    leg is the child of a hidden gear-bay node). Damage-state variants (`*_D1`, `*_D2`, …) start hidden.
   - `Separable`: the part can break off.
   - `CollisionObject <name>`: a collision part of the node's mesh (see the `Co*` sections in `msh.md`).
 

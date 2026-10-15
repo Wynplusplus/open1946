@@ -134,8 +134,12 @@ impl<'a> Loader<'a> {
         tex
     }
 
-    /// Appends all LODs of a mesh, transformed by `xf`, as one LOD group.
+    /// Appends all LODs of a mesh, transformed by `xf`, as one LOD group bound to `node`.
     pub fn add_mesh(&mut self, out: &mut MeshData, msh_path: &str, xf: Mat4) -> Result<(), String> {
+        self.add_mesh_node(out, msh_path, xf, 0)
+    }
+
+    fn add_mesh_node(&mut self, out: &mut MeshData, msh_path: &str, xf: Mat4, node: u32) -> Result<(), String> {
         let data = self.vfs.read(msh_path).map_err(|e| e.to_string())?;
         let mesh = Mesh::parse(&data).map_err(|e| e.to_string())?;
         let dir = dir_of(msh_path).to_owned();
@@ -149,7 +153,7 @@ impl<'a> Loader<'a> {
             for i in 0..lod.positions.len() {
                 let p = xf.transform_point3(Vec3::from(lod.positions[i]));
                 let n = nxf.transform_vector3(Vec3::from(lod.normals[i])).normalize_or_zero();
-                out.vertices.push(Vertex { pos: p.into(), normal: n.into(), uv: lod.uvs[i] });
+                out.vertices.push(Vertex { pos: p.into(), normal: n.into(), uv: lod.uvs[i], node });
             }
             for g in &lod.groups {
                 let mat_name = lod.materials.get(g.material).cloned().unwrap_or_default();
@@ -196,28 +200,29 @@ impl<'a> Loader<'a> {
         Ok(out)
     }
 
-    /// Loads all visible nodes of a hierarchical mesh into one draw list.
+    /// The node tree of a hierarchical mesh.
+    pub fn hier_rig(&self, him_path: &str) -> Result<Rig, String> {
+        let data = self.vfs.read(him_path).map_err(|e| e.to_string())?;
+        Ok(Rig::from_hier(&Hier::parse(&data).map_err(|e| e.to_string())?))
+    }
+
+    /// Loads all visible nodes of a hierarchical mesh into one draw list. Geometry stays in node
+    /// space; `MeshData::node_init` holds the rest pose.
     pub fn load_hier(&mut self, him_path: &str, show_hidden: bool) -> Result<MeshData, String> {
         let data = self.vfs.read(him_path).map_err(|e| e.to_string())?;
         let hier = Hier::parse(&data).map_err(|e| e.to_string())?;
         let dir = dir_of(him_path).to_owned();
         let world = node_transforms(&hier)?;
-        let mut visible = vec![true; hier.nodes.len()];
-        // Parents precede children (node_transforms checked the tree), so one pass suffices
-        // once nodes are visited in resolution order.
-        for _ in 0..hier.nodes.len() {
-            for (i, n) in hier.nodes.iter().enumerate() {
-                let pv = n.parent.is_none_or(|p| visible[p]);
-                visible[i] = pv && (show_hidden || !n.hidden);
-            }
-        }
-        let mut out = MeshData::default();
+        // `Hidden` hides only the node's own mesh; its children (e.g. gear legs under a hidden
+        // gear-bay node) stay visible.
+        let visible: Vec<bool> = hier.nodes.iter().map(|n| show_hidden || !n.hidden).collect();
+        let mut out = MeshData { node_count: hier.nodes.len().max(1), node_init: world, ..Default::default() };
         for (i, n) in hier.nodes.iter().enumerate() {
             let Some(mesh) = &n.mesh else { continue };
             if !visible[i] {
                 continue;
             }
-            if let Err(e) = self.add_mesh(&mut out, &format!("{dir}{mesh}.msh"), world[i]) {
+            if let Err(e) = self.add_mesh_node(&mut out, &format!("{dir}{mesh}.msh"), Mat4::IDENTITY, i as u32) {
                 self.warnings.push(format!("node {}: {e}", n.name));
             }
         }
@@ -258,6 +263,7 @@ impl Loader<'_> {
                     pos: [c as f32 * px, (h - 1 - r) as f32 * px, z(c, r)],
                     normal: n.into(),
                     uv: [(c as f32 + 0.5) / w as f32, (r as f32 + 0.5) / h as f32],
+                    node: 0,
                 });
             }
         }
@@ -287,6 +293,74 @@ impl Loader<'_> {
     }
 }
 
+/// Extra local motion of one node (`docs/behavior/animation.md`, "Node transforms").
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NodeMotion {
+    /// Degrees: yaw, pitch, roll as in the runtime's chunk calls.
+    pub angles: [f32; 3],
+    pub offset: [f32; 3],
+}
+
+impl NodeMotion {
+    pub fn matrix(&self) -> Mat4 {
+        let [a, b, c] = self.angles.map(f32::to_radians);
+        Mat4::from_translation(Vec3::from(self.offset))
+            * Mat4::from_rotation_z(a)
+            * Mat4::from_rotation_y(-b)
+            * Mat4::from_rotation_x(-c)
+    }
+}
+
+/// A hierarchy's node tree, for posing animated parts.
+#[derive(Clone, Debug)]
+pub struct Rig {
+    pub names: Vec<String>,
+    pub parents: Vec<Option<usize>>,
+    pub attach: Vec<Mat4>,
+}
+
+impl Rig {
+    pub fn from_hier(hier: &Hier) -> Self {
+        Rig {
+            names: hier.nodes.iter().map(|n| n.name.clone()).collect(),
+            parents: hier.nodes.iter().map(|n| n.parent).collect(),
+            attach: hier.nodes.iter().map(|n| attaching_to_mat4(&n.attaching)).collect(),
+        }
+    }
+
+    pub fn find(&self, name: &str) -> Option<usize> {
+        self.names.iter().position(|n| n.eq_ignore_ascii_case(name))
+    }
+
+    /// Object-space node transforms with per-node motions applied.
+    pub fn pose(&self, motion: &[Option<NodeMotion>]) -> Vec<Mat4> {
+        let n = self.names.len();
+        let mut out: Vec<Option<Mat4>> = vec![None; n];
+        while out.iter().any(Option::is_none) {
+            let mut progress = false;
+            for i in 0..n {
+                if out[i].is_some() {
+                    continue;
+                }
+                let parent = match self.parents[i] {
+                    None => Mat4::IDENTITY,
+                    Some(p) => match out[p] {
+                        Some(m) => m,
+                        None => continue,
+                    },
+                };
+                let local = motion.get(i).copied().flatten().map_or(Mat4::IDENTITY, |m| m.matrix());
+                out[i] = Some(parent * self.attach[i] * local);
+                progress = true;
+            }
+            if !progress {
+                break;
+            }
+        }
+        out.into_iter().map(|m| m.unwrap_or(Mat4::IDENTITY)).collect()
+    }
+}
+
 /// Object-space transform of every node of a hierarchy.
 pub fn node_transforms(hier: &Hier) -> Result<Vec<Mat4>, String> {
     let mut world = vec![Mat4::IDENTITY; hier.nodes.len()];
@@ -313,16 +387,17 @@ pub fn node_transforms(hier: &Hier) -> Result<Vec<Mat4>, String> {
     Ok(world)
 }
 
-/// Bounding sphere (center, radius) of mesh data, from the vertices of LOD 0 (or LOD-less) batches.
+/// Bounding sphere (center, radius) of mesh data in its rest pose, from LOD 0 (or LOD-less) batches.
 pub fn bounds(m: &MeshData) -> (Vec3, f32) {
+    let xf = |v: &Vertex| m.node_init.get(v.node as usize).copied().unwrap_or(Mat4::IDENTITY).transform_point3(Vec3::from(v.pos));
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     let lod0 = m.batches.iter().filter(|b| b.lod.is_none_or(|(_, l)| l == 0));
     let verts = lod0.flat_map(|b| &m.indices[b.first as usize..(b.first + b.count) as usize]).map(|&i| &m.vertices[i as usize]);
     let mut any = false;
     for v in verts {
         any = true;
-        lo = lo.min(Vec3::from(v.pos));
-        hi = hi.max(Vec3::from(v.pos));
+        lo = lo.min(xf(v));
+        hi = hi.max(xf(v));
     }
     if !any {
         return (Vec3::ZERO, 1.0);

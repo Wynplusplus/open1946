@@ -10,6 +10,8 @@ use il2_vfs::Vfs;
 
 pub struct AircraftAssets {
     pub mesh: MeshData,
+    pub rig: il2_render::scene::Rig,
+    pub tracks: Vec<il2_data::anim::Track>,
     pub fm: Aircraft,
     /// `[Gear] H` and `Pitch` (degrees): parked origin height and attitude.
     pub parked: (f64, f64),
@@ -58,11 +60,18 @@ fn gear_points(hooks: &[(String, glam::Vec3)], fmd: &SectFile) -> Vec<GearPoint>
     out
 }
 
-pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, him: &str, fmd_name: &str) -> Result<AircraftAssets, String> {
+/// Loads an aircraft by runtime class name (e.g. `air.BF_109G6`).
+pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Result<AircraftAssets, String> {
+    let classes = il2_data::Classes::new(vfs, &fms.keys);
+    let info = classes.aircraft(class).ok_or_else(|| format!("aircraft class {class} not found"))?;
+    let him = info.meshes.first().ok_or("aircraft class names no model")?.clone();
+    let fmd_name = info.flight_model.as_str();
+    let tracks = classes.animations(class);
     let mut loader = Loader::new(vfs);
     loader.season = Some("summer".into());
-    let mut mesh = loader.load_hier(him, false)?;
-    let hooks = loader.hier_hooks(him)?;
+    let mut mesh = loader.load_hier(&him, false)?;
+    let rig = loader.hier_rig(&him)?;
+    let hooks = loader.hier_hooks(&him)?;
     mesh.textures = loader.take_images();
     let fmd = fms.sect_file(fmd_name).map_err(|e| e.to_string())?;
     let gear = gear_points(&hooks, &fmd);
@@ -70,7 +79,28 @@ pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, him: &str, fmd_nam
     let num = |k: &str, d: f64| {
         fmd.section_ci("Gear").and_then(|s| s.get_ci(k)).and_then(il2_formats::sectfile::atof).map_or(d, f64::from)
     };
-    Ok(AircraftAssets { mesh, fm, parked: (num("H", 2.0), num("Pitch", 10.0)) })
+    Ok(AircraftAssets { mesh, rig, tracks, fm, parked: (num("H", 2.0), num("Pitch", 10.0)) })
+}
+
+/// Node transforms for the current control positions (`docs/behavior/animation.md`).
+pub fn pose(a: &AircraftAssets, ct: &il2_fm::Inputs) -> Vec<glam::Mat4> {
+    use il2_data::anim::Channel;
+    let mut motion: Vec<Option<il2_render::scene::NodeMotion>> = vec![None; a.rig.names.len()];
+    for t in &a.tracks {
+        let x = match t.channel {
+            Channel::Rudder => ct.rudder,
+            Channel::Elevator => ct.elevator,
+            Channel::Aileron => ct.aileron,
+            Channel::Flaps => ct.flaps,
+            Channel::Gear => ct.gear,
+        } as f32;
+        for (name, st) in t.eval(x) {
+            if let Some(i) = a.rig.find(name) {
+                motion[i] = Some(il2_render::scene::NodeMotion { angles: st.angles, offset: st.offset });
+            }
+        }
+    }
+    a.rig.pose(&motion)
 }
 
 /// Runway ends of a map (from the `.static` files listed in its `load.ini`).

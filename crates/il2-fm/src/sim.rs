@@ -14,6 +14,8 @@ pub struct Inputs {
     pub throttle: f64,
     pub flaps: f64,
     pub brakes: f64,
+    /// Gear lever: 1 = down, 0 = up.
+    pub gear: f64,
 }
 
 /// Ground height query in world coordinates.
@@ -76,7 +78,7 @@ impl Sim {
             ori,
             w: DVec3::ZERO,
             fuel,
-            ct: Inputs::default(),
+            ct: Inputs { gear: 1.0, ..Default::default() },
             wing,
             fusel: Polar::fixed(0.02, 0.2, 17.0, 0.0),
             tail: Polar::fixed(0.085, 1.1, 17.0, 0.02),
@@ -112,6 +114,8 @@ impl Sim {
         self.ct.throttle = approach(self.ct.throttle, input.throttle, 1.0, dt);
         self.ct.flaps = approach(self.ct.flaps, input.flaps, 0.2, dt);
         self.ct.brakes = input.brakes;
+        // OpenIL2 simplification: gear travels in about 6 s.
+        self.ct.gear = approach(self.ct.gear, input.gear, 1.0 / 6.0, dt);
         self.wing.set_flaps(self.ct.flaps);
 
         let ac = &self.ac;
@@ -338,7 +342,11 @@ impl Sim {
         let c_wheel = 2.0 * 0.6 * (k_wheel * mass / wheels).sqrt();
         let (mut f_body, mut m_body, mut contact) = (DVec3::ZERO, DVec3::ZERO, false);
         let fwd_w = self.ori * DVec3::X;
+        let gear_down = self.ct.gear > 0.98;
         for g in &self.ac.gear {
+            if g.kind != ContactKind::Body && !gear_down {
+                continue;
+            }
             let pw = self.pos + self.ori * g.pos;
             let gz = ground.height(pw.x, pw.y);
             let depth = gz - pw.z;

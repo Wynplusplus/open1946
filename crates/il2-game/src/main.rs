@@ -24,10 +24,9 @@ struct Args {
     root: PathBuf,
     #[arg(long, default_value = "maps/Slovakia/load.ini")]
     map: String,
-    #[arg(long, default_value = "3DO/Plane/Bf-109G-6Early/hier.him")]
-    model: String,
-    #[arg(long, default_value = "FlightModels/Bf-109G-6Early.fmd")]
-    fmd: String,
+    /// Aircraft class, as in missions.
+    #[arg(long, default_value = "air.BF_109G6")]
+    aircraft: String,
     /// Mission file (e.g. Missions/Single/SK/Bf-109F-4/Bf-109F-4_1.mis); sets map, aircraft and start.
     #[arg(long)]
     mission: Option<String>,
@@ -42,6 +41,12 @@ struct Args {
     screenshot: Option<PathBuf>,
     #[arg(long, default_value_t = 3.0)]
     seconds: f64,
+    /// Screenshot: orbit camera "yaw,pitch,distance" (degrees relative to the aircraft heading, metres).
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+    orbit: Option<Vec<f64>>,
+    /// Screenshot: hold these inputs (aileron, elevator, rudder, flaps, gear).
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+    hold: Option<Vec<f64>>,
 }
 
 /// Chase-camera view-projection and the eye position (scene is drawn relative to the eye).
@@ -63,6 +68,7 @@ fn place(r: &Renderer, terrain: &GpuMesh, plane: &GpuMesh, s: &Sim, eye: DVec3) 
 
 struct Game {
     sim: Sim,
+    assets: world::AircraftAssets,
     field: HeightField,
     terrain_data: Option<il2_render::MeshData>,
     plane_data: Option<il2_render::MeshData>,
@@ -141,6 +147,7 @@ impl Game {
         let s = &self.sim;
         let (vp, eye) = chase_camera(s, field, r.aspect());
         place(r, terrain, plane, s, eye);
+        r.set_nodes(plane, &world::pose(&self.assets, &s.ct));
         r.render(vp, 22.0, &[terrain, plane]);
 
         self.title_timer -= dt;
@@ -148,12 +155,13 @@ impl Game {
             self.title_timer = 0.25;
             let agl = s.pos.z - field.height_at(s.pos.x, s.pos.y);
             r.window.as_ref().unwrap().set_title(&format!(
-                "OpenIL2 | IAS {:4.0} km/h | ALT {:5.0} m (AGL {:5.0}) | THR {:3.0}% | FLAPS {:3.0}% | AoA {:5.1}{}",
+                "OpenIL2 | IAS {:4.0} km/h | ALT {:5.0} m (AGL {:5.0}) | THR {:3.0}% | FLAPS {:3.0}% | GEAR {} | AoA {:5.1}{}",
                 s.ias * 3.6,
                 s.pos.z,
                 agl,
                 s.ct.throttle * 100.0,
                 s.ct.flaps * 100.0,
+                if s.ct.gear > 0.98 { "DOWN" } else if s.ct.gear < 0.02 { "UP" } else { "MOVING" },
                 s.aoa,
                 if s.on_ground { " | GROUND" } else { "" }
             ));
@@ -191,6 +199,7 @@ impl ApplicationHandler for Game {
                             KeyCode::Escape => el.exit(),
                             KeyCode::KeyF => self.inputs.flaps = (self.inputs.flaps + 1.0 / 3.0).min(1.0),
                             KeyCode::KeyV => self.inputs.flaps = (self.inputs.flaps - 1.0 / 3.0).max(0.0),
+                            KeyCode::KeyG => self.inputs.gear = if self.inputs.gear > 0.5 { 0.0 } else { 1.0 },
                             KeyCode::Digit0 => self.inputs.throttle = 1.0,
                             KeyCode::Digit1 => self.inputs.throttle = 0.0,
                             c @ (KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6
@@ -265,7 +274,7 @@ fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
         let was_on_ground = sim.on_ground;
         sim.tick(&inputs, &ground);
         t += TICK;
-        if std::env::var_os("IL2_TRACE").is_some() && (t / TICK).round() as usize % 33 == 0 {
+        if std::env::var_os("IL2_TRACE").is_some() && ((t / TICK).round() as usize).is_multiple_of(33) {
             eprintln!(
                 "t={t:5.1} v={kmh:5.0} yaw_err={:6.1} wz={:6.2} rud={:5.2} pitch={:5.1} gnd={} agl={:5.2}",
                 yaw_err.asin().to_degrees(), sim.w.z, inputs.rudder,
@@ -314,12 +323,8 @@ fn main() {
     if let Some(path) = &args.mission {
         let m = il2_formats::mission::Mission::parse(&vfs.read(path).unwrap_or_else(|e| fail(e)));
         let wing = m.player().unwrap_or_else(|| fail("mission has no player flight"));
-        let class = il2_data::Classes::new(&vfs, &fms.keys)
-            .aircraft(&wing.class)
-            .unwrap_or_else(|| fail(format!("aircraft class {} not found", wing.class)));
         args.map = format!("maps/{}", m.map);
-        args.fmd = class.flight_model;
-        args.model = class.meshes.first().cloned().unwrap_or_else(|| fail("aircraft class names no model"));
+        args.aircraft = wing.class.clone();
         fuel = wing.fuel_percent / 100.0;
         eprintln!("mission: {} on {}, flight {} ({} x {})", path, m.map, wing.name, wing.planes, wing.class);
         let ends = world::load_runways(&vfs, &args.map);
@@ -339,12 +344,13 @@ fn main() {
             };
         }
     }
-    let assets = world::load_aircraft(&vfs, &fms, &args.model, &args.fmd).unwrap_or_else(|e| fail(e));
+    let assets = world::load_aircraft(&vfs, &fms, &args.aircraft).unwrap_or_else(|e| fail(e));
+    let fmd_name = il2_data::Classes::new(&vfs, &fms.keys).aircraft(&args.aircraft).map(|c| c.flight_model).unwrap_or_default();
     let field = world::load_heights(&vfs, &args.map).unwrap_or_else(|e| fail(e));
     eprintln!("gear contact points: {:?}", assets.fm.gear.iter().map(|g| g.pos).collect::<Vec<_>>());
 
     if args.test && !matches!(start, Start::Takeoff { .. }) {
-        let fmd = fms.sect_file(&args.fmd).unwrap_or_else(|e| fail(e));
+        let fmd = fms.sect_file(&fmd_name).unwrap_or_else(|e| fail(e));
         let p = |k: &str| fmd.get("Params", k).unwrap_or("?").to_owned();
         for alt in [500.0, 3000.0, p("HofVmax").parse().unwrap_or(6000.0)] {
             let sim = world::spawn_airborne(assets.fm.clone(), &field, 0.0, 120.0);
@@ -364,15 +370,18 @@ fn main() {
         d.textures = loader.take_images();
         d
     };
-    let plane_mesh = assets.mesh;
+    let mut assets = assets;
+    let plane_mesh = std::mem::take(&mut assets.mesh);
     let (h, pitch) = assets.parked;
     let mut sim = match start {
-        Start::Takeoff { x, y, heading } => world::spawn_on_ground(assets.fm, &field, x, y, heading, h, pitch),
-        Start::Air { pos, toward, speed } => world::spawn_at(assets.fm, pos, toward, speed),
-        Start::Default => world::spawn_airborne(assets.fm, &field, args.agl, 110.0),
+        Start::Takeoff { x, y, heading } => world::spawn_on_ground(assets.fm.clone(), &field, x, y, heading, h, pitch),
+        Start::Air { pos, toward, speed } => world::spawn_at(assets.fm.clone(), pos, toward, speed),
+        Start::Default => world::spawn_airborne(assets.fm.clone(), &field, args.agl, 110.0),
     };
     sim.fuel *= fuel;
     let on_ground_start = matches!(start, Start::Takeoff { .. });
+    let gear0 = if on_ground_start { 1.0 } else { 0.0 };
+    sim.ct.gear = gear0;
     let throttle0 = if on_ground_start { 0.0 } else { 0.8 };
     sim.ct.throttle = throttle0;
     if args.test && on_ground_start {
@@ -381,7 +390,16 @@ fn main() {
     }
 
     if let Some(out) = &args.screenshot {
-        let inputs = Inputs { throttle: throttle0, ..Default::default() };
+        let mut inputs = Inputs { throttle: throttle0, gear: gear0, ..Default::default() };
+        if let Some(h) = &args.hold {
+            let g = |i: usize, d: f64| h.get(i).copied().unwrap_or(d);
+            inputs.aileron = g(0, 0.0);
+            inputs.elevator = g(1, 0.0);
+            inputs.rudder = g(2, 0.0);
+            inputs.flaps = g(3, 0.0);
+            inputs.gear = g(4, gear0);
+            sim.ct = inputs;
+        }
         let ground = |x: f64, y: f64| field.height_at(x, y);
         for _ in 0..(args.seconds / TICK) as usize {
             sim.tick(&inputs, &ground);
@@ -389,14 +407,34 @@ fn main() {
         let (w, h) = (1280, 720);
         let r = Renderer::headless(w, h);
         let (terrain, plane) = (r.upload(&terrain), r.upload(&plane_mesh));
-        let (vp, eye) = chase_camera(&sim, &field, w as f32 / h as f32);
+        let (mut vp, mut eye) = chase_camera(&sim, &field, w as f32 / h as f32);
+        if let Some(o) = &args.orbit {
+            let fwd = sim.ori * DVec3::X;
+            let heading = fwd.y.atan2(fwd.x);
+            let (yaw, pitch, dist) = (heading + o[0].to_radians(), o.get(1).copied().unwrap_or(15.0).to_radians(), o.get(2).copied().unwrap_or(12.0));
+            eye = sim.pos + DVec3::new(yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin()) * dist;
+            let view = DMat4::look_at_rh(DVec3::ZERO, sim.pos - eye, DVec3::Z);
+            vp = Mat4::perspective_rh(45f32.to_radians(), w as f32 / h as f32, 0.2, 150_000.0) * view.as_mat4();
+        }
         place(&r, &terrain, &plane, &sim, eye);
+        let posed = world::pose(&assets, &sim.ct);
+        if std::env::var_os("IL2_TRACE").is_some() {
+            let rest = assets.rig.pose(&[]);
+            for (i, (a, b)) in posed.iter().zip(&rest).enumerate() {
+                if !a.abs_diff_eq(*b, 1e-4) {
+                    eprintln!("animated node {}", assets.rig.names[i]);
+                }
+            }
+            eprintln!("ct: {:?}", sim.ct);
+        }
+        r.set_nodes(&plane, &posed);
         let px = r.screenshot(vp, 22.0, &[&terrain, &plane]);
         image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).unwrap_or_else(|e| fail(e));
         return;
     }
     let mut game = Game {
-        inputs: Inputs { throttle: throttle0, ..Default::default() },
+        inputs: Inputs { throttle: throttle0, gear: gear0, ..Default::default() },
+        assets,
         sim,
         field,
         terrain_data: Some(terrain),
