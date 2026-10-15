@@ -14,6 +14,21 @@ pub struct Vertex {
     pub uv: [f32; 2],
 }
 
+#[cfg(test)]
+mod tests {
+    use super::select_lod;
+
+    #[test]
+    fn lod_selection() {
+        let l = [40.0, 100.0, 250.0];
+        assert_eq!(select_lod(&l, 10.0), Some(0));
+        assert_eq!(select_lod(&l, 40.0), Some(1));
+        assert_eq!(select_lod(&l, 249.0), Some(2));
+        assert_eq!(select_lod(&l, 300.0), None);
+        assert_eq!(select_lod(&[], 1e6), Some(0));
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
@@ -42,14 +57,46 @@ pub struct Batch {
     pub texture: usize,
     /// Alpha-test cutoff; 0 disables the test.
     pub alpha_cutoff: f32,
+    pub blend: BlendMode,
+    /// Pull the surface towards the camera so decals win over coplanar skin.
+    pub depth_offset: bool,
+    /// `(LOD group, level)`; the batch is drawn only when that level is selected for the group.
+    pub lod: Option<(u32, u8)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Opaque,
+    Alpha,
+    Additive,
+}
+
+impl BlendMode {
+    const ALL: [BlendMode; 3] = [BlendMode::Opaque, BlendMode::Alpha, BlendMode::Additive];
+
+    fn index(self) -> usize {
+        self as usize
+    }
 }
 
 /// CPU-side mesh ready for upload.
+#[derive(Default)]
 pub struct MeshData {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub batches: Vec<Batch>,
     pub textures: Vec<Image>,
+    /// Per LOD group, the distance up to which each level is used.
+    pub lod_distances: Vec<Vec<f32>>,
+}
+
+/// Level used at `distance`: the first whose limit is beyond it; `None` past the last (culled).
+pub fn select_lod(limits: &[f32], distance: f32) -> Option<u8> {
+    if limits.is_empty() {
+        return Some(0);
+    }
+    limits.iter().position(|&l| distance < l).map(|i| i as u8)
 }
 
 pub struct GpuMesh {
@@ -58,6 +105,7 @@ pub struct GpuMesh {
     /// Batches with the index of their bind group in `materials`.
     batches: Vec<(Batch, usize)>,
     materials: Vec<wgpu::BindGroup>,
+    lod_distances: Vec<Vec<f32>>,
     /// Per-mesh model transform (identity for now; used once objects move).
     _instance: wgpu::Buffer,
     instance_bg: wgpu::BindGroup,
@@ -70,7 +118,8 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     depth: wgpu::TextureView,
-    pipeline: wgpu::RenderPipeline,
+    /// Indexed by `BlendMode::index() * 2 + depth_offset`.
+    pipelines: Vec<wgpu::RenderPipeline>,
     globals: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
     instance_layout: wgpu::BindGroupLayout,
@@ -208,37 +257,62 @@ impl Renderer {
             bind_group_layouts: &[Some(&globals_layout), Some(&instance_layout), Some(&texture_layout)],
             ..Default::default()
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("main"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
-                })],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(config.format.into())],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let mut pipelines = Vec::new();
+        for mode in BlendMode::ALL {
+            for offset in [false, true] {
+                let blend = match mode {
+                    BlendMode::Opaque => None,
+                    BlendMode::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
+                    BlendMode::Additive => Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                };
+                pipelines.push(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("main"),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[Some(wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<Vertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                        })],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: config.format,
+                            blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(mode == BlendMode::Opaque),
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        stencil: Default::default(),
+                        bias: if offset {
+                            wgpu::DepthBiasState { constant: -2, slope_scale: -1.0, clamp: 0.0 }
+                        } else {
+                            Default::default()
+                        },
+                    }),
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                }));
+            }
+        }
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
@@ -253,7 +327,7 @@ impl Renderer {
             queue,
             config,
             depth,
-            pipeline,
+            pipelines,
             globals,
             globals_bg,
             instance_layout,
@@ -298,10 +372,10 @@ impl Renderer {
         tex.create_view(&Default::default())
     }
 
-    fn material_bind_group(&self, view: &wgpu::TextureView, alpha_cutoff: f32) -> wgpu::BindGroup {
+    fn material_bind_group(&self, view: &wgpu::TextureView, alpha_cutoff: f32, blended: bool) -> wgpu::BindGroup {
         let params = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material"),
-            contents: bytemuck::cast_slice(&[alpha_cutoff, 0.0, 0.0, 0.0]),
+            contents: bytemuck::cast_slice(&[alpha_cutoff, blended as u32 as f32, 0.0, 0.0]),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -337,25 +411,26 @@ impl Renderer {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: instance.as_entire_binding() }],
         });
         let views: Vec<wgpu::TextureView> = mesh.textures.iter().map(|t| self.upload_texture(t)).collect();
-        let mut keys: Vec<(usize, u32)> = Vec::new();
+        let mut keys: Vec<(usize, u32, bool)> = Vec::new();
         let mut materials = Vec::new();
         let batches = mesh
             .batches
             .iter()
             .map(|b| {
-                let key = (b.texture, b.alpha_cutoff.to_bits());
+                let blended = b.blend != BlendMode::Opaque;
+                let key = (b.texture, b.alpha_cutoff.to_bits(), blended);
                 let idx = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
                     keys.push(key);
-                    materials.push(self.material_bind_group(&views[b.texture], b.alpha_cutoff));
+                    materials.push(self.material_bind_group(&views[b.texture], b.alpha_cutoff, blended));
                     keys.len() - 1
                 });
                 (*b, idx)
             })
             .collect();
-        GpuMesh { vbuf, ibuf, batches, materials, _instance: instance, instance_bg }
+        GpuMesh { vbuf, ibuf, batches, materials, lod_distances: mesh.lod_distances.clone(), _instance: instance, instance_bg }
     }
 
-    fn draw(&self, target: &wgpu::TextureView, view_proj: Mat4, meshes: &[&GpuMesh]) -> wgpu::CommandEncoder {
+    fn draw(&self, target: &wgpu::TextureView, view_proj: Mat4, distance: f32, meshes: &[&GpuMesh]) -> wgpu::CommandEncoder {
         let light = Vec3::new(-0.4, -0.3, -1.0).normalize();
         let g = Globals { view_proj: view_proj.to_cols_array_2d(), light_dir: [light.x, light.y, light.z, 0.0] };
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
@@ -379,22 +454,33 @@ impl Renderer {
                 }),
                 ..Default::default()
             });
-            pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.globals_bg, &[]);
-            for m in meshes {
-                pass.set_bind_group(1, &m.instance_bg, &[]);
-                pass.set_vertex_buffer(0, m.vbuf.slice(..));
-                pass.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                for (b, mat) in &m.batches {
-                    pass.set_bind_group(2, &m.materials[*mat], &[]);
-                    pass.draw_indexed(b.first..b.first + b.count, 0, 0..1);
+            // Opaque geometry first, then blended surfaces on top without depth writes.
+            for opaque_pass in [true, false] {
+                for m in meshes {
+                    pass.set_bind_group(1, &m.instance_bg, &[]);
+                    pass.set_vertex_buffer(0, m.vbuf.slice(..));
+                    pass.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    for (b, mat) in &m.batches {
+                        if (b.blend == BlendMode::Opaque) != opaque_pass {
+                            continue;
+                        }
+                        if let Some((g, level)) = b.lod {
+                            if select_lod(&m.lod_distances[g as usize], distance) != Some(level) {
+                                continue;
+                            }
+                        }
+                        pass.set_pipeline(&self.pipelines[b.blend.index() * 2 + b.depth_offset as usize]);
+                        pass.set_bind_group(2, &m.materials[*mat], &[]);
+                        pass.draw_indexed(b.first..b.first + b.count, 0, 0..1);
+                    }
                 }
             }
         }
         enc
     }
 
-    pub fn render(&mut self, view_proj: Mat4, meshes: &[&GpuMesh]) {
+    pub fn render(&mut self, view_proj: Mat4, distance: f32, meshes: &[&GpuMesh]) {
         let Some(surface) = &self.surface else { return };
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -404,7 +490,7 @@ impl Renderer {
             }
         };
         let view = frame.texture.create_view(&Default::default());
-        let enc = self.draw(&view, view_proj, meshes);
+        let enc = self.draw(&view, view_proj, distance, meshes);
         self.queue.submit([enc.finish()]);
         if let Some(w) = &self.window {
             w.pre_present_notify();
@@ -413,7 +499,7 @@ impl Renderer {
     }
 
     /// Renders one frame offscreen and returns tightly packed RGBA8 pixels.
-    pub fn screenshot(&self, view_proj: Mat4, meshes: &[&GpuMesh]) -> Vec<u8> {
+    pub fn screenshot(&self, view_proj: Mat4, distance: f32, meshes: &[&GpuMesh]) -> Vec<u8> {
         let (w, h) = (self.config.width, self.config.height);
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("screenshot"),
@@ -426,7 +512,7 @@ impl Renderer {
             view_formats: &[],
         });
         let view = tex.create_view(&Default::default());
-        let mut enc = self.draw(&view, view_proj, meshes);
+        let mut enc = self.draw(&view, view_proj, distance, meshes);
         let row = (w * 4).div_ceil(256) * 256;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),

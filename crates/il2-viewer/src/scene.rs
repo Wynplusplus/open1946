@@ -1,6 +1,6 @@
 //! Loads game assets from the VFS into renderer-ready mesh data.
 
-use crate::render::{Batch, Image, MeshData, Vertex};
+use crate::render::{Batch, BlendMode, Image, MeshData, Vertex};
 use glam::{Mat4, Vec3, Vec4};
 use il2_formats::{him::Hier, mat::{MatFile, Material}, msh::Mesh};
 use il2_vfs::Vfs;
@@ -20,6 +20,15 @@ pub fn attaching_to_mat4(m: &[f32; 12]) -> Mat4 {
     )
 }
 
+/// What the renderer needs from a resolved material.
+#[derive(Clone, Copy)]
+struct MatInfo {
+    texture: usize,
+    alpha_cutoff: f32,
+    blend: BlendMode,
+    depth_offset: bool,
+}
+
 /// Decodes IMF (by magic) or a standard image format (by extension, TGA by default).
 pub fn decode_image(d: &[u8], path: &str) -> Result<Image, String> {
     if il2_formats::imf::is_imf(d) {
@@ -27,7 +36,13 @@ pub fn decode_image(d: &[u8], path: &str) -> Result<Image, String> {
         return Ok(Image { width: img.width, height: img.height, rgba: img.pixels });
     }
     let fmt = image::ImageFormat::from_path(path).unwrap_or(image::ImageFormat::Tga);
-    let img = image::load_from_memory_with_format(d, fmt).map_err(|e| e.to_string())?.to_rgba8();
+    let img = image::load_from_memory_with_format(d, fmt).map_err(|e| e.to_string())?;
+    // One-channel images are alpha-only in the engine (docs/formats/mat.md).
+    if let image::DynamicImage::ImageLuma8(g) = &img {
+        let rgba = g.as_raw().iter().flat_map(|&a| [255, 255, 255, a]).collect();
+        return Ok(Image { width: g.width(), height: g.height(), rgba });
+    }
+    let img = img.to_rgba8();
     Ok(Image { width: img.width(), height: img.height(), rgba: img.into_raw() })
 }
 
@@ -37,8 +52,7 @@ pub struct Loader<'a> {
     pub season: Option<String>,
     textures: HashMap<String, usize>,
     images: Vec<Image>,
-    /// Material path -> (texture index, alpha cutoff).
-    materials: HashMap<String, Option<(usize, f32)>>,
+    materials: HashMap<String, Option<MatInfo>>,
     pub warnings: Vec<String>,
 }
 
@@ -74,7 +88,7 @@ impl<'a> Loader<'a> {
     }
 
     /// Resolves a material (with its `BasedOn` chain) to the texture and alpha test of its first layer.
-    fn material(&mut self, path: &str) -> Option<(usize, f32)> {
+    fn material(&mut self, path: &str) -> Option<MatInfo> {
         let key = path.to_ascii_lowercase();
         if let Some(&t) = self.materials.get(&key) {
             return t;
@@ -100,36 +114,65 @@ impl<'a> Loader<'a> {
             let chain: Vec<&MatFile> = files.iter().map(|(_, m)| m).collect();
             let mat = Material::resolve(&chain);
             // Textures are relative to the material that names them; approximate with the leaf's dir.
-            mat.layers.first().and_then(|l| Some((l.texture.clone()?, l.alpha_test.unwrap_or(0.0)))).map(|(t, cutoff)| {
-                let p = format!("{}{}", dir_of(path), t);
-                (self.texture(&p), cutoff)
+            mat.layers.first().and_then(|l| {
+                let p = format!("{}{}", dir_of(path), l.texture.as_ref()?);
+                Some(MatInfo {
+                    texture: self.texture(&p),
+                    alpha_cutoff: l.alpha_test.unwrap_or(0.0),
+                    blend: if l.blend_add {
+                        BlendMode::Additive
+                    } else if l.blend {
+                        BlendMode::Alpha
+                    } else {
+                        BlendMode::Opaque
+                    },
+                    depth_offset: l.depth_offset,
+                })
             })
         };
         self.materials.insert(key, tex);
         tex
     }
 
-    /// Appends LOD 0 of a mesh, transformed by `xf`.
+    /// Appends all LODs of a mesh, transformed by `xf`, as one LOD group.
     pub fn add_mesh(&mut self, out: &mut MeshData, msh_path: &str, xf: Mat4) -> Result<(), String> {
         let data = self.vfs.read(msh_path).map_err(|e| e.to_string())?;
         let mesh = Mesh::parse(&data).map_err(|e| e.to_string())?;
-        let lod = &mesh.lods[0];
         let dir = dir_of(msh_path).to_owned();
-        let base = out.vertices.len() as u32;
+        let group = out.lod_distances.len() as u32;
+        let lods = if mesh.lods.len() > 1 { &mesh.lods[..] } else { &mesh.lods[..1] };
+        // Single-LOD meshes still honor their visibility limit, if any.
+        out.lod_distances.push(mesh.lod_distances.iter().take(lods.len()).copied().collect());
         let nxf = xf.inverse().transpose();
-        for i in 0..lod.positions.len() {
-            let p = xf.transform_point3(Vec3::from(lod.positions[i]));
-            let n = nxf.transform_vector3(Vec3::from(lod.normals[i])).normalize_or_zero();
-            out.vertices.push(Vertex { pos: p.into(), normal: n.into(), uv: lod.uvs[i] });
-        }
-        for g in &lod.groups {
-            let mat_name = lod.materials.get(g.material).cloned().unwrap_or_default();
-            let (tex, alpha_cutoff) = self.material(&format!("{dir}{mat_name}.mat")).unwrap_or((0, 0.0));
-            let first = out.indices.len() as u32;
-            for f in &lod.faces[g.start_face as usize..(g.start_face + g.face_count) as usize] {
-                out.indices.extend(f.iter().map(|&i| base + i));
+        for (level, lod) in lods.iter().enumerate() {
+            let base = out.vertices.len() as u32;
+            for i in 0..lod.positions.len() {
+                let p = xf.transform_point3(Vec3::from(lod.positions[i]));
+                let n = nxf.transform_vector3(Vec3::from(lod.normals[i])).normalize_or_zero();
+                out.vertices.push(Vertex { pos: p.into(), normal: n.into(), uv: lod.uvs[i] });
             }
-            out.batches.push(Batch { first, count: out.indices.len() as u32 - first, texture: tex, alpha_cutoff });
+            for g in &lod.groups {
+                let mat_name = lod.materials.get(g.material).cloned().unwrap_or_default();
+                let info = self.material(&format!("{dir}{mat_name}.mat")).unwrap_or(MatInfo {
+                    texture: 0,
+                    alpha_cutoff: 0.0,
+                    blend: BlendMode::Opaque,
+                    depth_offset: false,
+                });
+                let first = out.indices.len() as u32;
+                for f in &lod.faces[g.start_face as usize..(g.start_face + g.face_count) as usize] {
+                    out.indices.extend(f.iter().map(|&i| base + i));
+                }
+                out.batches.push(Batch {
+                    first,
+                    count: out.indices.len() as u32 - first,
+                    texture: info.texture,
+                    alpha_cutoff: info.alpha_cutoff,
+                    blend: info.blend,
+                    depth_offset: info.depth_offset,
+                    lod: Some((group, level as u8)),
+                });
+            }
         }
         Ok(())
     }
@@ -163,7 +206,7 @@ impl<'a> Loader<'a> {
                 return Err("cycle in hierarchy".into());
             }
         }
-        let mut out = MeshData { vertices: Vec::new(), indices: Vec::new(), batches: Vec::new(), textures: Vec::new() };
+        let mut out = MeshData::default();
         for (i, n) in hier.nodes.iter().enumerate() {
             let Some(mesh) = &n.mesh else { continue };
             if !visible[i] {
@@ -225,21 +268,33 @@ impl Loader<'_> {
         Ok(MeshData {
             vertices,
             indices,
-            batches: vec![Batch { first: 0, count, texture, alpha_cutoff: 0.0 }],
-            textures: Vec::new(),
+            batches: vec![Batch {
+                first: 0,
+                count,
+                texture,
+                alpha_cutoff: 0.0,
+                blend: BlendMode::Opaque,
+                depth_offset: false,
+                lod: None,
+            }],
+            ..Default::default()
         })
     }
 }
 
-/// Bounding sphere (center, radius) of mesh data.
+/// Bounding sphere (center, radius) of mesh data, from the vertices of LOD 0 (or LOD-less) batches.
 pub fn bounds(m: &MeshData) -> (Vec3, f32) {
-    if m.vertices.is_empty() {
-        return (Vec3::ZERO, 1.0);
-    }
     let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-    for v in &m.vertices {
+    let lod0 = m.batches.iter().filter(|b| b.lod.is_none_or(|(_, l)| l == 0));
+    let verts = lod0.flat_map(|b| &m.indices[b.first as usize..(b.first + b.count) as usize]).map(|&i| &m.vertices[i as usize]);
+    let mut any = false;
+    for v in verts {
+        any = true;
         lo = lo.min(Vec3::from(v.pos));
         hi = hi.max(Vec3::from(v.pos));
+    }
+    if !any {
+        return (Vec3::ZERO, 1.0);
     }
     ((lo + hi) * 0.5, ((hi - lo) * 0.5).length().max(0.01))
 }

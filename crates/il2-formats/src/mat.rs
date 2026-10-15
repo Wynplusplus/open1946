@@ -10,6 +10,7 @@ pub struct Layer {
     pub blend: bool,
     pub blend_add: bool,
     pub no_write_z: bool,
+    pub depth_offset: bool,
     pub color_scale: [f32; 4],
     pub tex_coord_scale: [f32; 4],
 }
@@ -79,6 +80,8 @@ impl Material {
                     blend: flag(chain, &s, "tfBlend").unwrap_or(false),
                     blend_add: flag(chain, &s, "tfBlendAdd").unwrap_or(false),
                     no_write_z: flag(chain, &s, "tfNoWriteZ").unwrap_or(false),
+                    depth_offset: flag(chain, &s, "tfDepthOffset").unwrap_or(false)
+                        || flag(chain, "General", "tfDepthOffset").unwrap_or(false),
                     color_scale: vec4(chain, &s, "ColorScale", [1.0; 4]),
                     tex_coord_scale: vec4(chain, &s, "TextureCoordScale", [0.0, 0.0, 1.0, 1.0]),
                 }

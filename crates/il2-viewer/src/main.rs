@@ -99,7 +99,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let vp = self.camera.view_proj(r.aspect());
                 let meshes: Vec<&GpuMesh> = self.meshes.iter().collect();
-                r.render(vp, &meshes);
+                r.render(vp, self.camera.distance, &meshes);
             }
             _ => {}
         }
@@ -116,7 +116,7 @@ fn load(args: &Args) -> Result<MeshData, String> {
     } else if lower.ends_with(".ini") {
         loader.load_map(&args.path)?
     } else {
-        let mut d = MeshData { vertices: Vec::new(), indices: Vec::new(), batches: Vec::new(), textures: Vec::new() };
+        let mut d = MeshData::default();
         loader.add_mesh(&mut d, &args.path, glam::Mat4::IDENTITY)?;
         d
     };
@@ -152,7 +152,7 @@ fn main() {
         camera.target = glam::Vec3::new(t[0], t[1], t[2]);
     }
     eprintln!(
-        "{}: {} vertices, {} triangles, {} textures, radius {radius:.2} m",
+        "{}: {} vertices, {} triangles (all LODs), {} textures, radius {radius:.2} m",
         args.path,
         data.vertices.len(),
         data.indices.len() / 3,
@@ -163,7 +163,7 @@ fn main() {
         let (w, h) = (1280, 720);
         let r = Renderer::headless(w, h);
         let mesh = r.upload(&data);
-        let px = r.screenshot(camera.view_proj(w as f32 / h as f32), &[&mesh]);
+        let px = r.screenshot(camera.view_proj(w as f32 / h as f32), camera.distance, &[&mesh]);
         image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).expect("save screenshot");
         return;
     }

@@ -12,7 +12,7 @@ struct Instance {
 @group(2) @binding(0) var tex: texture_2d<f32>;
 @group(2) @binding(1) var samp: sampler;
 struct MaterialParams {
-    // x: alpha-test cutoff (0 disables the test)
+    // x: alpha-test cutoff (0 disables the test), y: 1 for blended surfaces
     params: vec4<f32>,
 };
 @group(2) @binding(2) var<uniform> material: MaterialParams;
@@ -43,5 +43,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);
     if (material.params.x > 0.0 && c.a < material.params.x) { discard; }
     let lambert = max(dot(normalize(i.normal), -globals.light_dir.xyz), 0.0);
-    return vec4<f32>(c.rgb * (0.35 + 0.65 * lambert), 1.0);
+    // Opaque surfaces must write alpha 1: skin alpha is a gloss map, not transparency.
+    let a = select(1.0, c.a, material.params.y > 0.0);
+    return vec4<f32>(c.rgb * (0.35 + 0.65 * lambert), a);
 }
