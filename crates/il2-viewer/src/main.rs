@@ -95,7 +95,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let vp = self.camera.view_proj(r.aspect());
                 let meshes: Vec<&GpuMesh> = self.meshes.iter().collect();
-                r.render(vp, self.camera.distance, &meshes);
+                r.render(vp, self.camera.distance, None, &meshes);
             }
             _ => {}
         }
@@ -159,7 +159,7 @@ fn main() {
         let (w, h) = (1280, 720);
         let r = Renderer::headless(w, h);
         let mesh = r.upload(&data);
-        let px = r.screenshot(camera.view_proj(w as f32 / h as f32), camera.distance, &[&mesh]);
+        let px = r.screenshot(camera.view_proj(w as f32 / h as f32), camera.distance, None, &[&mesh]);
         image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).expect("save screenshot");
         return;
     }

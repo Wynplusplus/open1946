@@ -1,6 +1,6 @@
 //! Loads game assets from the VFS into renderer-ready mesh data.
 
-use crate::render::{Batch, BlendMode, Image, MeshData, Vertex};
+use crate::render::{Batch, BlendMode, Image, MeshData, TerrainData, Vertex};
 use glam::{Mat4, Vec3, Vec4};
 use il2_formats::{him::Hier, mat::{MatFile, Material}, msh::Mesh};
 use il2_vfs::Vfs;
@@ -399,6 +399,80 @@ pub fn node_transforms(hier: &Hier) -> Result<Vec<Mat4>, String> {
         }
     }
     Ok(world)
+}
+
+/// Field texture slots in land-type order (`docs/formats/map.md`, "Land types").
+pub const FIELD_GROUPS: [&str; 8] = ["LowLand", "MidLand", "Mount", "Country", "City", "AirField", "Wood", "Water"];
+const FIELD_SIZE: u32 = 512;
+
+impl Loader<'_> {
+    /// Textured terrain of a map's `load.ini`.
+    pub fn load_terrain(&mut self, ini_path: &str) -> Result<TerrainData, String> {
+        let mut mesh = self.load_map(ini_path)?;
+        // The terrain shader samples land textures, not the overview image; keep a placeholder.
+        mesh.textures = vec![Image::solid([255, 255, 255, 255])];
+        for b in &mut mesh.batches {
+            b.texture = 0;
+        }
+        let ini = il2_formats::SectFile::parse(&self.vfs.read(ini_path).map_err(|e| e.to_string())?);
+        let dir = dir_of(ini_path).to_owned();
+        let value = |sect: &str, key: &str| {
+            ini.section_ci(sect)
+                .and_then(|s| s.get_ci(key))
+                .map(|v| v.trim_start_matches(['=', ' ', '\t']).trim().to_owned())
+                .filter(|v| !v.is_empty())
+        };
+        let tpath = format!("{dir}{}", value("MAP", "TypeMap").ok_or("no TypeMap")?);
+        let tdata = self.vfs.read(&tpath).map_err(|e| format!("{tpath}: {e}"))?;
+        let timg = image::load_from_memory_with_format(&tdata, image::ImageFormat::Tga).map_err(|e| format!("{tpath}: {e}"))?.to_luma8();
+        let types = (timg.width(), timg.height(), timg.into_raw());
+
+        let mut fields: Vec<Option<Image>> = Vec::with_capacity(32);
+        let mut tile = [400.0f32; 32];
+        for (g, group) in FIELD_GROUPS.iter().enumerate() {
+            for v in 0..4 {
+                let slot = g * 4 + v;
+                let entry = value("FIELDS", &format!("{group}{v}"));
+                let img = entry.as_ref().and_then(|e| {
+                    let (file, scale) = e.split_once(',').map_or((e.as_str(), None), |(f, s)| (f.trim(), s.trim().parse::<f32>().ok()));
+                    if let Some(s) = scale {
+                        tile[slot] = 400.0 * s;
+                    }
+                    let path = format!("maps/_Tex/{file}");
+                    match self.vfs.read(&path).map_err(|e| e.to_string()).and_then(|d| decode_image(&d, &path)) {
+                        Ok(img) => Some(resize(img, FIELD_SIZE)),
+                        Err(e) => {
+                            self.warnings.push(format!("field {group}{v}: {e}"));
+                            None
+                        }
+                    }
+                });
+                fields.push(img);
+            }
+        }
+        // Empty slots fall back to the first texture of their group, then to LowLand0.
+        let fallback = fields[0].clone().unwrap_or_else(|| Image::solid([90, 110, 60, 255]));
+        let fallback = resize(fallback, FIELD_SIZE);
+        let fields: Vec<Image> = (0..32)
+            .map(|i| fields[i].clone().or_else(|| fields[i / 4 * 4].clone()).unwrap_or_else(|| fallback.clone()))
+            .collect();
+        Ok(TerrainData { mesh, cell: il2_formats::map::PIXEL_SIZE, types, fields, tile })
+    }
+}
+
+fn resize(img: Image, size: u32) -> Image {
+    if img.width == size && img.height == size {
+        return img;
+    }
+    let buf = image::RgbaImage::from_raw(img.width, img.height, img.rgba).expect("image size");
+    let r = image::imageops::resize(&buf, size, size, image::imageops::FilterType::Triangle);
+    Image { width: size, height: size, rgba: r.into_raw() }
+}
+
+impl Clone for Image {
+    fn clone(&self) -> Self {
+        Image { width: self.width, height: self.height, rgba: self.rgba.clone() }
+    }
 }
 
 /// Bounding sphere (center, radius) of mesh data in its rest pose, from LOD 0 (or LOD-less) batches.

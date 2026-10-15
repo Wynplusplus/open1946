@@ -4,4 +4,4 @@ pub mod camera;
 pub mod render;
 pub mod scene;
 
-pub use render::{Batch, BlendMode, GpuMesh, Image, MeshData, Renderer, Vertex};
+pub use render::{Batch, BlendMode, GpuMesh, GpuTerrain, Image, MeshData, Renderer, TerrainData, Vertex};

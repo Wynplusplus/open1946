@@ -1,6 +1,7 @@
 struct Globals {
     view_proj: mat4x4<f32>,
     light_dir: vec4<f32>,
+    fog: vec4<f32>, // rgb, density per metre
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -29,6 +30,7 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
+    @location(2) view: vec3<f32>,
 };
 
 @vertex
@@ -39,6 +41,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.clip = globals.view_proj * world;
     o.normal = normalize((m * vec4<f32>(v.normal, 0.0)).xyz);
     o.uv = v.uv;
+    o.view = world.xyz;
     return o;
 }
 
@@ -49,5 +52,6 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let lambert = max(dot(normalize(i.normal), -globals.light_dir.xyz), 0.0);
     // Opaque surfaces must write alpha 1: skin alpha is a gloss map, not transparency.
     let a = select(1.0, c.a, material.params.y > 0.0);
-    return vec4<f32>(c.rgb * (0.35 + 0.65 * lambert), a);
+    let f = 1.0 - exp(-globals.fog.w * length(i.view));
+    return vec4<f32>(mix(c.rgb * (0.35 + 0.65 * lambert), globals.fog.rgb, f), a);
 }

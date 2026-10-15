@@ -31,3 +31,17 @@ A height-map byte `v` maps to metres through a piecewise-linear table:
 | 224–255 | `64(v − 192)` |
 
 Between pixels the engine interpolates over the two triangles of each cell.
+
+## Land types (`TypeMap`)
+One byte per height-map pixel. The low 5 bits select one of 32 field slots in the order of `[FIELDS]`:
+`LowLand0..3`, `MidLand0..3`, `Mount0..3`, `Country0..3`, `City0..3`, `AirField0..3`, `Wood0..3`, `Water0..3`.
+Slots 28–31 are water. The upper bits carry roads and rails (TODO).
+
+`[FIELDS]` values are texture paths relative to `maps/_Tex/`, optionally followed by `,N` (an integer per
+slot; OpenIL2 currently treats it as a tiling scale). Slot 0 (`LowLand0`) is required, and other slots may be empty.
+
+## OpenIL2 terrain rendering (own design, not a port)
+- Each fragment blends the textures of the four nearest cells bilinearly.
+- Textures repeat every `400 m × N`.
+- Water slots reflect the sky colour with a Fresnel term.
+- Exponential distance fog towards the horizon colour, and a sky gradient.

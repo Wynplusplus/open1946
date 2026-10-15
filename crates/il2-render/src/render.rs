@@ -36,6 +36,28 @@ mod tests {
 struct Globals {
     view_proj: [[f32; 4]; 4],
     light_dir: [f32; 4],
+    fog: [f32; 4],
+}
+
+/// Sky/fog colour (linear) and fog density per metre.
+pub const SKY: [f64; 3] = [0.42, 0.55, 0.70];
+pub const FOG_DENSITY: f32 = 1.0 / 45_000.0;
+
+/// CPU-side terrain: a grid mesh in world coordinates plus land-type data.
+pub struct TerrainData {
+    pub mesh: MeshData,
+    pub cell: f32,
+    /// Land-type bytes, row 0 at the north edge.
+    pub types: (u32, u32, Vec<u8>),
+    /// 32 field textures (same size), indexed by land-type slot.
+    pub fields: Vec<Image>,
+    /// Repeat length in metres per slot.
+    pub tile: [f32; 32],
+}
+
+pub struct GpuTerrain {
+    pub mesh: GpuMesh,
+    bind: wgpu::BindGroup,
 }
 
 /// RGBA8 image, top row first.
@@ -128,6 +150,9 @@ pub struct Renderer {
     depth: wgpu::TextureView,
     /// Indexed by `BlendMode::index() * 2 + depth_offset`.
     pipelines: Vec<wgpu::RenderPipeline>,
+    terrain_pipeline: wgpu::RenderPipeline,
+    sky_pipeline: wgpu::RenderPipeline,
+    terrain_layout: wgpu::BindGroupLayout,
     globals: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
     instance_layout: wgpu::BindGroupLayout,
@@ -334,11 +359,119 @@ impl Renderer {
                 }));
             }
         }
+        let terrain_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("terrain"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let terrain_shader = device.create_shader_module(wgpu::include_wgsl!("terrain.wgsl"));
+        let terrain_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("terrain"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&instance_layout), Some(&terrain_layout)],
+            ..Default::default()
+        });
+        let terrain_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("terrain"),
+            layout: Some(&terrain_pl),
+            vertex: wgpu::VertexState {
+                module: &terrain_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Uint32],
+                })],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &terrain_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(config.format.into())],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sky_shader = device.create_shader_module(wgpu::include_wgsl!("sky.wgsl"));
+        let sky_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky"),
+            bind_group_layouts: &[Some(&globals_layout)],
+            ..Default::default()
+        });
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky"),
+            layout: Some(&sky_pl),
+            vertex: wgpu::VertexState { module: &sky_shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
+            fragment: Some(wgpu::FragmentState {
+                module: &sky_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(config.format.into())],
+                compilation_options: Default::default(),
+            }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
             ..Default::default()
         });
         Self {
@@ -349,6 +482,9 @@ impl Renderer {
             config,
             depth,
             pipelines,
+            terrain_pipeline,
+            sky_pipeline,
+            terrain_layout,
             globals,
             globals_bg,
             instance_layout,
@@ -463,6 +599,77 @@ impl Renderer {
         GpuMesh { vbuf, ibuf, batches, materials, lod_distances: mesh.lod_distances.clone(), instance, nodes, node_count, instance_bg }
     }
 
+    pub fn upload_terrain(&self, t: &TerrainData) -> GpuTerrain {
+        let mesh = self.upload(&t.mesh);
+        let (w, h, types) = &t.types;
+        let type_tex = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("land types"),
+                size: wgpu::Extent3d { width: *w, height: *h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            types,
+        );
+        let size = t.fields[0].width;
+        let levels = mip_chain(&t.fields);
+        let mip_count = levels[0].len() as u32;
+        // Data order: layer major, then mip.
+        let mut data = Vec::new();
+        for layer in &levels {
+            for m in layer {
+                data.extend_from_slice(m);
+            }
+        }
+        let fields_tex = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("land fields"),
+                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: t.fields.len() as u32 },
+                mip_level_count: mip_count,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &data,
+        );
+        let mut info = [0f32; 4 + 32];
+        info[0] = t.cell;
+        info[1] = *w as f32;
+        info[2] = *h as f32;
+        info[4..].copy_from_slice(&t.tile);
+        let info_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("terrain info"),
+            contents: bytemuck::cast_slice(&info),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let type_view = type_tex.create_view(&Default::default());
+        let fields_view = fields_tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("terrain"),
+            layout: &self.terrain_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&type_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&fields_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: info_buf.as_entire_binding() },
+            ],
+        });
+        GpuTerrain { mesh, bind }
+    }
+
     /// Sets a mesh's node transforms (extra entries are ignored).
     pub fn set_nodes(&self, mesh: &GpuMesh, nodes: &[Mat4]) {
         let n = nodes.len().min(mesh.node_count);
@@ -475,9 +682,20 @@ impl Renderer {
         self.queue.write_buffer(&mesh.instance, 0, bytemuck::cast_slice(&m.to_cols_array_2d()));
     }
 
-    fn draw(&self, target: &wgpu::TextureView, view_proj: Mat4, distance: f32, meshes: &[&GpuMesh]) -> wgpu::CommandEncoder {
+    fn draw(
+        &self,
+        target: &wgpu::TextureView,
+        view_proj: Mat4,
+        distance: f32,
+        terrain: Option<&GpuTerrain>,
+        meshes: &[&GpuMesh],
+    ) -> wgpu::CommandEncoder {
         let light = Vec3::new(-0.4, -0.3, -1.0).normalize();
-        let g = Globals { view_proj: view_proj.to_cols_array_2d(), light_dir: [light.x, light.y, light.z, 0.0] };
+        let g = Globals {
+            view_proj: view_proj.to_cols_array_2d(),
+            light_dir: [light.x, light.y, light.z, 0.0],
+            fog: [SKY[0] as f32, SKY[1] as f32, SKY[2] as f32, FOG_DENSITY],
+        };
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
         let mut enc = self.device.create_command_encoder(&Default::default());
         {
@@ -488,7 +706,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.42, g: 0.55, b: 0.70, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: SKY[0], g: SKY[1], b: SKY[2], a: 1.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -500,6 +718,20 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_bind_group(0, &self.globals_bg, &[]);
+            if terrain.is_some() {
+                pass.set_pipeline(&self.sky_pipeline);
+                pass.draw(0..3, 0..1);
+            }
+            if let Some(t) = terrain {
+                pass.set_pipeline(&self.terrain_pipeline);
+                pass.set_bind_group(1, &t.mesh.instance_bg, &[]);
+                pass.set_bind_group(2, &t.bind, &[]);
+                pass.set_vertex_buffer(0, t.mesh.vbuf.slice(..));
+                pass.set_index_buffer(t.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                for (b, _) in &t.mesh.batches {
+                    pass.draw_indexed(b.first..b.first + b.count, 0, 0..1);
+                }
+            }
             // Opaque geometry first, then blended surfaces on top without depth writes.
             for opaque_pass in [true, false] {
                 for m in meshes {
@@ -525,7 +757,7 @@ impl Renderer {
         enc
     }
 
-    pub fn render(&mut self, view_proj: Mat4, distance: f32, meshes: &[&GpuMesh]) {
+    pub fn render(&mut self, view_proj: Mat4, distance: f32, terrain: Option<&GpuTerrain>, meshes: &[&GpuMesh]) {
         let Some(surface) = &self.surface else { return };
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -535,7 +767,7 @@ impl Renderer {
             }
         };
         let view = frame.texture.create_view(&Default::default());
-        let enc = self.draw(&view, view_proj, distance, meshes);
+        let enc = self.draw(&view, view_proj, distance, terrain, meshes);
         self.queue.submit([enc.finish()]);
         if let Some(w) = &self.window {
             w.pre_present_notify();
@@ -544,7 +776,7 @@ impl Renderer {
     }
 
     /// Renders one frame offscreen and returns tightly packed RGBA8 pixels.
-    pub fn screenshot(&self, view_proj: Mat4, distance: f32, meshes: &[&GpuMesh]) -> Vec<u8> {
+    pub fn screenshot(&self, view_proj: Mat4, distance: f32, terrain: Option<&GpuTerrain>, meshes: &[&GpuMesh]) -> Vec<u8> {
         let (w, h) = (self.config.width, self.config.height);
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("screenshot"),
@@ -557,7 +789,7 @@ impl Renderer {
             view_formats: &[],
         });
         let view = tex.create_view(&Default::default());
-        let mut enc = self.draw(&view, view_proj, distance, meshes);
+        let mut enc = self.draw(&view, view_proj, distance, terrain, meshes);
         let row = (w * 4).div_ceil(256) * 256;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
@@ -584,4 +816,31 @@ impl Renderer {
         }
         out
     }
+}
+
+/// Full mip chains (box filter) for equally sized square RGBA8 images.
+fn mip_chain(images: &[Image]) -> Vec<Vec<Vec<u8>>> {
+    images
+        .iter()
+        .map(|img| {
+            let mut levels = vec![img.rgba.clone()];
+            let mut size = img.width as usize;
+            while size > 1 {
+                let prev = levels.last().unwrap();
+                let half = size / 2;
+                let mut next = vec![0u8; half * half * 4];
+                for y in 0..half {
+                    for x in 0..half {
+                        for c in 0..4 {
+                            let at = |dx: usize, dy: usize| prev[((2 * y + dy) * size + 2 * x + dx) * 4 + c] as u32;
+                            next[(y * half + x) * 4 + c] = ((at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1) + 2) / 4) as u8;
+                        }
+                    }
+                }
+                levels.push(next);
+                size = half;
+            }
+            levels
+        })
+        .collect()
 }

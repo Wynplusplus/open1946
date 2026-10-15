@@ -61,8 +61,8 @@ fn chase_camera(s: &Sim, field: &HeightField, aspect: f32) -> (Mat4, DVec3) {
     (proj * view.as_mat4(), eye)
 }
 
-fn place(r: &Renderer, terrain: &GpuMesh, plane: &GpuMesh, s: &Sim, eye: DVec3) {
-    r.set_transform(terrain, Mat4::from_translation((-eye).as_vec3()));
+fn place(r: &Renderer, terrain: &il2_render::GpuTerrain, plane: &GpuMesh, s: &Sim, eye: DVec3) {
+    r.set_transform(&terrain.mesh, Mat4::from_translation((-eye).as_vec3()));
     r.set_transform(plane, DMat4::from_rotation_translation(s.ori, s.pos - eye).as_mat4());
 }
 
@@ -70,10 +70,10 @@ struct Game {
     sim: Sim,
     assets: world::AircraftAssets,
     field: HeightField,
-    terrain_data: Option<il2_render::MeshData>,
+    terrain_data: Option<il2_render::TerrainData>,
     plane_data: Option<il2_render::MeshData>,
     renderer: Option<Renderer>,
-    terrain: Option<GpuMesh>,
+    terrain: Option<il2_render::GpuTerrain>,
     plane: Option<GpuMesh>,
     keys: HashSet<KeyCode>,
     #[cfg(feature = "gamepad")]
@@ -148,7 +148,7 @@ impl Game {
         let (vp, eye) = chase_camera(s, field, r.aspect());
         place(r, terrain, plane, s, eye);
         r.set_nodes(plane, &world::pose(&self.assets, &s.ct));
-        r.render(vp, 22.0, &[terrain, plane]);
+        r.render(vp, 22.0, Some(terrain), &[plane]);
 
         self.title_timer -= dt;
         if self.title_timer <= 0.0 {
@@ -177,7 +177,7 @@ impl ApplicationHandler for Game {
         }
         let window = Arc::new(el.create_window(winit::window::Window::default_attributes().with_title("OpenIL2")).expect("window"));
         let r = Renderer::new(window);
-        self.terrain = self.terrain_data.take().map(|d| r.upload(&d));
+        self.terrain = self.terrain_data.take().map(|d| r.upload_terrain(&d));
         self.plane = self.plane_data.take().map(|d| r.upload(&d));
         self.renderer = Some(r);
         self.last = Instant::now();
@@ -377,9 +377,11 @@ fn main() {
 
     let terrain = {
         let mut loader = il2_render::scene::Loader::new(&vfs);
-        let mut d = loader.load_map(&args.map).unwrap_or_else(|e| fail(e));
-        d.textures = loader.take_images();
-        d
+        let t = loader.load_terrain(&args.map).unwrap_or_else(|e| fail(e));
+        for w in &loader.warnings {
+            eprintln!("warning: {w}");
+        }
+        t
     };
     let mut assets = assets;
     let plane_mesh = std::mem::take(&mut assets.mesh);
@@ -417,7 +419,7 @@ fn main() {
         }
         let (w, h) = (1280, 720);
         let r = Renderer::headless(w, h);
-        let (terrain, plane) = (r.upload(&terrain), r.upload(&plane_mesh));
+        let (terrain, plane) = (r.upload_terrain(&terrain), r.upload(&plane_mesh));
         let (mut vp, mut eye) = chase_camera(&sim, &field, w as f32 / h as f32);
         if let Some(o) = &args.orbit {
             let fwd = sim.ori * DVec3::X;
@@ -439,7 +441,7 @@ fn main() {
             eprintln!("ct: {:?}", sim.ct);
         }
         r.set_nodes(&plane, &posed);
-        let px = r.screenshot(vp, 22.0, &[&terrain, &plane]);
+        let px = r.screenshot(vp, 22.0, Some(&terrain), &[&plane]);
         image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).unwrap_or_else(|e| fail(e));
         return;
     }
