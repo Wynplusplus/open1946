@@ -5,5 +5,5 @@ pub mod atmosphere;
 pub mod polar;
 pub mod sim;
 
-pub use aircraft::{Aircraft, GearPoint};
+pub use aircraft::{Aircraft, ContactKind, GearPoint};
 pub use sim::{Ground, Inputs, Sim, TICK};

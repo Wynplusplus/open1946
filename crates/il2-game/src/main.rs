@@ -28,7 +28,10 @@ struct Args {
     model: String,
     #[arg(long, default_value = "FlightModels/Bf-109G-6Early.fmd")]
     fmd: String,
-    /// Start altitude above ground, metres.
+    /// Mission file (e.g. Missions/Single/SK/Bf-109F-4/Bf-109F-4_1.mis); sets map, aircraft and start.
+    #[arg(long)]
+    mission: Option<String>,
+    /// Start altitude above ground, metres (without a mission).
     #[arg(long, default_value_t = 1500.0)]
     agl: f64,
     /// Fly headless level-flight tests instead of opening a window.
@@ -242,6 +245,44 @@ fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
     (last.iter().map(|v| v.0).sum::<f64>() / n * 3.6, last.iter().map(|v| v.1).sum::<f64>() / n)
 }
 
+/// Full-throttle takeoff with a simple pilot: keep straight with rudder, raise the tail at 100 km/h,
+/// rotate at 170 km/h. Reports lift-off speed and ground roll.
+fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
+    let start = sim.pos;
+    let heading0 = (sim.ori * DVec3::X).truncate().normalize();
+    let mut inputs = Inputs { throttle: 1.0, ..Default::default() };
+    let ground = |x: f64, y: f64| field.height_at(x, y);
+    let mut t = 0.0;
+    for _ in 0..(90.0 / TICK) as usize {
+        let fwd = (sim.ori * DVec3::X).truncate().normalize();
+        let yaw_err = heading0.perp_dot(fwd); // >0: nose left of the runway heading
+        let kmh = sim.vel.length() * 3.6;
+        inputs.rudder = (2.0 * yaw_err + 0.8 * sim.w.z).clamp(-1.0, 1.0);
+        let pitch = (sim.ori * DVec3::X).z.asin().to_degrees();
+        let target = if kmh < 100.0 { 99.0 } else if kmh < 170.0 { 1.5 } else { 8.0 };
+        inputs.elevator = if target > 90.0 { 0.0 } else { (0.08 * (target - pitch) + 0.3 * sim.w.y).clamp(-1.0, 1.0) };
+        inputs.aileron = (-0.05 * sim.bank_deg() - 0.3 * sim.w.x).clamp(-1.0, 1.0);
+        let was_on_ground = sim.on_ground;
+        sim.tick(&inputs, &ground);
+        t += TICK;
+        if std::env::var_os("IL2_TRACE").is_some() && (t / TICK).round() as usize % 33 == 0 {
+            eprintln!(
+                "t={t:5.1} v={kmh:5.0} yaw_err={:6.1} wz={:6.2} rud={:5.2} pitch={:5.1} gnd={} agl={:5.2}",
+                yaw_err.asin().to_degrees(), sim.w.z, inputs.rudder,
+                (sim.ori * DVec3::X).z.asin().to_degrees(), sim.on_ground, sim.pos.z - field.height_at(sim.pos.x, sim.pos.y)
+            );
+        }
+        if t > 2.0 && was_on_ground && !sim.on_ground {
+            let roll = (sim.pos - start).truncate().length();
+            return format!(
+                "takeoff: lift-off at {:.0} km/h IAS after {:.0} m ground roll, {:.1} s, heading deviation {:.1} deg",
+                sim.ias * 3.6, roll, t, heading0.angle_to(fwd).to_degrees()
+            );
+        }
+    }
+    format!("takeoff: no lift-off within 90 s (speed {:.0} km/h, on ground {})", sim.vel.length() * 3.6, sim.on_ground)
+}
+
 /// Drops the aircraft from 0.5 m onto flat ground at its parked attitude, brakes on, engine off.
 fn parked_test(mut sim: Sim) -> (f64, f64, f64) {
     let ground = |_: f64, _: f64| 0.0;
@@ -257,15 +298,52 @@ fn parked_test(mut sim: Sim) -> (f64, f64, f64) {
     (pitch, sim.pos.z, sim.vel.length())
 }
 
+/// How the player starts: from a mission, or airborne over the map centre.
+enum Start {
+    Takeoff { x: f64, y: f64, heading: f64 },
+    Air { pos: DVec3, toward: DVec3, speed: f64 },
+    Default,
+}
+
 fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
     let vfs = il2_vfs::Vfs::open_install(&args.root).unwrap_or_else(|e| fail(e));
     let fms = il2_data::FlightModels::open(&vfs).unwrap_or_else(|e| fail(e));
+    let mut start = Start::Default;
+    let mut fuel = 1.0;
+    if let Some(path) = &args.mission {
+        let m = il2_formats::mission::Mission::parse(&vfs.read(path).unwrap_or_else(|e| fail(e)));
+        let wing = m.player().unwrap_or_else(|| fail("mission has no player flight"));
+        let class = il2_data::Classes::new(&vfs, &fms.keys)
+            .aircraft(&wing.class)
+            .unwrap_or_else(|| fail(format!("aircraft class {} not found", wing.class)));
+        args.map = format!("maps/{}", m.map);
+        args.fmd = class.flight_model;
+        args.model = class.meshes.first().cloned().unwrap_or_else(|| fail("aircraft class names no model"));
+        fuel = wing.fuel_percent / 100.0;
+        eprintln!("mission: {} on {}, flight {} ({} x {})", path, m.map, wing.name, wing.planes, wing.class);
+        let ends = world::load_runways(&vfs, &args.map);
+        if let Some(w0) = wing.waypoints.first() {
+            start = if w0.kind == "TAKEOFF" {
+                match world::takeoff_spot(&ends, w0.x, w0.y) {
+                    Some((x, y, heading)) => Start::Takeoff { x, y, heading },
+                    None => Start::Air { pos: DVec3::new(w0.x, w0.y, 500.0), toward: DVec3::new(w0.x, w0.y + 1.0, 500.0), speed: 100.0 },
+                }
+            } else {
+                let next = wing.waypoints.get(1).unwrap_or(w0);
+                Start::Air {
+                    pos: DVec3::new(w0.x, w0.y, w0.z.max(100.0)),
+                    toward: DVec3::new(next.x, next.y, next.z) + DVec3::new(0.0, 1e-3, 0.0),
+                    speed: (w0.speed / 3.6).max(60.0),
+                }
+            };
+        }
+    }
     let assets = world::load_aircraft(&vfs, &fms, &args.model, &args.fmd).unwrap_or_else(|e| fail(e));
     let field = world::load_heights(&vfs, &args.map).unwrap_or_else(|e| fail(e));
     eprintln!("gear contact points: {:?}", assets.fm.gear.iter().map(|g| g.pos).collect::<Vec<_>>());
 
-    if args.test {
+    if args.test && !matches!(start, Start::Takeoff { .. }) {
         let fmd = fms.sect_file(&args.fmd).unwrap_or_else(|e| fail(e));
         let p = |k: &str| fmd.get("Params", k).unwrap_or("?").to_owned();
         for alt in [500.0, 3000.0, p("HofVmax").parse().unwrap_or(6000.0)] {
@@ -287,11 +365,23 @@ fn main() {
         d
     };
     let plane_mesh = assets.mesh;
-    let mut sim = world::spawn_airborne(assets.fm, &field, args.agl, 110.0);
-    sim.ct.throttle = 0.8;
+    let (h, pitch) = assets.parked;
+    let mut sim = match start {
+        Start::Takeoff { x, y, heading } => world::spawn_on_ground(assets.fm, &field, x, y, heading, h, pitch),
+        Start::Air { pos, toward, speed } => world::spawn_at(assets.fm, pos, toward, speed),
+        Start::Default => world::spawn_airborne(assets.fm, &field, args.agl, 110.0),
+    };
+    sim.fuel *= fuel;
+    let on_ground_start = matches!(start, Start::Takeoff { .. });
+    let throttle0 = if on_ground_start { 0.0 } else { 0.8 };
+    sim.ct.throttle = throttle0;
+    if args.test && on_ground_start {
+        println!("{}", takeoff_test(sim, &field));
+        return;
+    }
 
     if let Some(out) = &args.screenshot {
-        let inputs = Inputs { throttle: 0.8, ..Default::default() };
+        let inputs = Inputs { throttle: throttle0, ..Default::default() };
         let ground = |x: f64, y: f64| field.height_at(x, y);
         for _ in 0..(args.seconds / TICK) as usize {
             sim.tick(&inputs, &ground);
@@ -306,7 +396,7 @@ fn main() {
         return;
     }
     let mut game = Game {
-        inputs: Inputs { throttle: 0.8, ..Default::default() },
+        inputs: Inputs { throttle: throttle0, ..Default::default() },
         sim,
         field,
         terrain_data: Some(terrain),

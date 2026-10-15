@@ -25,11 +25,19 @@ pub struct Engine {
     pub pos: DVec3,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ContactKind {
+    Wheel,
+    /// Tail or nose wheel: low side friction, no brake.
+    Castor,
+    /// Airframe point (nose, wingtips, tail): stiff, scrapes with high friction.
+    Body,
+}
+
 #[derive(Clone, Debug)]
 pub struct GearPoint {
     pub pos: DVec3,
-    /// Steerable/castoring wheel (tail or nose): low side friction.
-    pub castor: bool,
+    pub kind: ContactKind,
 }
 
 #[derive(Clone, Debug)]

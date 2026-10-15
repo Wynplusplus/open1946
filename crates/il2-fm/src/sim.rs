@@ -1,6 +1,6 @@
 //! One aircraft's rigid-body simulation: `docs/behavior/flight-model.md`.
 
-use crate::aircraft::Aircraft;
+use crate::aircraft::{Aircraft, ContactKind};
 use crate::atmosphere::{self, G};
 use crate::polar::Polar;
 use glam::{DQuat, DVec3};
@@ -321,7 +321,6 @@ impl Sim {
         self.aoa = aoa;
         self.ias = ias;
         self.thrust = thrust;
-        let _ = (self.ct.brakes, self.add_vside);
     }
 
     /// Bank angle in degrees, positive when banked right.
@@ -334,9 +333,9 @@ impl Sim {
     /// Gear forces and moments in the body frame, and whether any wheel touches the ground.
     /// OpenIL2 simplification (see spec, "Landing gear").
     fn gear_forces(&self, ground: &impl Ground, mass: f64) -> (DVec3, DVec3, bool) {
-        let n = self.ac.gear.len().max(1) as f64;
-        let k = mass * G / (n * GEAR_STATIC_SINK);
-        let c = 2.0 * 0.6 * (k * mass / n).sqrt();
+        let wheels = self.ac.gear.iter().filter(|g| g.kind != ContactKind::Body).count().max(1) as f64;
+        let k_wheel = mass * G / (wheels * GEAR_STATIC_SINK);
+        let c_wheel = 2.0 * 0.6 * (k_wheel * mass / wheels).sqrt();
         let (mut f_body, mut m_body, mut contact) = (DVec3::ZERO, DVec3::ZERO, false);
         let fwd_w = self.ori * DVec3::X;
         for g in &self.ac.gear {
@@ -346,14 +345,29 @@ impl Sim {
             if depth <= 0.0 {
                 continue;
             }
+            let (k, c) = match g.kind {
+                ContactKind::Body => (10.0 * k_wheel, 3.0 * c_wheel),
+                _ => (k_wheel, c_wheel),
+            };
             contact = true;
             let vp = self.vel + self.ori * self.w.cross(g.pos);
             let fn_ = (k * depth - c * vp.z).max(0.0);
             let fwd = DVec3::new(fwd_w.x, fwd_w.y, 0.0).normalize_or_zero();
             let lat = DVec3::Z.cross(fwd);
             let (vf, vl) = (vp.dot(fwd), vp.dot(lat));
-            let mu_f = 0.03 + 0.6 * self.ct.brakes;
-            let mu_l = if g.castor { 0.1 } else { 0.8 };
+            // Differential braking: rudder towards a side brakes that side's wheel more.
+            let brake = if g.kind != ContactKind::Wheel {
+                0.0
+            } else if g.pos.y > 0.0 {
+                self.ct.brakes * (1.0 - self.ct.rudder).min(1.0)
+            } else {
+                self.ct.brakes * (1.0 + self.ct.rudder).min(1.0)
+            };
+            let (mu_f, mu_l) = match g.kind {
+                ContactKind::Wheel => (0.03 + 0.6 * brake, 0.8),
+                ContactKind::Castor => (0.03, 0.1),
+                ContactKind::Body => (0.6, 0.6),
+            };
             let smooth = |v: f64| (v / 0.5).clamp(-1.0, 1.0);
             let fw = DVec3::Z * fn_ - fwd * (mu_f * fn_ * smooth(vf)) - lat * (mu_l * fn_ * smooth(vl));
             let fb = self.ori.inverse() * fw;

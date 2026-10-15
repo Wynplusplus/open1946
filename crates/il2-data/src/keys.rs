@@ -11,7 +11,7 @@ use il2_vfs::Vfs;
 
 /// Archive key (path hash) of the scrambled `Finger` class used by the launcher's bootstrap loader.
 const FINGER_CLASS_HASH: u64 = 0x0830_D1EA_0C04_8808;
-const CLASS_HEADER: [u8; 8] = [0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x2F];
+pub(crate) const CLASS_HEADER: [u8; 8] = [0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x2F];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -76,6 +76,17 @@ fn try_key(scrambled: &[u8], key: &[u8]) -> Option<Vec<u8>> {
     let arrays = ClassFile::parse(&class).ok()?.static_arrays().ok()?;
     let k = arrays.get("kTable")?;
     (k.len() >= 256).then(|| k.iter().map(|&v| v as u8).collect())
+}
+
+impl KeyTable {
+    /// Key slice for a game class with name hash `h` (`docs/formats/krypto.md`, "Game classes").
+    pub fn class_key(&self, h: i32) -> Vec<u8> {
+        let k = self.0.len() as i64;
+        let h = (h as i64).abs();
+        let len = (h % 16 + 14).max(10);
+        let start = h % k;
+        (0..len).map(|i| self.0[((start + i) % k) as usize]).collect()
+    }
 }
 
 /// XORs a stream with `key`, starting at key element 1 (`docs/formats/krypto.md`, "Stream XOR").

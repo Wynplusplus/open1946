@@ -139,6 +139,14 @@ impl ClassFile {
         Ok(ClassFile { consts, clinit })
     }
 
+    /// All UTF-8 string constants.
+    pub fn strings(&self) -> impl Iterator<Item = &str> {
+        self.consts.iter().filter_map(|c| match c {
+            Const::Utf8(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
     fn field_name(&self, idx: u16) -> Option<&str> {
         let Some(Const::FieldRef(nt)) = self.consts.get(idx as usize) else { return None };
         let Some(Const::NameAndType(n)) = self.consts.get(*nt as usize) else { return None };

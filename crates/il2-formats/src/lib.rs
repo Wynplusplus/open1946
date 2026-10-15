@@ -4,9 +4,11 @@ pub mod binsect;
 pub mod him;
 pub mod imf;
 pub mod map;
+pub mod mission;
 pub mod mat;
 pub mod msh;
 pub mod sectfile;
+pub mod statics;
 
 pub use binsect::{RowFile, RowSection, Value};
 pub use sectfile::{Section, SectFile};

@@ -24,9 +24,56 @@ pub enum Error {
     NotFound(String),
 }
 
+/// What an aircraft class says about its assets.
+#[derive(Clone, Debug)]
+pub struct AircraftClass {
+    pub flight_model: String,
+    /// Hierarchical mesh paths; the default (no country suffix) first.
+    pub meshes: Vec<String>,
+}
+
+/// Reads runtime classes from the install, only to look up asset names (`docs/formats/mission.md`).
+pub struct Classes<'a> {
+    vfs: &'a Vfs,
+    keys: &'a KeyTable,
+}
+
+impl<'a> Classes<'a> {
+    pub fn new(vfs: &'a Vfs, keys: &'a KeyTable) -> Self {
+        Classes { vfs, keys }
+    }
+
+    fn load(&self, name: &str) -> Option<classfile::ClassFile> {
+        let h = int_hash(&format!("sdw{name}cwc2w9e"));
+        let data = self.vfs.read(&format!("cod/{h}")).ok()?;
+        let key = self.keys.class_key(h);
+        let mut class = keys::CLASS_HEADER.to_vec();
+        class.extend(data.iter().enumerate().map(|(i, b)| b ^ key[i % key.len()]));
+        classfile::ClassFile::parse(&class).ok()
+    }
+
+    /// `air.BF_109G6` or `com.maddox.il2.objects.air.BF_109G6`.
+    pub fn aircraft(&self, class: &str) -> Option<AircraftClass> {
+        let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };
+        let c = self.load(&full)?;
+        let mut flight_model = None;
+        let mut meshes: Vec<String> = Vec::new();
+        for s in c.strings() {
+            let l = s.to_ascii_lowercase();
+            if l.starts_with("flightmodels/") && l.ends_with(".fmd") && flight_model.is_none() {
+                flight_model = Some(s.to_owned());
+            } else if l.starts_with("3do/plane/") && l.ends_with("/hier.him") && !meshes.iter().any(|m| m == s) {
+                meshes.push(s.to_owned());
+            }
+        }
+        meshes.sort_by_key(|m| m.contains('('));
+        Some(AircraftClass { flight_model: flight_model?, meshes })
+    }
+}
+
 /// Access to `FlightModels/*.fmd` and `*.emd` section files.
 pub struct FlightModels {
-    keys: KeyTable,
+    pub keys: KeyTable,
     container: container::Container,
 }
 
