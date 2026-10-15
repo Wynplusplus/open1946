@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 il2-vfs = { path = "../il2-vfs" }
 il2-formats = { path = "../il2-formats" }
-wgpu = "30"
+il2-render = { path = "../il2-render" }
 winit = "0.30"
 glam = { version = "0.30", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }

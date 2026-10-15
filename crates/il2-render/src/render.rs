@@ -106,8 +106,8 @@ pub struct GpuMesh {
     batches: Vec<(Batch, usize)>,
     materials: Vec<wgpu::BindGroup>,
     lod_distances: Vec<Vec<f32>>,
-    /// Per-mesh model transform (identity for now; used once objects move).
-    _instance: wgpu::Buffer,
+    /// Per-mesh model transform.
+    instance: wgpu::Buffer,
     instance_bg: wgpu::BindGroup,
 }
 
@@ -427,7 +427,12 @@ impl Renderer {
                 (*b, idx)
             })
             .collect();
-        GpuMesh { vbuf, ibuf, batches, materials, lod_distances: mesh.lod_distances.clone(), _instance: instance, instance_bg }
+        GpuMesh { vbuf, ibuf, batches, materials, lod_distances: mesh.lod_distances.clone(), instance, instance_bg }
+    }
+
+    /// Sets a mesh's model transform.
+    pub fn set_transform(&self, mesh: &GpuMesh, m: Mat4) {
+        self.queue.write_buffer(&mesh.instance, 0, bytemuck::cast_slice(&m.to_cols_array_2d()));
     }
 
     fn draw(&self, target: &wgpu::TextureView, view_proj: Mat4, distance: f32, meshes: &[&GpuMesh]) -> wgpu::CommandEncoder {

@@ -1,10 +1,6 @@
-mod camera;
-mod render;
-mod scene;
-
-use camera::OrbitCamera;
 use clap::Parser;
-use render::{GpuMesh, MeshData, Renderer};
+use il2_render::camera::OrbitCamera;
+use il2_render::{scene, GpuMesh, MeshData, Renderer};
 use std::path::PathBuf;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;

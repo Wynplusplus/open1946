@@ -1,0 +1,16 @@
+[package]
+name = "il2-render"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "wgpu renderer and asset-to-GPU loading for OpenIL2"
+
+[dependencies]
+il2-vfs = { path = "../il2-vfs" }
+il2-formats = { path = "../il2-formats" }
+wgpu = "30"
+winit = "0.30"
+glam = { version = "0.30", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "1"
+image = { version = "0.25", default-features = false, features = ["tga", "bmp", "png"] }

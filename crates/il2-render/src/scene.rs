@@ -177,33 +177,38 @@ impl<'a> Loader<'a> {
         Ok(())
     }
 
+    /// Hook positions of a hierarchical mesh in object coordinates, from LOD 0 of every node's mesh.
+    pub fn hier_hooks(&self, him_path: &str) -> Result<Vec<(String, Vec3)>, String> {
+        let data = self.vfs.read(him_path).map_err(|e| e.to_string())?;
+        let hier = Hier::parse(&data).map_err(|e| e.to_string())?;
+        let world = node_transforms(&hier)?;
+        let dir = dir_of(him_path).to_owned();
+        let mut out = Vec::new();
+        for (i, n) in hier.nodes.iter().enumerate() {
+            let Some(mesh) = &n.mesh else { continue };
+            let Ok(d) = self.vfs.read(&format!("{dir}{mesh}.msh")) else { continue };
+            let Ok(m) = Mesh::parse(&d) else { continue };
+            for h in &m.hooks {
+                let local = Vec3::new(h.matrix[9], h.matrix[10], h.matrix[11]);
+                out.push((h.name.clone(), world[i].transform_point3(local)));
+            }
+        }
+        Ok(out)
+    }
+
     /// Loads all visible nodes of a hierarchical mesh into one draw list.
     pub fn load_hier(&mut self, him_path: &str, show_hidden: bool) -> Result<MeshData, String> {
         let data = self.vfs.read(him_path).map_err(|e| e.to_string())?;
         let hier = Hier::parse(&data).map_err(|e| e.to_string())?;
         let dir = dir_of(him_path).to_owned();
-        let mut world = vec![Mat4::IDENTITY; hier.nodes.len()];
+        let world = node_transforms(&hier)?;
         let mut visible = vec![true; hier.nodes.len()];
-        // Parents precede children in practice, but resolve iteratively to be safe.
-        let mut done = vec![false; hier.nodes.len()];
-        while done.iter().any(|d| !d) {
-            let mut progress = false;
+        // Parents precede children (node_transforms checked the tree), so one pass suffices
+        // once nodes are visited in resolution order.
+        for _ in 0..hier.nodes.len() {
             for (i, n) in hier.nodes.iter().enumerate() {
-                if done[i] {
-                    continue;
-                }
-                let (pw, pv) = match n.parent {
-                    None => (Mat4::IDENTITY, true),
-                    Some(p) if done[p] => (world[p], visible[p]),
-                    Some(_) => continue,
-                };
-                world[i] = pw * attaching_to_mat4(&n.attaching);
+                let pv = n.parent.is_none_or(|p| visible[p]);
                 visible[i] = pv && (show_hidden || !n.hidden);
-                done[i] = true;
-                progress = true;
-            }
-            if !progress {
-                return Err("cycle in hierarchy".into());
             }
         }
         let mut out = MeshData::default();
@@ -280,6 +285,32 @@ impl Loader<'_> {
             ..Default::default()
         })
     }
+}
+
+/// Object-space transform of every node of a hierarchy.
+pub fn node_transforms(hier: &Hier) -> Result<Vec<Mat4>, String> {
+    let mut world = vec![Mat4::IDENTITY; hier.nodes.len()];
+    let mut done = vec![false; hier.nodes.len()];
+    while done.iter().any(|d| !d) {
+        let mut progress = false;
+        for (i, n) in hier.nodes.iter().enumerate() {
+            if done[i] {
+                continue;
+            }
+            let pw = match n.parent {
+                None => Mat4::IDENTITY,
+                Some(p) if done[p] => world[p],
+                Some(_) => continue,
+            };
+            world[i] = pw * attaching_to_mat4(&n.attaching);
+            done[i] = true;
+            progress = true;
+        }
+        if !progress {
+            return Err("cycle in hierarchy".into());
+        }
+    }
+    Ok(world)
 }
 
 /// Bounding sphere (center, radius) of mesh data, from the vertices of LOD 0 (or LOD-less) batches.
