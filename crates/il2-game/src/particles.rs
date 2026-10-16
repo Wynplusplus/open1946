@@ -49,13 +49,29 @@ fn join(dir: &str, rel: &str) -> String {
 
 fn parse(text: &[u8], path: &str, loader: &mut Loader, mesh: &mut MeshData) -> Option<EffectSpec> {
     let f = SectFile::parse(text);
-    let class = f.section_ci("ClassInfo")?.get_ci("ClassName")?.trim().to_owned();
+    let class = f
+        .section_ci("ClassInfo")?
+        .get_ci("ClassName")?
+        .trim()
+        .to_owned();
     let g = f.section_ci("General")?;
-    let nums = |k: &str| -> Vec<f64> { g.get_ci(k).map(|v| v.split_whitespace().filter_map(atof).map(f64::from).collect()).unwrap_or_default() };
+    let nums = |k: &str| -> Vec<f64> {
+        g.get_ci(k)
+            .map(|v| {
+                v.split_whitespace()
+                    .filter_map(atof)
+                    .map(f64::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     let n = |k: &str, d: f64| nums(k).first().copied().unwrap_or(d);
     let pair = |k: &str, d: (f64, f64)| {
         let v = nums(k);
-        (v.first().copied().unwrap_or(d.0), v.get(1).copied().unwrap_or(d.1))
+        (
+            v.first().copied().unwrap_or(d.0),
+            v.get(1).copied().unwrap_or(d.1),
+        )
     };
     let color = |k: &str| {
         let v = nums(k);
@@ -141,7 +157,11 @@ impl Effects {
             if specs.contains_key(&key) {
                 continue;
             }
-            let spec = vfs.read(name).ok().and_then(|d| parse(&d, name, &mut loader, &mut mesh)).map(Arc::new);
+            let spec = vfs
+                .read(name)
+                .ok()
+                .and_then(|d| parse(&d, name, &mut loader, &mut mesh))
+                .map(Arc::new);
             specs.insert(key, spec);
         }
         let loaded = specs.values().filter(|s| s.is_some()).count();
@@ -158,16 +178,40 @@ impl Effects {
         }
         mesh.textures = loader.take_images();
         mesh.node_count = mesh.node_count.max(1);
-        Effects { specs, data: Some(mesh), emitters: Vec::new(), rng: Rng::new(0xE77EC7) }
+        Effects {
+            specs,
+            data: Some(mesh),
+            emitters: Vec::new(),
+            rng: Rng::new(0xE77EC7),
+        }
     }
 
     /// Starts an effect at `pos` pointing along `axis`; `life` < 0 uses the file's own duration.
     pub fn spawn(&mut self, name: &str, pos: DVec3, axis: DVec3, scale: f64, life: f64) {
-        let Some(Some(spec)) = self.specs.get(&name.to_ascii_lowercase()) else { return };
-        let life = if life > 0.0 { life.min(spec.finish.max(life)) } else { spec.finish };
-        let mut e = Emitter { spec: spec.clone(), pos, axis: axis.normalize_or(DVec3::Z), scale, age: 0.0, life, debt: 0.0, particles: Vec::new() };
+        let Some(Some(spec)) = self.specs.get(&name.to_ascii_lowercase()) else {
+            return;
+        };
+        let life = if life > 0.0 {
+            life.min(spec.finish.max(life))
+        } else {
+            spec.finish
+        };
+        let mut e = Emitter {
+            spec: spec.clone(),
+            pos,
+            axis: axis.normalize_or(DVec3::Z),
+            scale,
+            age: 0.0,
+            life,
+            debt: 0.0,
+            particles: Vec::new(),
+        };
         if spec.sprite {
-            e.particles.push(Particle { pos, vel: DVec3::ZERO, age: 0.0 });
+            e.particles.push(Particle {
+                pos,
+                vel: DVec3::ZERO,
+                age: 0.0,
+            });
         }
         self.emitters.push(e);
     }
@@ -182,15 +226,22 @@ impl Effects {
                 while e.debt >= 1.0 && e.particles.len() < s.max_particles {
                     e.debt -= 1.0;
                     // Inside a cone of half-angle theta around the axis.
-                    let theta = (s.theta.0 + (s.theta.1 - s.theta.0) * rng.uniform()).to_radians().abs();
+                    let theta = (s.theta.0 + (s.theta.1 - s.theta.0) * rng.uniform())
+                        .to_radians()
+                        .abs();
                     let cos_t = 1.0 - rng.uniform() * (1.0 - theta.min(std::f64::consts::PI).cos());
                     let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
                     let phi = rng.uniform() * std::f64::consts::TAU;
                     let local = DVec3::new(cos_t, sin_t * phi.cos(), sin_t * phi.sin());
                     let dir = DQuat::from_rotation_arc(DVec3::X, e.axis) * local;
-                    let speed = (s.velocity.0 + s.velocity.1 * (rng.uniform() * 2.0 - 1.0)) * e.scale;
+                    let speed =
+                        (s.velocity.0 + s.velocity.1 * (rng.uniform() * 2.0 - 1.0)) * e.scale;
                     let offset = dir * (s.max_r * rng.uniform() * e.scale);
-                    e.particles.push(Particle { pos: e.pos + offset, vel: dir * speed, age: 0.0 });
+                    e.particles.push(Particle {
+                        pos: e.pos + offset,
+                        vel: dir * speed,
+                        age: 0.0,
+                    });
                 }
                 if e.particles.len() >= s.max_particles {
                     e.debt = e.debt.min(1.0);
@@ -206,7 +257,8 @@ impl Effects {
                 p.age < if s.sprite { e.life.max(s.live) } else { s.live }
             });
         }
-        self.emitters.retain(|e| !e.particles.is_empty() || (!e.spec.sprite && e.age <= e.life));
+        self.emitters
+            .retain(|e| !e.particles.is_empty() || (!e.spec.sprite && e.age <= e.life));
     }
 
     pub fn count(&self) -> usize {
@@ -214,27 +266,45 @@ impl Effects {
     }
 
     /// Camera-facing billboards of all particles.
-    pub fn gather<'a>(&self, mesh: &'a GpuMesh, eye: DVec3, out: &mut Vec<InstanceRaw>) -> Vec<InstancedDraw<'a>> {
+    pub fn gather<'a>(
+        &self,
+        mesh: &'a GpuMesh,
+        eye: DVec3,
+        out: &mut Vec<InstanceRaw>,
+    ) -> Vec<InstancedDraw<'a>> {
         let mut by_batch: HashMap<usize, Vec<InstanceRaw>> = HashMap::new();
         for e in &self.emitters {
             let s = &e.spec;
             for p in &e.particles {
-                let t = if s.sprite { (p.age / s.radius_period.max(1e-3)).min(1.0) } else { (p.age / s.live.max(1e-3)).min(1.0) };
+                let t = if s.sprite {
+                    (p.age / s.radius_period.max(1e-3)).min(1.0)
+                } else {
+                    (p.age / s.live.max(1e-3)).min(1.0)
+                };
                 let size = (s.size.0 + (s.size.1 - s.size.0) * t) * e.scale;
                 let c = |i: usize| s.color.0[i] + (s.color.1[i] - s.color.0[i]) * t as f32;
                 let rel = (p.pos - eye).as_vec3();
                 let to_cam = (-rel).normalize_or(Vec3::Z);
                 let spin = (s.angle_speed * p.age).to_radians() as f32;
-                let rot = glam::Quat::from_rotation_arc(Vec3::X, to_cam) * glam::Quat::from_rotation_x(spin);
+                let rot = glam::Quat::from_rotation_arc(Vec3::X, to_cam)
+                    * glam::Quat::from_rotation_x(spin);
                 let m = Mat4::from_scale_rotation_translation(Vec3::splat(size as f32), rot, rel);
-                by_batch.entry(s.batch).or_default().push(InstanceRaw::colored(m, [c(0), c(1), c(2), c(3)]));
+                by_batch
+                    .entry(s.batch)
+                    .or_default()
+                    .push(InstanceRaw::colored(m, [c(0), c(1), c(2), c(3)]));
             }
         }
         let mut draws = Vec::new();
         for (batch, inst) in by_batch {
             let start = out.len() as u32;
             out.extend(inst);
-            draws.push(InstancedDraw { mesh, batches: batch..batch + 1, level: 0, instances: start..out.len() as u32 });
+            draws.push(InstancedDraw {
+                mesh,
+                batches: batch..batch + 1,
+                level: 0,
+                instances: start..out.len() as u32,
+            });
         }
         draws
     }
@@ -244,15 +314,67 @@ impl Effects {
 pub fn known_effects() -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
     for (dir, files) in [
-        ("effects/Explodes/Bullet/Land", &["BaseSpray", "Fontain", "Spray", "Flash", "Exp_BaseSpray", "Exp_Flash", "Exp_Spray"][..]),
-        ("effects/Explodes/Bullet/Water", &["BaseSpray", "Fontain", "Spray", "Exp_BaseSpray", "Exp_Spray"][..]),
+        (
+            "effects/Explodes/Bullet/Land",
+            &[
+                "BaseSpray",
+                "Fontain",
+                "Spray",
+                "Flash",
+                "Exp_BaseSpray",
+                "Exp_Flash",
+                "Exp_Spray",
+            ][..],
+        ),
+        (
+            "effects/Explodes/Bullet/Water",
+            &[
+                "BaseSpray",
+                "Fontain",
+                "Spray",
+                "Exp_BaseSpray",
+                "Exp_Spray",
+            ][..],
+        ),
         ("effects/Explodes/Bullet/Object", &["Spray"][..]),
-        ("effects/Explodes/Cannon/Land", &["BaseSpray", "Fontain", "Spray", "Flash", "20mm_Exp_BaseSpray", "20mm_Exp_Flame", "20mm_Exp_Flash", "20mm_Exp_Fontain", "20mm_Exp_Spray"][..]),
-        ("effects/Explodes/Cannon/Water", &["BaseSpray", "Fontain", "Spray", "20mm_Exp_BaseSpray", "20mm_Exp_Fontain", "20mm_Exp_Spray"][..]),
+        (
+            "effects/Explodes/Cannon/Land",
+            &[
+                "BaseSpray",
+                "Fontain",
+                "Spray",
+                "Flash",
+                "20mm_Exp_BaseSpray",
+                "20mm_Exp_Flame",
+                "20mm_Exp_Flash",
+                "20mm_Exp_Fontain",
+                "20mm_Exp_Spray",
+            ][..],
+        ),
+        (
+            "effects/Explodes/Cannon/Water",
+            &[
+                "BaseSpray",
+                "Fontain",
+                "Spray",
+                "20mm_Exp_BaseSpray",
+                "20mm_Exp_Fontain",
+                "20mm_Exp_Spray",
+            ][..],
+        ),
         ("effects/Explodes/Cannon/Object", &["Sparks"][..]),
-        ("effects/Explodes/Explode10Kg/Land", &["BaseSpray", "Flame", "Flash", "Dirt", "Spray"][..]),
-        ("effects/Explodes/Explode10Kg/Water", &["BaseSpray", "Fontain", "FontainSoot", "Spray"][..]),
-        ("effects/Explodes/Explode10Kg/Object", &["Sparks", "Flash", "Spray"][..]),
+        (
+            "effects/Explodes/Explode10Kg/Land",
+            &["BaseSpray", "Flame", "Flash", "Dirt", "Spray"][..],
+        ),
+        (
+            "effects/Explodes/Explode10Kg/Water",
+            &["BaseSpray", "Fontain", "FontainSoot", "Spray"][..],
+        ),
+        (
+            "effects/Explodes/Explode10Kg/Object",
+            &["Sparks", "Flash", "Spray"][..],
+        ),
     ] {
         for f in files {
             v.push(format!("{dir}/{f}.eff"));
@@ -286,20 +408,40 @@ pub fn impact(fx: &mut Effects, at: DVec3, what: Impact, water: bool, object: bo
     };
     match what {
         Impact::Shot { mass } => {
-            let surface = if object { "Object" } else if water { "Water" } else { "Land" };
+            let surface = if object {
+                "Object"
+            } else if water {
+                "Water"
+            } else {
+                "Land"
+            };
             if mass < 0.05 {
                 let files: &[&str] = match surface {
                     "Object" => &["Spray"],
                     "Water" => &["BaseSpray", "Fontain", "Spray"],
                     _ => &["BaseSpray", "Fontain", "Spray"],
                 };
-                run(fx, &format!("effects/Explodes/Bullet/{surface}"), files, 0.5);
+                run(
+                    fx,
+                    &format!("effects/Explodes/Bullet/{surface}"),
+                    files,
+                    0.5,
+                );
                 if surface == "Land" && rng.uniform() < 0.2 {
                     run(fx, "effects/Explodes/Bullet/Land", &["Flash"], 0.5);
                 }
             } else if mass < 0.701 {
-                let files: &[&str] = if object { &["Sparks"] } else { &["BaseSpray", "Fontain", "Spray"] };
-                run(fx, &format!("effects/Explodes/Cannon/{surface}"), files, 4.0);
+                let files: &[&str] = if object {
+                    &["Sparks"]
+                } else {
+                    &["BaseSpray", "Fontain", "Spray"]
+                };
+                run(
+                    fx,
+                    &format!("effects/Explodes/Cannon/{surface}"),
+                    files,
+                    4.0,
+                );
                 if surface == "Land" && rng.uniform() < 0.3 {
                     run(fx, "effects/Explodes/Cannon/Land", &["Flash"], 4.0);
                 }
@@ -321,20 +463,59 @@ fn blast(fx: &mut Effects, at: DVec3, power: f64, water: bool, rng: &mut Rng) {
     let surface = if water { "Water" } else { "Land" };
     if power < 0.0019 {
         if rng.uniform() < 0.3 {
-            run(fx, &format!("effects/Explodes/Bullet/{surface}"), &["Exp_BaseSpray", "Exp_Spray"], 4.0);
+            run(
+                fx,
+                &format!("effects/Explodes/Bullet/{surface}"),
+                &["Exp_BaseSpray", "Exp_Spray"],
+                4.0,
+            );
         }
     } else if power < 0.05 {
         if rng.uniform() < 0.4 {
-            let files: &[&str] = if water { &["20mm_Exp_BaseSpray", "20mm_Exp_Fontain", "20mm_Exp_Spray"] } else { &["20mm_Exp_BaseSpray", "20mm_Exp_Flame", "20mm_Exp_Flash", "20mm_Exp_Fontain", "20mm_Exp_Spray"] };
-            run(fx, &format!("effects/Explodes/Cannon/{surface}"), files, 4.0);
+            let files: &[&str] = if water {
+                &["20mm_Exp_BaseSpray", "20mm_Exp_Fontain", "20mm_Exp_Spray"]
+            } else {
+                &[
+                    "20mm_Exp_BaseSpray",
+                    "20mm_Exp_Flame",
+                    "20mm_Exp_Flash",
+                    "20mm_Exp_Fontain",
+                    "20mm_Exp_Spray",
+                ]
+            };
+            run(
+                fx,
+                &format!("effects/Explodes/Cannon/{surface}"),
+                files,
+                4.0,
+            );
         }
     } else if power < 15.0 {
-        let files: &[&str] = if water { &["BaseSpray", "Fontain", "FontainSoot", "Spray"] } else { &["BaseSpray", "Flame", "Flash", "Dirt", "Spray"] };
-        run(fx, &format!("effects/Explodes/Explode10Kg/{surface}"), files, 4.0);
+        let files: &[&str] = if water {
+            &["BaseSpray", "Fontain", "FontainSoot", "Spray"]
+        } else {
+            &["BaseSpray", "Flame", "Flash", "Dirt", "Spray"]
+        };
+        run(
+            fx,
+            &format!("effects/Explodes/Explode10Kg/{surface}"),
+            files,
+            4.0,
+        );
     } else {
         // Bomb and rocket fountains: several fountains thrown at random headings around the vertical.
-        let (name, count) = if power >= 300.0 { ("Bomb1000", 3 + (rng.uniform() * 3.0) as usize) } else if power >= 50.0 { ("Bomb250", 4 + (rng.uniform() * 2.0) as usize) } else { ("RS82", 2 + (rng.uniform() * 2.0) as usize) };
-        let land = if rng.uniform() < 0.5 { "Land_dig_in_2" } else { "Land_dig_in" };
+        let (name, count) = if power >= 300.0 {
+            ("Bomb1000", 3 + (rng.uniform() * 3.0) as usize)
+        } else if power >= 50.0 {
+            ("Bomb250", 4 + (rng.uniform() * 2.0) as usize)
+        } else {
+            ("RS82", 2 + (rng.uniform() * 2.0) as usize)
+        };
+        let land = if rng.uniform() < 0.5 {
+            "Land_dig_in_2"
+        } else {
+            "Land_dig_in"
+        };
         let dir = format!("effects/Explodes/{name}/{land}");
         fx.spawn(&format!("{dir}/Peaces.eff"), at, up, 1.0, 3.5);
         for _ in 0..count {

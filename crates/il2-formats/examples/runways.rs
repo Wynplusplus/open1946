@@ -6,7 +6,10 @@ fn main() {
     let s = il2_formats::statics::Statics::parse(&d).unwrap();
     let ends: Vec<_> = s.runway_ends().collect();
     for (name, f) in [
-        ("cos,sin", (|y: f32| (y.cos(), y.sin())) as fn(f32) -> (f32, f32)),
+        (
+            "cos,sin",
+            (|y: f32| (y.cos(), y.sin())) as fn(f32) -> (f32, f32),
+        ),
         ("cos,-sin", |y: f32| (y.cos(), -y.sin())),
         ("sin,cos", |y: f32| (y.sin(), y.cos())),
     ] {
@@ -22,6 +25,9 @@ fn main() {
             });
             paired += hit as usize;
         }
-        println!("{name:8}: {paired} of {} ends have an opposite end", ends.len());
+        println!(
+            "{name:8}: {paired} of {} ends have an opposite end",
+            ends.len()
+        );
     }
 }

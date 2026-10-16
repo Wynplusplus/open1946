@@ -6,10 +6,19 @@ use crate::weapons::Rng;
 const THICKNESS: [[f64; 2]; 4] = [[0.025, 0.15], [0.12, 0.24], [0.002, 0.008], [0.025, 0.15]];
 /// Shot energy (J) for 10 %, 30 % and 100 % kill probability, per material and thickness row.
 const ENERGY: [[[f64; 3]; 2]; 4] = [
-    [[23_400.0, 131_400.0, 252_000.0], [131_400.0, 369_000.0, 1_224_000.0]],
-    [[131_400.0, 252_000.0, 3_295_500.0], [369_000.0, 3_295_500.0, 5_120_000.0]],
+    [
+        [23_400.0, 131_400.0, 252_000.0],
+        [131_400.0, 369_000.0, 1_224_000.0],
+    ],
+    [
+        [131_400.0, 252_000.0, 3_295_500.0],
+        [369_000.0, 3_295_500.0, 5_120_000.0],
+    ],
     [[511.225, 2453.88, 23_400.0], [2453.88, 10_140.0, 23_400.0]],
-    [[23_400.0, 131_400.0, 252_000.0], [131_400.0, 369_000.0, 1_224_000.0]],
+    [
+        [23_400.0, 131_400.0, 252_000.0],
+        [131_400.0, 369_000.0, 1_224_000.0],
+    ],
 ];
 
 /// How a house class takes damage, from its `Body` and `Panzer` (`static.ini`).
@@ -37,7 +46,13 @@ impl HouseDamage {
             "flesh" => (3, 0.01 * p / 0.002, 1.7, 0.1),
             _ => return None,
         };
-        Some(HouseDamage { mat, panzer: p, min_tnt: min, max_tnt: min * k, p_death: pd })
+        Some(HouseDamage {
+            mat,
+            panzer: p,
+            min_tnt: min,
+            max_tnt: min * k,
+            p_death: pd,
+        })
     }
 
     fn penetrate(&self, row: usize, e: f64) -> f64 {

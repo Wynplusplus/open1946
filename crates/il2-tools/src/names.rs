@@ -11,7 +11,20 @@ const MAX_SCAN: u32 = 4 << 20;
 
 /// Extensions tried for bare names (e.g. `Mesh CF_D0` refers to `CF_D0.msh`).
 const EXTENSIONS: &[&str] = &[
-    "msh", "mat", "tga", "tgb", "bmp", "him", "sim", "ini", "txt", "wav", "ogg", "prs", "eff", "properties",
+    "msh",
+    "mat",
+    "tga",
+    "tgb",
+    "bmp",
+    "him",
+    "sim",
+    "ini",
+    "txt",
+    "wav",
+    "ogg",
+    "prs",
+    "eff",
+    "properties",
 ];
 
 pub struct Names {
@@ -20,7 +33,22 @@ pub struct Names {
 
 fn is_path_char(b: u8) -> bool {
     b.is_ascii_alphanumeric()
-        || matches!(b, b'_' | b'-' | b'.' | b'/' | b'\\' | b'$' | b'+' | b'#' | b'!' | b'~' | b'(' | b')' | b'&' | b'\'')
+        || matches!(
+            b,
+            b'_' | b'-'
+                | b'.'
+                | b'/'
+                | b'\\'
+                | b'$'
+                | b'+'
+                | b'#'
+                | b'!'
+                | b'~'
+                | b'('
+                | b')'
+                | b'&'
+                | b'\''
+        )
 }
 
 /// Path-like tokens in arbitrary (text or binary) data, with `/` separators.
@@ -50,7 +78,9 @@ fn join(dir: &str, rel: &str) -> Option<String> {
 }
 
 fn parent_dirs(path: &str) -> impl Iterator<Item = &str> {
-    path.char_indices().filter(|&(_, c)| c == '/').map(move |(i, _)| &path[..=i])
+    path.char_indices()
+        .filter(|&(_, c)| c == '/')
+        .map(move |(i, _)| &path[..=i])
 }
 
 fn has_extension(t: &str) -> bool {
@@ -123,17 +153,26 @@ impl Names {
         let (mut dirs_done, mut names_done) = (0usize, 0usize);
         loop {
             while let Some(path) = c.queue.pop() {
-                let Some(loc) = vfs.lookup_hash(path_hash(&path)).copied() else { continue };
+                let Some(loc) = vfs.lookup_hash(path_hash(&path)).copied() else {
+                    continue;
+                };
                 if loc.entry.is_dir() || loc.entry.size > MAX_SCAN {
                     continue;
                 }
-                let Ok(data) = vfs.read_location(&loc) else { continue };
-                let local: Vec<String> =
-                    std::iter::once(String::new()).chain(parent_dirs(&path).map(str::to_owned)).collect();
+                let Ok(data) = vfs.read_location(&loc) else {
+                    continue;
+                };
+                let local: Vec<String> = std::iter::once(String::new())
+                    .chain(parent_dirs(&path).map(str::to_owned))
+                    .collect();
                 let toks: HashSet<String> = tokens(&data).collect();
                 for t in toks {
                     // Bare words are only tried next to the referencing file.
-                    let dirs = if has_extension(&t) || t.contains('/') { &local[..] } else { &local[local.len() - 1..] };
+                    let dirs = if has_extension(&t) || t.contains('/') {
+                        &local[..]
+                    } else {
+                        &local[local.len() - 1..]
+                    };
                     for d in dirs {
                         if let Some(cand) = join(d, &t) {
                             c.try_with_extensions(&cand);
@@ -179,7 +218,10 @@ mod tests {
 
     #[test]
     fn joins_relative_paths() {
-        assert_eq!(join("3do/plane/A/", "../B/hier.him").as_deref(), Some("3do/plane/B/hier.him"));
+        assert_eq!(
+            join("3do/plane/A/", "../B/hier.him").as_deref(),
+            Some("3do/plane/B/hier.him")
+        );
         assert_eq!(join("", "../x"), None);
     }
 

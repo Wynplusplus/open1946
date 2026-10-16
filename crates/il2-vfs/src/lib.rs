@@ -34,7 +34,11 @@ pub struct Vfs {
 impl Vfs {
     /// Empty file system rooted at a game directory; archives are added with [`Vfs::mount`].
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into(), archives: Vec::new(), table: HashMap::new() }
+        Self {
+            root: root.into(),
+            archives: Vec::new(),
+            table: HashMap::new(),
+        }
     }
 
     /// Mounts the archives of a stock install in the order the game uses: `files.SFS`, then the
@@ -52,11 +56,19 @@ impl Vfs {
     /// Mounts an archive (path relative to the root, matched case-insensitively).
     /// Entries override those of earlier mounts.
     pub fn mount(&mut self, name: &str) -> Result<()> {
-        let path = self.resolve_loose(name).ok_or_else(|| Error::NotFound(name.to_owned()))?;
+        let path = self
+            .resolve_loose(name)
+            .ok_or_else(|| Error::NotFound(name.to_owned()))?;
         let archive = Archive::open(path)?;
         let idx = self.archives.len();
         for e in archive.entries() {
-            self.table.insert(e.hash, Location { archive: idx, entry: *e });
+            self.table.insert(
+                e.hash,
+                Location {
+                    archive: idx,
+                    entry: *e,
+                },
+            );
         }
         self.archives.push(archive);
         Ok(())
@@ -84,7 +96,9 @@ impl Vfs {
     }
 
     pub fn read_hash(&self, hash: u64) -> Result<Vec<u8>> {
-        let loc = self.lookup_hash(hash).ok_or_else(|| Error::NotFound(format!("{hash:#018x}")))?;
+        let loc = self
+            .lookup_hash(hash)
+            .ok_or_else(|| Error::NotFound(format!("{hash:#018x}")))?;
         self.read_location(loc)
     }
 
@@ -98,7 +112,9 @@ impl Vfs {
         if let Some(loc) = self.table.get(&path_hash(path)) {
             return self.read_location(loc);
         }
-        let p = self.loose_path(path).ok_or_else(|| Error::NotFound(path.to_owned()))?;
+        let p = self
+            .loose_path(path)
+            .ok_or_else(|| Error::NotFound(path.to_owned()))?;
         std::fs::read(&p).map_err(|e| Error::Io(p, e))
     }
 
@@ -106,7 +122,9 @@ impl Vfs {
     fn loose_path(&self, path: &str) -> Option<PathBuf> {
         let path = path.trim_start_matches(['/', '\\']);
         match path.split_once(['/', '\\']) {
-            Some((top, _)) if PROTECTED_DIRS.iter().any(|d| d.eq_ignore_ascii_case(top)) => return None,
+            Some((top, _)) if PROTECTED_DIRS.iter().any(|d| d.eq_ignore_ascii_case(top)) => {
+                return None
+            }
             None if path.get(..3).is_some_and(|p| p.eq_ignore_ascii_case(".rc")) => return None,
             _ => {}
         }
@@ -165,7 +183,10 @@ pub fn mount_commands(script: &str) -> Vec<String> {
 mod tests {
     #[test]
     fn normalizes_relative_paths() {
-        assert_eq!(super::normalize("3DO/Plane/A/..\\TEXTURES\\gear.tga"), "3DO/Plane/TEXTURES/gear.tga");
+        assert_eq!(
+            super::normalize("3DO/Plane/A/..\\TEXTURES\\gear.tga"),
+            "3DO/Plane/TEXTURES/gear.tga"
+        );
         assert_eq!(super::normalize("./a//b/./c"), "a/b/c");
     }
 

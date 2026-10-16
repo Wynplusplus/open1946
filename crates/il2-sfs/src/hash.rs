@@ -2,10 +2,24 @@
 //! See `docs/formats/sfs.md`, section "Path hash".
 
 const BASIS_LO: [u32; 8] = [
-    0x2378_8D5E, 0x46F1_1ABC, 0x0DE2_3578, 0x38BC_E7AE, 0x7179_CF5C, 0x62F3_9EB8, 0x669F_B02E, 0x6E47_ED02,
+    0x2378_8D5E,
+    0x46F1_1ABC,
+    0x0DE2_3578,
+    0x38BC_E7AE,
+    0x7179_CF5C,
+    0x62F3_9EB8,
+    0x669F_B02E,
+    0x6E47_ED02,
 ];
 const BASIS_HI: [u32; 8] = [
-    0x1434_182E, 0x3C5C_2872, 0x6C8C_48CA, 0x4D2C_89BA, 0x1A59_1374, 0x2086_3EC6, 0x5538_65A2, 0x3E44_D36A,
+    0x1434_182E,
+    0x3C5C_2872,
+    0x6C8C_48CA,
+    0x4D2C_89BA,
+    0x1A59_1374,
+    0x2086_3EC6,
+    0x5538_65A2,
+    0x3E44_D36A,
 ];
 
 /// Expands a linear table from its values at the powers of two.

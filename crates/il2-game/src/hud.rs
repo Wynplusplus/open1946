@@ -26,8 +26,17 @@ pub struct Hud {
 
 impl Hud {
     pub fn new(font_path: &std::path::Path) -> Self {
-        let mut hud = Hud { glyphs: HashMap::new(), line: PX, messages: Vec::new(), atlas: None, verts: Vec::new() };
-        let Some(font) = std::fs::read(font_path).ok().and_then(|d| FontVec::try_from_vec(d).ok()) else {
+        let mut hud = Hud {
+            glyphs: HashMap::new(),
+            line: PX,
+            messages: Vec::new(),
+            atlas: None,
+            verts: Vec::new(),
+        };
+        let Some(font) = std::fs::read(font_path)
+            .ok()
+            .and_then(|d| FontVec::try_from_vec(d).ok())
+        else {
             eprintln!("hud: no font at {}", font_path.display());
             return hud;
         };
@@ -45,7 +54,15 @@ impl Hud {
             let g = scaled.scaled_glyph(c);
             let advance = scaled.h_advance(g.id);
             let Some(outlined) = font.outline_glyph(g) else {
-                hud.glyphs.insert(c, Glyph { uv: [0.0; 4], size: [0.0; 2], offset: [0.0; 2], advance });
+                hud.glyphs.insert(
+                    c,
+                    Glyph {
+                        uv: [0.0; 4],
+                        size: [0.0; 2],
+                        offset: [0.0; 2],
+                        advance,
+                    },
+                );
                 continue;
             };
             let b = outlined.px_bounds();
@@ -66,7 +83,12 @@ impl Hud {
             hud.glyphs.insert(
                 c,
                 Glyph {
-                    uv: [x as f32 / a, y as f32 / a, (x + w) as f32 / a, (y + h) as f32 / a],
+                    uv: [
+                        x as f32 / a,
+                        y as f32 / a,
+                        (x + w) as f32 / a,
+                        (y + h) as f32 / a,
+                    ],
                     size: [w as f32, h as f32],
                     offset: [b.min.x, b.min.y + scaled.ascent()],
                     advance,
@@ -75,7 +97,11 @@ impl Hud {
             x += w + 1;
             row = row.max(h);
         }
-        hud.atlas = Some(Image { width: ATLAS, height: ATLAS, rgba });
+        hud.atlas = Some(Image {
+            width: ATLAS,
+            height: ATLAS,
+            rgba,
+        });
         hud
     }
 
@@ -88,7 +114,11 @@ impl Hud {
     }
 
     fn quad(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, uv: [f32; 4], color: [f32; 4]) {
-        let v = |x, y, u, w| OverlayVertex { pos: [x, y], uv: [u, w], color };
+        let v = |x, y, u, w| OverlayVertex {
+            pos: [x, y],
+            uv: [u, w],
+            color,
+        };
         self.verts.extend([
             v(x0, y0, uv[0], uv[1]),
             v(x1, y0, uv[2], uv[1]),
@@ -102,18 +132,37 @@ impl Hud {
     /// A solid rectangle.
     pub fn rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 4]) {
         let w = 2.0 / ATLAS as f32;
-        self.quad(x0, y0, x1, y1, [0.5 / ATLAS as f32, 0.5 / ATLAS as f32, w, w], color);
+        self.quad(
+            x0,
+            y0,
+            x1,
+            y1,
+            [0.5 / ATLAS as f32, 0.5 / ATLAS as f32, w, w],
+            color,
+        );
     }
 
     /// Text with a dark shadow, top-left at (x, y).
     pub fn text(&mut self, x: f32, y: f32, s: &str, color: [f32; 4]) {
-        for (dx, dy, c) in [(1.5, 1.5, [0.0, 0.0, 0.0, color[3] * 0.8]), (0.0, 0.0, color)] {
+        for (dx, dy, c) in [
+            (1.5, 1.5, [0.0, 0.0, 0.0, color[3] * 0.8]),
+            (0.0, 0.0, color),
+        ] {
             let mut pen = x + dx;
             for ch in s.chars() {
-                let Some(g) = self.glyphs.get(&ch) else { continue };
+                let Some(g) = self.glyphs.get(&ch) else {
+                    continue;
+                };
                 let (uv, size, off, adv) = (g.uv, g.size, g.offset, g.advance);
                 if size[0] > 0.0 {
-                    self.quad(pen + off[0], y + dy + off[1], pen + off[0] + size[0], y + dy + off[1] + size[1], uv, c);
+                    self.quad(
+                        pen + off[0],
+                        y + dy + off[1],
+                        pen + off[0] + size[0],
+                        y + dy + off[1] + size[1],
+                        uv,
+                        c,
+                    );
                 }
                 pen += adv;
             }
@@ -122,7 +171,14 @@ impl Hud {
 
     /// Builds this frame's overlay: `lines` in the bottom-left speed bar, messages above, and the
     /// gunsight when `sight` is set.
-    pub fn build(&mut self, w: f32, h: f32, lines: &[String], sight: bool, dt: f64) -> &[OverlayVertex] {
+    pub fn build(
+        &mut self,
+        w: f32,
+        h: f32,
+        lines: &[String],
+        sight: bool,
+        dt: f64,
+    ) -> &[OverlayVertex] {
         self.verts.clear();
         for m in &mut self.messages {
             m.1 -= dt;

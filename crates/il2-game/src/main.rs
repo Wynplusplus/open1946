@@ -16,7 +16,7 @@ mod world;
 use clap::Parser;
 #[cfg(feature = "gamepad")]
 use gilrs::{Axis, Gilrs};
-use glam::{DMat4, DVec3, Mat4};
+use glam::{DMat4, DQuat, DVec3, Mat4};
 use il2_fm::{Inputs, Sim, TICK};
 use il2_formats::map::HeightField;
 use il2_render::{GpuMesh, Renderer};
@@ -86,6 +86,9 @@ struct Args {
     /// Screenshot: hold these inputs (aileron, elevator, rudder, flaps, gear).
     #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
     hold: Option<Vec<f64>>,
+    /// Screenshot: from the cockpit, looking "yaw,pitch" degrees off the nose.
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true, num_args = 0..)]
+    cockpit: Option<Vec<f64>>,
 }
 
 /// Chase-camera view-projection and the eye position (scene is drawn relative to the eye).
@@ -100,9 +103,30 @@ fn chase_camera(s: &Sim, field: &HeightField, aspect: f32) -> (Mat4, DVec3) {
     (proj * view.as_mat4(), eye)
 }
 
+/// The pilot's view: the eye at the cockpit's `CAMERA` hook, the head turned by (yaw, pitch).
+/// Returns the world view-projection, the cockpit pass's (closer near plane) and the eye.
+fn cockpit_camera(
+    s: &Sim,
+    cam: glam::Vec3,
+    (yaw, pitch): (f64, f64),
+    aspect: f32,
+) -> (Mat4, Mat4, DVec3) {
+    let eye = s.pos + s.ori * cam.as_dvec3();
+    let head = s.ori * DQuat::from_rotation_z(yaw) * DQuat::from_rotation_y(-pitch);
+    let view = DMat4::look_at_rh(DVec3::ZERO, head * DVec3::X, head * DVec3::Z).as_mat4();
+    // 90° horizontal field of view, as the original's default.
+    let fovy = 2.0 * (1.0f32 / aspect).atan();
+    let world = Mat4::perspective_rh(fovy, aspect, 0.5, 150_000.0) * view;
+    let near = Mat4::perspective_rh(fovy, aspect, 0.02, 20.0) * view;
+    (world, near, eye)
+}
+
 fn place(r: &Renderer, terrain: &il2_render::GpuTerrain, plane: &GpuMesh, s: &Sim, eye: DVec3) {
     r.set_transform(&terrain.mesh, Mat4::from_translation((-eye).as_vec3()));
-    r.set_transform(plane, DMat4::from_rotation_translation(s.ori, s.pos - eye).as_mat4());
+    r.set_transform(
+        plane,
+        DMat4::from_rotation_translation(s.ori, s.pos - eye).as_mat4(),
+    );
 }
 
 /// The player's guns and the bullets in flight.
@@ -119,27 +143,77 @@ struct Combat {
 
 impl Combat {
     fn new(guns: Vec<weapons::Gun>, stores: Vec<weapons::Store>) -> Self {
-        Combat { guns, stores, projectiles: Vec::new(), bullets: Vec::new(), rng: weapons::Rng::new(0x5EED), hits: Vec::new(), booms: Vec::new() }
+        Combat {
+            guns,
+            stores,
+            projectiles: Vec::new(),
+            bullets: Vec::new(),
+            rng: weapons::Rng::new(0x5EED),
+            hits: Vec::new(),
+            booms: Vec::new(),
+        }
     }
 
-    fn step(&mut self, sim: &mut Sim, triggers: &[bool; 4], field: &HeightField, view: &mut view::WorldView) {
+    fn step(
+        &mut self,
+        sim: &mut Sim,
+        triggers: &[bool; 4],
+        field: &HeightField,
+        view: &mut view::WorldView,
+    ) {
         let objects = &mut view.objects;
-        let recoil = weapons::fire(&mut self.guns, triggers, sim.pos, sim.ori, sim.vel, TICK, &mut self.rng, 0, &mut self.bullets);
+        let recoil = weapons::fire(
+            &mut self.guns,
+            triggers,
+            sim.pos,
+            sim.ori,
+            sim.vel,
+            TICK,
+            &mut self.rng,
+            0,
+            &mut self.bullets,
+        );
         if recoil != DVec3::ZERO {
             // Gun recoil acts on the aircraft.
             sim.vel += sim.ori * recoil / sim.mass();
         }
-        weapons::release(&mut self.stores, triggers, sim.pos, sim.ori, sim.vel, TICK, &mut self.rng, &mut self.projectiles);
+        weapons::release(
+            &mut self.stores,
+            triggers,
+            sim.pos,
+            sim.ori,
+            sim.vel,
+            TICK,
+            &mut self.rng,
+            &mut self.projectiles,
+        );
         let booms = weapons::fly(&mut self.projectiles, TICK, field, objects, &mut self.rng);
         for &(at, power, killed) in &booms {
-            eprintln!("explosion of {power:.1} kg TNT at {:.0?}: {killed} objects destroyed", at);
+            eprintln!(
+                "explosion of {power:.1} kg TNT at {:.0?}: {killed} objects destroyed",
+                at
+            );
         }
         self.hits.clear();
-        weapons::advance(&mut self.bullets, TICK, field, objects, &mut self.rng, &mut self.hits);
+        weapons::advance(
+            &mut self.bullets,
+            TICK,
+            field,
+            objects,
+            &mut self.rng,
+            &mut self.hits,
+        );
         let fx = &mut view.effects;
         for &(at, power, _) in &booms {
             self.booms.push((at, power));
-            particles::impact(fx, at, particles::Impact::Blast { power }, at.z < 0.5, false, &mut self.rng);
+            particles::impact(
+                fx,
+                at,
+                particles::Impact::Blast { power },
+                at.z < 0.5,
+                false,
+                &mut self.rng,
+            );
         }
         for (b, h) in &self.hits {
             let ty = b.ty();
@@ -147,12 +221,22 @@ impl Combat {
                 weapons::Hit::Ground(p) => (*p, false),
                 weapons::Hit::Object(_, p, _) => (*p, true),
             };
-            let what = if ty.power > 0.0 && ty.power_radius > 0.0 { particles::Impact::Blast { power: ty.power } } else { particles::Impact::Shot { mass: ty.mass } };
+            let what = if ty.power > 0.0 && ty.power_radius > 0.0 {
+                particles::Impact::Blast { power: ty.power }
+            } else {
+                particles::Impact::Shot { mass: ty.mass }
+            };
             particles::impact(fx, at, what, at.z < 0.5 && !object, object, &mut self.rng);
             match h {
-                weapons::Hit::Object(_, _, true) => eprintln!("{} destroyed a building", b.spec.name),
-                weapons::Hit::Object(_, _, false) if std::env::var_os("IL2_TRACE").is_some() => eprintln!("hit object"),
-                weapons::Hit::Ground(p) if std::env::var_os("IL2_TRACE").is_some() => eprintln!("hit ground at {:.0?}", p),
+                weapons::Hit::Object(_, _, true) => {
+                    eprintln!("{} destroyed a building", b.spec.name)
+                }
+                weapons::Hit::Object(_, _, false) if std::env::var_os("IL2_TRACE").is_some() => {
+                    eprintln!("hit object")
+                }
+                weapons::Hit::Ground(p) if std::env::var_os("IL2_TRACE").is_some() => {
+                    eprintln!("hit ground at {:.0?}", p)
+                }
                 _ => {}
             }
         }
@@ -169,6 +253,12 @@ struct Game {
     renderer: Option<Renderer>,
     terrain: Option<il2_render::GpuTerrain>,
     plane: Option<GpuMesh>,
+    cockpit_data: Option<il2_render::MeshData>,
+    cockpit_eye: Option<glam::Vec3>,
+    cockpit: Option<GpuMesh>,
+    /// In the cockpit (F1), head turned by (yaw, pitch).
+    in_cockpit: bool,
+    head: (f64, f64),
     view: view::WorldView,
     env: il2_render::Environment,
     combat: Combat,
@@ -205,19 +295,33 @@ fn hud_lines(s: &Sim, field: &HeightField) -> Vec<String> {
     if let Some(e) = s.engines.first() {
         l.push(format!(
             "Engine {}  {:.0} rpm   Oil {:.0}°   Water {:.0}°   Rad {}   Prop {}   Fuel {:.0} kg",
-            match e.stage { 0 => "off", 1..=5 => "starting", 6 => "on", 7 => "dead", _ => "seized" },
+            match e.stage {
+                0 => "off",
+                1..=5 => "starting",
+                6 => "on",
+                7 => "dead",
+                _ => "seized",
+            },
             e.rpm(),
             e.t_oil_out,
             e.t_water,
-            e.radiator_manual.map_or("auto".to_owned(), |r| format!("{:.0}%", r * 100.0)),
-            e.prop_manual.map_or("auto".to_owned(), |p| format!("{:.0}%", p * 100.0)),
+            e.radiator_manual
+                .map_or("auto".to_owned(), |r| format!("{:.0}%", r * 100.0)),
+            e.prop_manual
+                .map_or("auto".to_owned(), |p| format!("{:.0}%", p * 100.0)),
             s.fuel
         ));
     }
     l.push(format!(
         "Flaps {:.0}%   Gear {}   Trim {:+.2}{}{}",
         s.ct.flaps * 100.0,
-        if s.ct.gear > 0.98 { "down" } else if s.ct.gear < 0.02 { "up" } else { "moving" },
+        if s.ct.gear > 0.98 {
+            "down"
+        } else if s.ct.gear < 0.02 {
+            "up"
+        } else {
+            "moving"
+        },
         s.trim[1] * 100.0,
         if s.airbrake > 0.5 { "   Air brake" } else { "" },
         if s.on_ground { "   On ground" } else { "" }
@@ -226,11 +330,17 @@ fn hud_lines(s: &Sim, field: &HeightField) -> Vec<String> {
 }
 
 /// Orbit camera "yaw, pitch, distance" (radians relative to the aircraft heading, metres).
-fn orbit_camera(s: &Sim, field: &HeightField, aspect: f32, (yaw, pitch, dist): (f64, f64, f64)) -> (Mat4, DVec3) {
+fn orbit_camera(
+    s: &Sim,
+    field: &HeightField,
+    aspect: f32,
+    (yaw, pitch, dist): (f64, f64, f64),
+) -> (Mat4, DVec3) {
     let fwd = s.ori * DVec3::X;
     let heading = fwd.y.atan2(fwd.x);
     let a = heading + yaw;
-    let mut eye = s.pos + DVec3::new(a.cos() * pitch.cos(), a.sin() * pitch.cos(), pitch.sin()) * dist;
+    let mut eye =
+        s.pos + DVec3::new(a.cos() * pitch.cos(), a.sin() * pitch.cos(), pitch.sin()) * dist;
     eye.z = eye.z.max(field.height_at(eye.x, eye.y) + 1.0);
     let view = DMat4::look_at_rh(DVec3::ZERO, s.pos - eye, DVec3::Z);
     let proj = Mat4::perspective_rh(55f32.to_radians(), aspect, 0.3, 150_000.0);
@@ -287,7 +397,10 @@ impl Game {
             while g.next_event().is_some() {}
             if let Some((_, pad)) = g.gamepads().next() {
                 let dz = |v: f32| if v.abs() < 0.08 { 0.0 } else { v as f64 };
-                let (x, y) = (dz(pad.value(Axis::LeftStickX)), dz(pad.value(Axis::LeftStickY)));
+                let (x, y) = (
+                    dz(pad.value(Axis::LeftStickX)),
+                    dz(pad.value(Axis::LeftStickY)),
+                );
                 if x != 0.0 {
                     i.aileron = x;
                 }
@@ -311,30 +424,73 @@ impl Game {
         let field = &self.field;
         let ground = |x: f64, y: f64| field.height_at(x, y);
         let k = |c| self.keys.contains(&c);
-        let triggers = [k(KeyCode::Space), k(KeyCode::Space) || k(KeyCode::Enter), k(KeyCode::KeyU), k(KeyCode::KeyK)];
+        let triggers = [
+            k(KeyCode::Space),
+            k(KeyCode::Space) || k(KeyCode::Enter),
+            k(KeyCode::KeyU),
+            k(KeyCode::KeyK),
+        ];
         while self.acc >= TICK {
             self.sim.tick(&self.inputs, &ground);
-            self.combat.step(&mut self.sim, &triggers, field, &mut self.view);
+            self.combat
+                .step(&mut self.sim, &triggers, field, &mut self.view);
             self.acc -= TICK;
         }
-        let (Some(r), Some(terrain), Some(plane)) = (self.renderer.as_mut(), &self.terrain, &self.plane) else { return };
+        let (Some(r), Some(terrain), Some(plane)) =
+            (self.renderer.as_mut(), &self.terrain, &self.plane)
+        else {
+            return;
+        };
 
         // Chase camera, rendered relative to the eye to keep precision far from the origin.
         let s = &self.sim;
-        let (vp, eye) = match self.orbit {
-            Some(o) => orbit_camera(s, field, r.aspect(), o),
-            None => chase_camera(s, field, r.aspect()),
+        let cam = self
+            .cockpit_eye
+            .filter(|_| self.in_cockpit && self.orbit.is_none() && self.cockpit.is_some());
+        let (vp, eye, fg_vp) = match (self.orbit, cam) {
+            (Some(o), _) => {
+                let (vp, eye) = orbit_camera(s, field, r.aspect(), o);
+                (vp, eye, None)
+            }
+            (None, Some(c)) => {
+                let (vp, near, eye) = cockpit_camera(s, c, self.head, r.aspect());
+                (vp, eye, Some(near))
+            }
+            (None, None) => {
+                let (vp, eye) = chase_camera(s, field, r.aspect());
+                (vp, eye, None)
+            }
         };
         place(r, terrain, plane, s, eye);
+        if let (Some(c), Some(_)) = (&self.cockpit, fg_vp) {
+            r.set_transform(
+                c,
+                DMat4::from_rotation_translation(s.ori, s.pos - eye).as_mat4(),
+            );
+        }
         r.set_nodes(plane, &world::pose(&self.assets, &s.ct));
         // Sound: engines, guns, explosions (heard from the camera).
         let level = (1.0 / (1.0 + (s.pos - eye).length() / 40.0)) as f32;
         for (i, (p, e)) in s.ac.engines.iter().zip(&s.engines).enumerate() {
             let name = format!("motor.{}", p.sound_name.as_deref().unwrap_or("db605"));
-            let preset = self.audio.preset(&self.vfs, &name).or_else(|| self.audio.preset(&self.vfs, "motor.db605"));
+            let preset = self
+                .audio
+                .preset(&self.vfs, &name)
+                .or_else(|| self.audio.preset(&self.vfs, "motor.db605"));
             if let Some(pr) = preset {
-                let rpm = if e.stage == 0 || e.stage >= 7 { 0.0 } else { e.rpm() as f32 };
-                self.audio.drive(&self.vfs, 1 + i as u64, &pr, &[("rpm", rpm)], audio::ENV_OUTSIDE, level);
+                let rpm = if e.stage == 0 || e.stage >= 7 {
+                    0.0
+                } else {
+                    e.rpm() as f32
+                };
+                self.audio.drive(
+                    &self.vfs,
+                    1 + i as u64,
+                    &pr,
+                    &[("rpm", rpm)],
+                    audio::ENV_OUTSIDE,
+                    level,
+                );
             }
         }
         for (i, g) in self.combat.guns.iter().enumerate() {
@@ -342,22 +498,51 @@ impl Game {
             match (g.firing, g.spec.sound.as_deref()) {
                 (true, Some(snd)) => {
                     if let Some(pr) = self.audio.preset(&self.vfs, snd) {
-                        self.audio.drive(&self.vfs, key, &pr, &[], audio::ENV_OUTSIDE, level * 0.5);
+                        self.audio
+                            .drive(&self.vfs, key, &pr, &[], audio::ENV_OUTSIDE, level * 0.5);
                     }
                 }
                 _ => self.audio.stop(key),
             }
         }
         for (at, power) in std::mem::take(&mut self.combat.booms) {
-            let name = if power >= 50.0 { "explode.big" } else if power >= 1.0 { "explode.middle" } else { "explode.bullet" };
+            let name = if power >= 50.0 {
+                "explode.big"
+            } else if power >= 1.0 {
+                "explode.middle"
+            } else {
+                "explode.bullet"
+            };
             if let Some(pr) = self.audio.preset(&self.vfs, name) {
                 let d = (at - eye).length() as f32;
                 self.audio.play(&self.vfs, &pr, 1.0 / (1.0 + d / 300.0));
             }
         }
         let (w, h) = (r.size().0 as f32, r.size().1 as f32);
-        r.set_overlay(self.hud.build(w, h, &hud_lines(s, field), self.orbit.is_none(), dt));
-        self.view.draw(r, field, terrain, vp, eye, &[plane], &self.combat.bullets, &self.combat.projectiles, false);
+        r.set_overlay(self.hud.build(
+            w,
+            h,
+            &hud_lines(s, field),
+            self.orbit.is_none() && fg_vp.is_none(),
+            dt,
+        ));
+        let cockpit: Vec<&GpuMesh> = self.cockpit.iter().collect();
+        let (outside, fg): (&[&GpuMesh], _) = match fg_vp {
+            Some(m) => (&[], Some((m, cockpit.as_slice()))),
+            None => (std::slice::from_ref(&plane), None),
+        };
+        self.view.draw(
+            r,
+            field,
+            terrain,
+            vp,
+            eye,
+            outside,
+            &self.combat.bullets,
+            &self.combat.projectiles,
+            fg,
+            false,
+        );
 
         for (i, e) in self.sim.engines.iter_mut().enumerate() {
             for ev in e.events.drain(..) {
@@ -373,11 +558,15 @@ impl ApplicationHandler for Game {
         if self.renderer.is_some() {
             return;
         }
-        let window = Arc::new(el.create_window(winit::window::Window::default_attributes().with_title("OpenIL2")).expect("window"));
+        let window = Arc::new(
+            el.create_window(winit::window::Window::default_attributes().with_title("OpenIL2"))
+                .expect("window"),
+        );
         let mut r = Renderer::new(window);
         r.env = self.env;
         self.terrain = self.terrain_data.take().map(|d| r.upload_terrain(&d));
         self.plane = self.plane_data.take().map(|d| r.upload(&d));
+        self.cockpit = self.cockpit_data.take().map(|d| r.upload(&d));
         self.view.upload(&r);
         if let Some(a) = &self.hud.atlas {
             r.set_overlay_atlas(a);
@@ -400,10 +589,25 @@ impl ApplicationHandler for Game {
                         self.keys.insert(code);
                         match code {
                             KeyCode::Escape => el.exit(),
-                            KeyCode::F1 => self.orbit = None,
-                            KeyCode::F2 => self.orbit = Some(self.orbit.unwrap_or((std::f64::consts::PI, 0.25, 25.0))),
-                            KeyCode::KeyF => self.inputs.flaps = self.sim.flap_step(self.inputs.flaps, true),
-                            KeyCode::KeyV => self.inputs.flaps = self.sim.flap_step(self.inputs.flaps, false),
+                            KeyCode::F1 => {
+                                self.orbit = None;
+                                self.in_cockpit = true;
+                                self.head = (0.0, 0.0);
+                            }
+                            KeyCode::F2 => {
+                                self.orbit =
+                                    Some(self.orbit.unwrap_or((std::f64::consts::PI, 0.25, 25.0)))
+                            }
+                            KeyCode::F3 => {
+                                self.orbit = None;
+                                self.in_cockpit = false;
+                            }
+                            KeyCode::KeyF => {
+                                self.inputs.flaps = self.sim.flap_step(self.inputs.flaps, true)
+                            }
+                            KeyCode::KeyV => {
+                                self.inputs.flaps = self.sim.flap_step(self.inputs.flaps, false)
+                            }
                             KeyCode::Comma => self.sim.trim(1, -1.0),
                             KeyCode::Period => self.sim.trim(1, 1.0),
                             KeyCode::BracketLeft => self.sim.trim(0, -1.0),
@@ -417,7 +621,12 @@ impl ApplicationHandler for Game {
                             }
                             KeyCode::KeyR => {
                                 // Radiator: automatic, then 1/3, 2/3, fully open, then automatic again.
-                                let next = match self.sim.engines.first().and_then(|e| e.radiator_manual) {
+                                let next = match self
+                                    .sim
+                                    .engines
+                                    .first()
+                                    .and_then(|e| e.radiator_manual)
+                                {
                                     None => Some(1.0 / 3.0),
                                     Some(r) if r < 0.9 => Some((r + 1.0 / 3.0).min(1.0)),
                                     Some(_) => None,
@@ -425,17 +634,31 @@ impl ApplicationHandler for Game {
                                 self.sim.set_radiator(next);
                             }
                             KeyCode::KeyO => {
-                                let auto = self.sim.engines.first().is_none_or(|e| e.prop_manual.is_none());
+                                let auto = self
+                                    .sim
+                                    .engines
+                                    .first()
+                                    .is_none_or(|e| e.prop_manual.is_none());
                                 self.sim.set_prop(if auto { Some(1.0) } else { None });
                             }
                             KeyCode::KeyQ | KeyCode::KeyE => {
-                                let cur = self.sim.engines.first().and_then(|e| e.prop_manual).unwrap_or(1.0);
+                                let cur = self
+                                    .sim
+                                    .engines
+                                    .first()
+                                    .and_then(|e| e.prop_manual)
+                                    .unwrap_or(1.0);
                                 let d = if code == KeyCode::KeyQ { -0.05 } else { 0.05 };
                                 self.sim.set_prop(Some((cur + d).clamp(0.0, 1.0)));
                             }
                             KeyCode::KeyL => self.inputs.tail_lock = !self.inputs.tail_lock,
-                            KeyCode::KeyN => self.inputs.airbrake = if self.inputs.airbrake > 0.5 { 0.0 } else { 1.0 },
-                            KeyCode::KeyG => self.inputs.gear = if self.inputs.gear > 0.5 { 0.0 } else { 1.0 },
+                            KeyCode::KeyN => {
+                                self.inputs.airbrake =
+                                    if self.inputs.airbrake > 0.5 { 0.0 } else { 1.0 }
+                            }
+                            KeyCode::KeyG => {
+                                self.inputs.gear = if self.inputs.gear > 0.5 { 0.0 } else { 1.0 }
+                            }
                             KeyCode::Digit0 => self.inputs.throttle = 1.0,
                             // Boost: throttle to 110 % where allowed, and the WEP switch.
                             KeyCode::KeyW => {
@@ -445,8 +668,14 @@ impl ApplicationHandler for Game {
                                 }
                             }
                             KeyCode::Digit1 => self.inputs.throttle = 0.0,
-                            c @ (KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6
-                            | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9) => {
+                            c @ (KeyCode::Digit2
+                            | KeyCode::Digit3
+                            | KeyCode::Digit4
+                            | KeyCode::Digit5
+                            | KeyCode::Digit6
+                            | KeyCode::Digit7
+                            | KeyCode::Digit8
+                            | KeyCode::Digit9) => {
                                 let n = c as u32 - KeyCode::Digit0 as u32;
                                 self.inputs.throttle = (n as f64 - 1.0) / 9.0;
                             }
@@ -458,13 +687,24 @@ impl ApplicationHandler for Game {
                 }
             }
             WindowEvent::RedrawRequested => self.frame(),
-            WindowEvent::MouseInput { state, button: winit::event::MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
                 self.dragging = state == ElementState::Pressed;
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if let (Some((x, y)), true, Some(o)) = (self.cursor, self.dragging, self.orbit.as_mut()) {
-                    o.0 -= (position.x - x) * 0.008;
-                    o.1 = (o.1 + (position.y - y) * 0.008).clamp(-1.5, 1.5);
+                if let (Some((x, y)), true) = (self.cursor, self.dragging) {
+                    let (dx, dy) = ((position.x - x) * 0.008, (position.y - y) * 0.008);
+                    if let Some(o) = self.orbit.as_mut() {
+                        o.0 -= dx;
+                        o.1 = (o.1 + dy).clamp(-1.5, 1.5);
+                    } else if self.in_cockpit {
+                        // Looking around: the head turns up to 150° either side.
+                        self.head.0 = (self.head.0 - dx).clamp(-2.6, 2.6);
+                        self.head.1 = (self.head.1 - dy).clamp(-0.6, 1.4);
+                    }
                 }
                 self.cursor = Some((position.x, position.y));
             }
@@ -490,7 +730,11 @@ fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
     sim.engine_overheat = false;
     sim.set_radiator(Some(0.0));
     sim.pos.z = alt;
-    let mut inputs = Inputs { throttle: 1.1, wep: true, ..Default::default() };
+    let mut inputs = Inputs {
+        throttle: 1.1,
+        wep: true,
+        ..Default::default()
+    };
     let mut last = Vec::new();
     for step in 0..(240.0 / TICK) as usize {
         let vz = sim.vel.z;
@@ -515,14 +759,21 @@ fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
             last.push((sim.vel.length(), sim.pos.z));
         }
     }
-    if let Some(e) = sim.engines.first().filter(|_| std::env::var_os("IL2_QUIET").is_none()) {
+    if let Some(e) = sim
+        .engines
+        .first()
+        .filter(|_| std::env::var_os("IL2_QUIET").is_none())
+    {
         eprintln!(
             "  engine at {alt:.0} m: {:.0} rpm, manifold {:.2} ata, pitch {:.1} deg, thrust {:.0} N, prop torque {:.0} N·m",
             e.rpm(), e.manifold, e.phi.to_degrees(), e.thrust, e.prop_torque
         );
     }
     let n = last.len() as f64;
-    (last.iter().map(|v| v.0).sum::<f64>() / n * 3.6, last.iter().map(|v| v.1).sum::<f64>() / n)
+    (
+        last.iter().map(|v| v.0).sum::<f64>() / n * 3.6,
+        last.iter().map(|v| v.1).sum::<f64>() / n,
+    )
 }
 
 /// Full-throttle takeoff with a simple pilot: keep straight with rudder, raise the tail at 100 km/h,
@@ -530,7 +781,12 @@ fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
 fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
     let start = sim.pos;
     let heading0 = (sim.ori * DVec3::X).truncate().normalize();
-    let mut inputs = Inputs { throttle: 1.1, gear: 1.0, tail_lock: true, ..Default::default() };
+    let mut inputs = Inputs {
+        throttle: 1.1,
+        gear: 1.0,
+        tail_lock: true,
+        ..Default::default()
+    };
     let ground = |x: f64, y: f64| field.height_at(x, y);
     let mut t = 0.0;
     let mut last_contact = (0.0, sim.pos, 0.0, heading0);
@@ -540,15 +796,27 @@ fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
         let kmh = sim.vel.length() * 3.6;
         inputs.rudder = (2.0 * yaw_err + 0.8 * sim.w.z).clamp(-1.0, 1.0);
         let pitch = (sim.ori * DVec3::X).z.asin().to_degrees();
-        let target = if kmh < 100.0 { 99.0 } else if kmh < 170.0 { 1.5 } else { 8.0 };
-        inputs.elevator = if target > 90.0 { 0.0 } else { (0.08 * (target - pitch) + 0.3 * sim.w.y).clamp(-1.0, 1.0) };
+        let target = if kmh < 100.0 {
+            99.0
+        } else if kmh < 170.0 {
+            1.5
+        } else {
+            8.0
+        };
+        inputs.elevator = if target > 90.0 {
+            0.0
+        } else {
+            (0.08 * (target - pitch) + 0.3 * sim.w.y).clamp(-1.0, 1.0)
+        };
         inputs.aileron = (-0.05 * sim.bank_deg() - 0.3 * sim.w.x).clamp(-1.0, 1.0);
         sim.tick(&inputs, &ground);
         t += TICK;
         if sim.on_ground {
             last_contact = (t, sim.pos, sim.ias, fwd);
         }
-        if std::env::var_os("IL2_TRACE").is_some() && ((t / TICK).round() as usize).is_multiple_of(33) {
+        if std::env::var_os("IL2_TRACE").is_some()
+            && ((t / TICK).round() as usize).is_multiple_of(33)
+        {
             eprintln!(
                 "t={t:5.1} v={kmh:5.0} yaw_err={:6.1} wz={:6.2} rud={:5.2} pitch={:5.1} gnd={} agl={:5.2}",
                 yaw_err.asin().to_degrees(), sim.w.z, inputs.rudder,
@@ -565,32 +833,57 @@ fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
             );
         }
     }
-    format!("takeoff: no lift-off within 90 s (speed {:.0} km/h, on ground {})", sim.vel.length() * 3.6, sim.on_ground)
+    format!(
+        "takeoff: no lift-off within 90 s (speed {:.0} km/h, on ground {})",
+        sim.vel.length() * 3.6,
+        sim.on_ground
+    )
 }
 
 /// Drops the aircraft from 0.5 m onto flat ground at its parked attitude, brakes on, engine off.
 fn parked_test(mut sim: Sim, (h, pitch_deg): (f64, f64)) -> (f64, f64, f64) {
     let ground = |_: f64, _: f64| 0.0;
     // Dropped from 10 cm above its parked stance.
-    sim.ori = glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2) * glam::DQuat::from_rotation_y(-pitch_deg.to_radians());
+    sim.ori = glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2)
+        * glam::DQuat::from_rotation_y(-pitch_deg.to_radians());
     sim.pos.z = h + 0.1;
     sim.vel = DVec3::ZERO;
     sim.set_engines_idle(true);
-    let inputs = Inputs { brakes: 1.0, gear: 1.0, ..Default::default() };
+    let inputs = Inputs {
+        brakes: 1.0,
+        gear: 1.0,
+        ..Default::default()
+    };
     for _ in 0..(10.0 / TICK) as usize {
         sim.tick(&inputs, &ground);
     }
     let pitch = (sim.ori * DVec3::X).z.asin().to_degrees();
-    if let Some(e) = sim.engines.first().filter(|_| std::env::var_os("IL2_QUIET").is_none()) {
-        eprintln!("  parked: engine {:.0} rpm, thrust {:.0} N", e.rpm(), e.thrust);
+    if let Some(e) = sim
+        .engines
+        .first()
+        .filter(|_| std::env::var_os("IL2_QUIET").is_none())
+    {
+        eprintln!(
+            "  parked: engine {:.0} rpm, thrust {:.0} N",
+            e.rpm(),
+            e.thrust
+        );
     }
     (pitch, sim.pos.z, sim.vel.length())
 }
 
 /// How the player starts: from a mission, or airborne over the map centre.
 enum Start {
-    Takeoff { x: f64, y: f64, heading: f64 },
-    Air { pos: DVec3, toward: DVec3, speed: f64 },
+    Takeoff {
+        x: f64,
+        y: f64,
+        heading: f64,
+    },
+    Air {
+        pos: DVec3,
+        toward: DVec3,
+        speed: f64,
+    },
     Default,
 }
 
@@ -604,19 +897,30 @@ fn main() {
     }
     let mut start = Start::Default;
     let mut fuel = 1.0;
-    let mission = args.mission.as_ref().map(|path| il2_formats::mission::Mission::parse(&vfs.read(path).unwrap_or_else(|e| fail(e))));
+    let mission = args.mission.as_ref().map(|path| {
+        il2_formats::mission::Mission::parse(&vfs.read(path).unwrap_or_else(|e| fail(e)))
+    });
     if let (Some(path), Some(m)) = (&args.mission, &mission) {
-        let wing = m.player().unwrap_or_else(|| fail("mission has no player flight"));
+        let wing = m
+            .player()
+            .unwrap_or_else(|| fail("mission has no player flight"));
         args.map = format!("maps/{}", m.map);
         args.aircraft = wing.class.clone();
         fuel = wing.fuel_percent / 100.0;
-        eprintln!("mission: {} on {}, flight {} ({} x {})", path, m.map, wing.name, wing.planes, wing.class);
+        eprintln!(
+            "mission: {} on {}, flight {} ({} x {})",
+            path, m.map, wing.name, wing.planes, wing.class
+        );
         let ends = world::load_runways(&vfs, &args.map);
         if let Some(w0) = wing.waypoints.first() {
             start = if w0.kind.starts_with("TAKEOFF") {
                 match world::takeoff_spot(&ends, w0.x, w0.y) {
                     Some((x, y, heading)) => Start::Takeoff { x, y, heading },
-                    None => Start::Air { pos: DVec3::new(w0.x, w0.y, 500.0), toward: DVec3::new(w0.x, w0.y + 1.0, 500.0), speed: 100.0 },
+                    None => Start::Air {
+                        pos: DVec3::new(w0.x, w0.y, 500.0),
+                        toward: DVec3::new(w0.x, w0.y + 1.0, 500.0),
+                        speed: 100.0,
+                    },
                 }
             } else {
                 let next = wing.waypoints.get(1).unwrap_or(w0);
@@ -632,7 +936,10 @@ fn main() {
         start = Start::Default;
     }
     let assets = world::load_aircraft(&vfs, &fms, &args.aircraft).unwrap_or_else(|e| fail(e));
-    let fmd_name = il2_data::Classes::new(&vfs, &fms.keys).aircraft(&args.aircraft).map(|c| c.flight_model).unwrap_or_default();
+    let fmd_name = il2_data::Classes::new(&vfs, &fms.keys)
+        .aircraft(&args.aircraft)
+        .map(|c| c.flight_model)
+        .unwrap_or_default();
     let field = world::load_heights(&vfs, &args.map).unwrap_or_else(|e| fail(e));
 
     if args.test && !matches!(start, Start::Takeoff { .. }) {
@@ -643,11 +950,22 @@ fn main() {
             let (kmh, z) = level_flight_test(sim, alt);
             println!("level flight at {alt:5.0} m: {kmh:5.1} km/h (held {z:5.0} m)");
         }
-        println!("flight model reference: Vmax {} km/h at sea level, VmaxH {} km/h at {} m", p("Vmax"), p("VmaxH"), p("HofVmax"));
-        let (pitch, z, v) = parked_test(world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0), assets.parked);
+        println!(
+            "flight model reference: Vmax {} km/h at sea level, VmaxH {} km/h at {} m",
+            p("Vmax"),
+            p("VmaxH"),
+            p("HofVmax")
+        );
+        let (pitch, z, v) = parked_test(
+            world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0),
+            assets.parked,
+        );
         println!("parked on flat ground: pitch {pitch:.2} deg, origin {z:.3} m above ground, drift {v:.3} m/s (reference: Pitch {}, H {})",
             fmd.get("Gear", "Pitch").unwrap_or("?"), fmd.get("Gear", "H").unwrap_or("?"));
-        println!("{}", engine_test(world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0)));
+        println!(
+            "{}",
+            engine_test(world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0))
+        );
         return;
     }
 
@@ -663,7 +981,8 @@ fn main() {
     let map_objects = {
         let statics_ini = objects::statics_ini(&vfs).unwrap_or_else(|e| fail(e));
         let mut b = objects::Builder::new(&vfs, &field, &objects::season(&vfs, &args.map));
-        b.add_map(&vfs, &args.map, &statics_ini).unwrap_or_else(|e| fail(e));
+        b.add_map(&vfs, &args.map, &statics_ini)
+            .unwrap_or_else(|e| fail(e));
         if let Some(m) = &mission {
             mission_objects::add_mission(&mut b, &vfs, &fms, m, &statics_ini);
         }
@@ -672,13 +991,31 @@ fn main() {
     if std::env::var_os("IL2_TRACE").is_some() {
         eprintln!("skipped classes: {:?}", map_objects.skipped);
     }
-    eprintln!("map objects: {} placed in {:.1} s ({} classes skipped)", map_objects.len(), t0.elapsed().as_secs_f64(), map_objects.skipped.len());
+    eprintln!(
+        "map objects: {} placed in {:.1} s ({} classes skipped)",
+        map_objects.len(),
+        t0.elapsed().as_secs_f64(),
+        map_objects.skipped.len()
+    );
     let env = {
-        let ini = vfs.read(&args.map).map(|d| il2_formats::SectFile::parse(&d)).unwrap_or_default();
-        let wp = |k: &str| ini.section_ci("WORLDPOS").and_then(|s| s.get_ci(k)).and_then(|v| il2_formats::sectfile::atof(v.trim_start_matches(['=', ' '])));
+        let ini = vfs
+            .read(&args.map)
+            .map(|d| il2_formats::SectFile::parse(&d))
+            .unwrap_or_default();
+        let wp = |k: &str| {
+            ini.section_ci("WORLDPOS")
+                .and_then(|s| s.get_ci(k))
+                .and_then(|v| il2_formats::sectfile::atof(v.trim_start_matches(['=', ' '])))
+        };
         let lat = wp("DECLIN").map_or(50.0, f64::from);
-        let (month, day) = mission.as_ref().and_then(|m| m.date).unwrap_or((wp("MONTH").map_or(6, |m| m as u32), 15));
-        let hours = args.time.or(mission.as_ref().map(|m| m.time_hours)).unwrap_or(12.0);
+        let (month, day) = mission
+            .as_ref()
+            .and_then(|m| m.date)
+            .unwrap_or((wp("MONTH").map_or(6, |m| m as u32), 15));
+        let hours = args
+            .time
+            .or(mission.as_ref().map(|m| m.time_hours))
+            .unwrap_or(12.0);
         sky::environment(hours, sky::day_of_year(month, day), lat)
     };
     let forest = forest::Forest::load(&vfs, &args.map, &terrain.types);
@@ -686,7 +1023,12 @@ fn main() {
     // Guns of the chosen loadout and their tracers.
     let guns = {
         let classes = il2_data::Classes::new(&vfs, &fms.keys);
-        let loadout = args.loadout.clone().unwrap_or_else(|| mission.as_ref().and_then(|m| m.player()).map_or("default".to_owned(), |w| w.weapons.clone()));
+        let loadout = args.loadout.clone().unwrap_or_else(|| {
+            mission
+                .as_ref()
+                .and_then(|m| m.player())
+                .map_or("default".to_owned(), |w| w.weapons.clone())
+        });
         let mut armoury = weapons::Armoury::default();
         let w = classes.aircraft_weapons(&args.aircraft).unwrap_or_default();
         let guns = weapons::mount(&mut armoury, &classes, &w, &loadout, &assets.hook_frames);
@@ -695,7 +1037,11 @@ fn main() {
             "loadout {loadout}: {}",
             guns.iter()
                 .map(|g| format!("{} ({})", g.spec.name, g.ammo))
-                .chain(stores.iter().map(|s| format!("{} ({})", s.spec.name, s.count)))
+                .chain(
+                    stores
+                        .iter()
+                        .map(|s| format!("{} ({})", s.spec.name, s.count))
+                )
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -705,20 +1051,32 @@ fn main() {
     let tracers = effects::Tracers::load(
         &vfs,
         guns.iter()
-            .flat_map(|g| g.spec.bullets.iter().filter_map(|b| b.trace_mesh.as_deref()))
+            .flat_map(|g| {
+                g.spec
+                    .bullets
+                    .iter()
+                    .filter_map(|b| b.trace_mesh.as_deref())
+            })
             .chain(stores.iter().filter_map(|s| s.spec.mesh.as_deref())),
     );
-    let effects = particles::Effects::load(&vfs, particles::known_effects().iter().map(String::as_str));
+    let effects =
+        particles::Effects::load(&vfs, particles::known_effects().iter().map(String::as_str));
     let mut view = view::WorldView::new(map_objects, forest, roads, Some(tracers), effects);
     let mut assets = assets;
     let plane_mesh = std::mem::take(&mut assets.mesh);
     let (h, pitch) = assets.parked;
     let mut sim = match start {
-        Start::Takeoff { x, y, heading } => world::spawn_on_ground(assets.fm.clone(), &field, x, y, heading, h, pitch),
+        Start::Takeoff { x, y, heading } => {
+            world::spawn_on_ground(assets.fm.clone(), &field, x, y, heading, h, pitch)
+        }
         Start::Air { pos, toward, speed } => world::spawn_at(assets.fm.clone(), pos, toward, speed),
         Start::Default => {
             let mut sim = world::spawn_airborne(assets.fm.clone(), &field, args.agl, 110.0);
-            if let Some([x, y]) = args.at.as_deref().and_then(|a| <[f64; 2]>::try_from(a).ok()) {
+            if let Some([x, y]) = args
+                .at
+                .as_deref()
+                .and_then(|a| <[f64; 2]>::try_from(a).ok())
+            {
                 sim.pos = DVec3::new(x, y, field.height_at(x, y) + args.agl);
             }
             if let Some(d) = args.dive {
@@ -740,7 +1098,11 @@ fn main() {
     }
 
     if let Some(out) = &args.screenshot {
-        let mut inputs = Inputs { throttle: throttle0, gear: gear0, ..Default::default() };
+        let mut inputs = Inputs {
+            throttle: throttle0,
+            gear: gear0,
+            ..Default::default()
+        };
         if let Some(h) = &args.hold {
             let g = |i: usize, d: f64| h.get(i).copied().unwrap_or(d);
             inputs.aileron = g(0, 0.0);
@@ -766,17 +1128,45 @@ fn main() {
         if let Some(o) = &args.orbit {
             let fwd = sim.ori * DVec3::X;
             let heading = fwd.y.atan2(fwd.x);
-            let (yaw, pitch, dist) = (heading + o[0].to_radians(), o.get(1).copied().unwrap_or(15.0).to_radians(), o.get(2).copied().unwrap_or(12.0));
-            eye = sim.pos + DVec3::new(yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin()) * dist;
+            let (yaw, pitch, dist) = (
+                heading + o[0].to_radians(),
+                o.get(1).copied().unwrap_or(15.0).to_radians(),
+                o.get(2).copied().unwrap_or(12.0),
+            );
+            eye = sim.pos
+                + DVec3::new(
+                    yaw.cos() * pitch.cos(),
+                    yaw.sin() * pitch.cos(),
+                    pitch.sin(),
+                ) * dist;
             let view = DMat4::look_at_rh(DVec3::ZERO, sim.pos - eye, DVec3::Z);
-            vp = Mat4::perspective_rh(45f32.to_radians(), w as f32 / h as f32, 0.2, 150_000.0) * view.as_mat4();
+            vp = Mat4::perspective_rh(45f32.to_radians(), w as f32 / h as f32, 0.2, 150_000.0)
+                * view.as_mat4();
         }
         if let (Some(e), Some(t)) = (&args.eye, &args.target) {
             eye = DVec3::new(e[0], e[1], e[2]);
             let target = DVec3::new(t[0], t[1], t[2]);
             let view = DMat4::look_at_rh(DVec3::ZERO, target - eye, DVec3::Z);
-            vp = Mat4::perspective_rh(45f32.to_radians(), w as f32 / h as f32, 0.2, 150_000.0) * view.as_mat4();
+            vp = Mat4::perspective_rh(45f32.to_radians(), w as f32 / h as f32, 0.2, 150_000.0)
+                * view.as_mat4();
         }
+        let mut fg_vp = None;
+        let cockpit_gpu = match (&args.cockpit, &assets.cockpit) {
+            (Some(head), Some((mesh, cam))) => {
+                let g = |i: usize| head.get(i).copied().unwrap_or(0.0).to_radians();
+                let (world, near, e) =
+                    cockpit_camera(&sim, *cam, (g(0), g(1)), w as f32 / h as f32);
+                (vp, eye, fg_vp) = (world, e, Some(near));
+                let c = r.upload(mesh);
+                r.set_transform(
+                    &c,
+                    DMat4::from_rotation_translation(sim.ori, sim.pos - eye).as_mat4(),
+                );
+                Some(c)
+            }
+            (Some(_), None) => fail("this aircraft has no cockpit"),
+            _ => None,
+        };
         place(&r, &terrain, &plane, &sim, eye);
         let posed = world::pose(&assets, &sim.ct);
         if std::env::var_os("IL2_TRACE").is_some() {
@@ -789,18 +1179,52 @@ fn main() {
             eprintln!("ct: {:?}", sim.ct);
         }
         r.set_nodes(&plane, &posed);
-        eprintln!("{} bullets in flight, {} effect particles", combat.bullets.len(), view.effects.count());
+        eprintln!(
+            "{} bullets in flight, {} effect particles",
+            combat.bullets.len(),
+            view.effects.count()
+        );
         let mut hud = hud::Hud::new(&args.root.join("lib/fonts/LucidaSansRegular.ttf"));
         if let Some(a) = &hud.atlas {
             r.set_overlay_atlas(a);
         }
-        r.set_overlay(hud.build(w as f32, h as f32, &hud_lines(&sim, &field), args.orbit.is_none() && args.eye.is_none(), 0.0));
-        let px = view.draw(&mut r, &field, &terrain, vp, eye, &[&plane], &combat.bullets, &combat.projectiles, true).unwrap_or_default();
-        image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).unwrap_or_else(|e| fail(e));
+        r.set_overlay(hud.build(
+            w as f32,
+            h as f32,
+            &hud_lines(&sim, &field),
+            args.orbit.is_none() && args.eye.is_none() && args.cockpit.is_none(),
+            0.0,
+        ));
+        let cockpit: Vec<&GpuMesh> = cockpit_gpu.iter().collect();
+        let (outside, fg): (Vec<&GpuMesh>, _) = match fg_vp {
+            Some(m) => (vec![], Some((m, cockpit.as_slice()))),
+            None => (vec![&plane], None),
+        };
+        let px = view
+            .draw(
+                &mut r,
+                &field,
+                &terrain,
+                vp,
+                eye,
+                &outside,
+                &combat.bullets,
+                &combat.projectiles,
+                fg,
+                true,
+            )
+            .unwrap_or_default();
+        image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8)
+            .unwrap_or_else(|e| fail(e));
         return;
     }
+    let cockpit = assets.cockpit.take();
     let mut game = Game {
-        inputs: Inputs { throttle: throttle0, gear: gear0, ..Default::default() },
+        inputs: Inputs {
+            throttle: throttle0,
+            gear: gear0,
+            ..Default::default()
+        },
         assets,
         sim,
         field,
@@ -809,6 +1233,11 @@ fn main() {
         renderer: None,
         terrain: None,
         plane: None,
+        cockpit_eye: cockpit.as_ref().map(|(_, c)| *c),
+        cockpit_data: cockpit.map(|(m, _)| m),
+        cockpit: None,
+        in_cockpit: true,
+        head: (0.0, 0.0),
         view,
         env,
         combat: Combat::new(guns.clone(), stores.clone()),
@@ -819,7 +1248,13 @@ fn main() {
         #[cfg(feature = "gamepad")]
         gilrs: Gilrs::new().ok(),
         joystick: {
-            let map = args.joy_map.as_deref().map(joystick::AxisMap::parse).transpose().unwrap_or_else(|e| fail(e)).unwrap_or_default();
+            let map = args
+                .joy_map
+                .as_deref()
+                .map(joystick::AxisMap::parse)
+                .transpose()
+                .unwrap_or_else(|e| fail(e))
+                .unwrap_or_default();
             joystick::Joystick::open().map(|(j, path)| {
                 eprintln!("joystick: {path}");
                 (j, map)
@@ -841,7 +1276,12 @@ fn engine_test(mut sim: Sim) -> String {
     let flat = |_: f64, _: f64| 0.0;
     sim.set_engines_cold();
     sim.toggle_engines(true);
-    let mut inputs = Inputs { throttle: 0.3, gear: 1.0, brakes: 1.0, ..Default::default() };
+    let mut inputs = Inputs {
+        throttle: 0.3,
+        gear: 1.0,
+        brakes: 1.0,
+        ..Default::default()
+    };
     let mut t = 0.0;
     while t < 30.0 && !sim.engines.iter().all(|e| e.running()) {
         sim.tick(&inputs, &flat);
@@ -849,7 +1289,12 @@ fn engine_test(mut sim: Sim) -> String {
     }
     let started = sim.engines.iter().all(|e| e.running());
     let e = &sim.engines[0];
-    let mut out = format!("cold start: {} after {t:.1} s, {:.0} rpm, oil {:.0} C", if started { "running" } else { "NOT running" }, e.rpm(), e.t_oil_out);
+    let mut out = format!(
+        "cold start: {} after {t:.1} s, {:.0} rpm, oil {:.0} C",
+        if started { "running" } else { "NOT running" },
+        e.rpm(),
+        e.t_oil_out
+    );
     let hold = |sim: &mut Sim, inputs: &Inputs, speed: f64, secs: f64| {
         for _ in 0..(secs / TICK) as usize {
             let fwd = sim.ori * DVec3::X;
@@ -859,28 +1304,46 @@ fn engine_test(mut sim: Sim) -> String {
         }
     };
     if started {
-        inputs = Inputs { throttle: 1.0, ..Default::default() };
+        inputs = Inputs {
+            throttle: 1.0,
+            ..Default::default()
+        };
         sim.ori = glam::DQuat::IDENTITY;
         hold(&mut sim, &inputs, 300.0 / 3.6, 300.0);
         let e = &sim.engines[0];
-        out += &format!("; 5 min full power at 300 km/h: oil {:.0} C, water {:.0} C, radiator {:.2}", e.t_oil_out, e.t_water, e.radiator);
+        out += &format!(
+            "; 5 min full power at 300 km/h: oil {:.0} C, water {:.0} C, radiator {:.2}",
+            e.t_oil_out, e.t_water, e.radiator
+        );
         sim.set_radiator(Some(0.0));
         hold(&mut sim, &inputs, 150.0 / 3.6, 300.0);
         let e = &sim.engines[0];
-        out += &format!("; 5 min at 150 km/h, radiator closed: oil {:.0} C, water {:.0} C, events {:?}", e.t_oil_out, e.t_water, e.events);
+        out += &format!(
+            "; 5 min at 150 km/h, radiator closed: oil {:.0} C, water {:.0} C, events {:?}",
+            e.t_oil_out, e.t_water, e.events
+        );
     }
     out
 }
 
 /// Level-speed check of every aircraft in `air.ini` against its flight model's `Vmax`/`VmaxH`.
 fn survey(vfs: &il2_vfs::Vfs, fms: &il2_data::FlightModels) {
-    let air = il2_formats::SectFile::parse(&vfs.read("com/maddox/il2/objects/air.ini").unwrap_or_else(|e| fail(e)));
+    let air = il2_formats::SectFile::parse(
+        &vfs.read("com/maddox/il2/objects/air.ini")
+            .unwrap_or_else(|e| fail(e)),
+    );
     let mut seen = HashSet::new();
     let flat = HeightField::from_raw(2, 2, &[0; 4]);
     println!("class\tfmd\tV500\tVmax\tVH\tVmaxH\tHofVmax\tparked_pitch\tPitch\tafterburner\tboost");
     let classes = il2_data::Classes::new(vfs, &fms.keys);
-    for (_, v) in air.section_ci("AIR").map(|s| s.entries.as_slice()).unwrap_or_default() {
-        let Some(class) = v.split_whitespace().next() else { continue };
+    for (_, v) in air
+        .section_ci("AIR")
+        .map(|s| s.entries.as_slice())
+        .unwrap_or_default()
+    {
+        let Some(class) = v.split_whitespace().next() else {
+            continue;
+        };
         if !seen.insert(class.to_owned()) {
             continue;
         }
@@ -891,14 +1354,35 @@ fn survey(vfs: &il2_vfs::Vfs, fms: &il2_data::FlightModels) {
                 continue;
             }
         };
-        let fmd_name = classes.aircraft(class).map(|c| c.flight_model).unwrap_or_default();
+        let fmd_name = classes
+            .aircraft(class)
+            .map(|c| c.flight_model)
+            .unwrap_or_default();
         let fmd = fms.sect_file(&fmd_name).ok();
-        let p = |k: &str| fmd.as_ref().and_then(|f| f.get("Params", k)).unwrap_or("?").to_owned();
+        let p = |k: &str| {
+            fmd.as_ref()
+                .and_then(|f| f.get("Params", k))
+                .unwrap_or("?")
+                .to_owned()
+        };
         let hv: f64 = p("HofVmax").parse().unwrap_or(6000.0);
-        let (v0, _) = level_flight_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 120.0), 500.0);
-        let (vh, _) = level_flight_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 120.0), hv);
-        let (pitch, _, _) = parked_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 0.0), assets.parked);
-        let g = fmd.as_ref().and_then(|f| f.get("Gear", "Pitch")).unwrap_or("?").to_owned();
+        let (v0, _) = level_flight_test(
+            world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 120.0),
+            500.0,
+        );
+        let (vh, _) = level_flight_test(
+            world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 120.0),
+            hv,
+        );
+        let (pitch, _, _) = parked_test(
+            world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 0.0),
+            assets.parked,
+        );
+        let g = fmd
+            .as_ref()
+            .and_then(|f| f.get("Gear", "Pitch"))
+            .unwrap_or("?")
+            .to_owned();
         let e0 = assets.fm.engines.first();
         if std::env::var_os("IL2_ANIM").is_some() {
             for (ch, r) in classes.animation_report(class) {

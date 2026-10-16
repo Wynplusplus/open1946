@@ -77,7 +77,10 @@ struct R<'a> {
 
 impl R<'_> {
     fn take(&mut self, n: usize) -> Result<&[u8], Error> {
-        let s = self.d.get(self.p..self.p + n).ok_or(Error::Bad("truncated"))?;
+        let s = self
+            .d
+            .get(self.p..self.p + n)
+            .ok_or(Error::Bad("truncated"))?;
         self.p += n;
         Ok(s)
     }
@@ -86,7 +89,10 @@ impl R<'_> {
     }
     fn count(&mut self) -> Result<usize, Error> {
         let n = self.i32()?;
-        usize::try_from(n).ok().filter(|&n| n < 10_000_000).ok_or(Error::Bad("count"))
+        usize::try_from(n)
+            .ok()
+            .filter(|&n| n < 10_000_000)
+            .ok_or(Error::Bad("count"))
     }
     fn f32(&mut self) -> Result<f32, Error> {
         Ok(f32::from_be_bytes(self.take(4)?.try_into().unwrap()))
@@ -97,7 +103,11 @@ impl R<'_> {
     }
     fn polylines(&mut self) -> Result<Vec<Vec<[f32; 2]>>, Error> {
         (0..self.count()?)
-            .map(|_| (0..self.count()?).map(|_| Ok([self.f32()?, self.f32()?])).collect())
+            .map(|_| {
+                (0..self.count()?)
+                    .map(|_| Ok([self.f32()?, self.f32()?]))
+                    .collect()
+            })
             .collect()
     }
 }
@@ -112,7 +122,12 @@ impl Statics {
         for _ in 0..r.count()? {
             let (x1, y1, x2, y2, kind) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?, r.i32()?);
             let offset = r.f32()?;
-            s.bridges.push(Bridge { begin: (x1, y1), end: (x2, y2), kind, offset });
+            s.bridges.push(Bridge {
+                begin: (x1, y1),
+                end: (x2, y2),
+                kind,
+                offset,
+            });
         }
         let nclasses = r.count()?;
         if nclasses > 0 {

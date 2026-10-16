@@ -18,7 +18,10 @@ pub const ATTR_DIRECTORY: u32 = 0x10;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("bad SFS header: {0}")]
     BadHeader(&'static str),
     #[error("unsupported SFS version {0:#x}")]
@@ -76,7 +79,10 @@ fn unscramble(data: &mut [u8], key: &[u8; 8], div: usize) {
 impl Archive {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let io = |source| Error::Io { path: path.clone(), source };
+        let io = |source| Error::Io {
+            path: path.clone(),
+            source,
+        };
         let file = File::open(&path).map_err(io)?;
         // SAFETY: game archives are not modified while we hold the mapping.
         let map = unsafe { Mmap::map(&file) }.map_err(io)?;
@@ -84,7 +90,9 @@ impl Archive {
     }
 
     fn from_map(path: PathBuf, map: Mmap) -> Result<Self> {
-        let raw_hdr = map.get(..HEADER_SIZE).ok_or(Error::BadHeader("file shorter than header"))?;
+        let raw_hdr = map
+            .get(..HEADER_SIZE)
+            .ok_or(Error::BadHeader("file shorter than header"))?;
         if &raw_hdr[0..4] != b"SFS\0" {
             return Err(Error::BadHeader("magic"));
         }
@@ -94,7 +102,10 @@ impl Archive {
             0xC9 => HashState::of(raw_hdr),
             // Keyed by the lower-case archive file name; header fields 0x08..0x20 are scrambled too.
             0xCA => {
-                let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
                 let key = HashState::of(name.as_bytes());
                 unscramble(&mut hdr[0x08..0x20], &key_bytes(key), 3);
                 key
@@ -103,7 +114,12 @@ impl Archive {
         };
         let hdr = &hdr[..];
         let checksum = u32_at(hdr, 8);
-        let sum: u32 = hdr.iter().enumerate().filter(|(i, _)| !(8..12).contains(i)).map(|(_, &b)| b as u32).sum();
+        let sum: u32 = hdr
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !(8..12).contains(i))
+            .map(|(_, &b)| b as u32)
+            .sum();
         if sum != checksum {
             return Err(Error::BadHeader("checksum"));
         }
@@ -145,7 +161,13 @@ impl Archive {
             return Err(Error::Corrupt("block table"));
         }
 
-        Ok(Self { path, map, entries, blocks, stream_size })
+        Ok(Self {
+            path,
+            map,
+            entries,
+            blocks,
+            stream_size,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -164,7 +186,10 @@ impl Archive {
     pub fn find_hash(&self, hash: u64) -> Option<&Entry> {
         let lo = hash as u32;
         let start = self.entries.partition_point(|e| (e.hash as u32) < lo);
-        self.entries[start..].iter().take_while(|e| e.hash as u32 == lo).find(|e| e.hash == hash)
+        self.entries[start..]
+            .iter()
+            .take_while(|e| e.hash as u32 == lo)
+            .find(|e| e.hash == hash)
     }
 
     pub fn find(&self, path: &str) -> Option<&Entry> {
@@ -173,7 +198,10 @@ impl Archive {
 
     /// Decompresses one 32 KiB block of the logical data stream.
     pub fn read_block(&self, block: usize, out: &mut Vec<u8>) -> Result<()> {
-        let err = |reason: &str| Error::Block { block, reason: reason.to_owned() };
+        let err = |reason: &str| Error::Block {
+            block,
+            reason: reason.to_owned(),
+        };
         let start = self.blocks[block] as usize;
         let raw = &self.map[start..self.blocks[block + 1] as usize];
         out.clear();
@@ -188,8 +216,11 @@ impl Archive {
                     match u16::from_le_bytes([method[0], method[1]]) {
                         0 => out.extend_from_slice(&raw[3..]),
                         8 => {
-                            let d = miniz_oxide::inflate::decompress_to_vec_with_limit(&raw[3..], BLOCK_SIZE)
-                                .map_err(|e| err(&format!("inflate: {e:?}")))?;
+                            let d = miniz_oxide::inflate::decompress_to_vec_with_limit(
+                                &raw[3..],
+                                BLOCK_SIZE,
+                            )
+                            .map_err(|e| err(&format!("inflate: {e:?}")))?;
                             out.extend_from_slice(&d);
                         }
                         m => return Err(err(&format!("unknown method {m}"))),
@@ -199,7 +230,10 @@ impl Archive {
         }
         let expected = BLOCK_SIZE.min(self.stream_size as usize - block * BLOCK_SIZE);
         if out.len() < expected {
-            return Err(err(&format!("decoded {} bytes, expected {expected}", out.len())));
+            return Err(err(&format!(
+                "decoded {} bytes, expected {expected}",
+                out.len()
+            )));
         }
         Ok(())
     }
@@ -226,6 +260,9 @@ impl Archive {
 
 impl std::fmt::Debug for Archive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Archive").field("path", &self.path).field("entries", &self.entries.len()).finish()
+        f.debug_struct("Archive")
+            .field("path", &self.path)
+            .field("entries", &self.entries.len())
+            .finish()
     }
 }

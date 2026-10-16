@@ -8,9 +8,9 @@ pub mod keys;
 mod pe;
 
 use il2_formats::SectFile;
-use std::collections::HashMap;
 use il2_sfs::int_hash;
 use il2_vfs::Vfs;
+use std::collections::HashMap;
 
 pub use keys::KeyTable;
 
@@ -110,27 +110,60 @@ impl<'a> Classes<'a> {
     /// An aircraft class's weapon slots and loadouts, from its static initializer
     /// (`docs/behavior/weapons.md`).
     pub fn aircraft_weapons(&self, class: &str) -> Option<AircraftWeapons> {
-        let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };
+        let full = if class.starts_with("com.") {
+            class.to_owned()
+        } else {
+            format!("com.maddox.il2.objects.{class}")
+        };
         let pool = self.pool(&full);
         if pool.is_empty() {
             return None;
         }
-        let calls = anim::record_clinit(&pool, &["weaponTriggersRegister", "weaponHooksRegister", "weaponsRegister"]);
+        let calls = anim::record_clinit(
+            &pool,
+            &[
+                "weaponTriggersRegister",
+                "weaponHooksRegister",
+                "weaponsRegister",
+            ],
+        );
         let mut w = AircraftWeapons::default();
         for (name, args) in calls {
             match name.as_str() {
                 "weaponTriggersRegister" => {
                     if let Some(anim::Value::List(l)) = args.get(1) {
-                        w.triggers = l.iter().map(|v| if let anim::Value::Num(n) = v { *n as i32 } else { 0 }).collect();
+                        w.triggers = l
+                            .iter()
+                            .map(|v| {
+                                if let anim::Value::Num(n) = v {
+                                    *n as i32
+                                } else {
+                                    0
+                                }
+                            })
+                            .collect();
                     }
                 }
                 "weaponHooksRegister" => {
                     if let Some(anim::Value::List(l)) = args.get(1) {
-                        w.hooks = l.iter().map(|v| if let anim::Value::Str(s) = v { s.clone() } else { String::new() }).collect();
+                        w.hooks = l
+                            .iter()
+                            .map(|v| {
+                                if let anim::Value::Str(s) = v {
+                                    s.clone()
+                                } else {
+                                    String::new()
+                                }
+                            })
+                            .collect();
                     }
                 }
                 _ => {
-                    let (Some(anim::Value::Str(lname)), Some(anim::Value::List(l))) = (args.get(1), args.get(2)) else { continue };
+                    let (Some(anim::Value::Str(lname)), Some(anim::Value::List(l))) =
+                        (args.get(1), args.get(2))
+                    else {
+                        continue;
+                    };
                     let slots = l
                         .iter()
                         .map(|v| match v {
@@ -160,12 +193,50 @@ impl<'a> Classes<'a> {
             return out;
         }
         for (_, args) in anim::record_clinit(&pool, &["set"]) {
-            let (Some(anim::Value::Str(cls)), Some(anim::Value::Str(key)), Some(v)) = (args.first(), args.get(1), args.get(2)) else { continue };
+            let (Some(anim::Value::Str(cls)), Some(anim::Value::Str(key)), Some(v)) =
+                (args.first(), args.get(1), args.get(2))
+            else {
+                continue;
+            };
             if cls.replace('/', ".") == full {
                 out.insert(key.clone(), v.clone());
             }
         }
         out
+    }
+
+    /// The pilot's cockpit of an aircraft class: the cockpit class and its hierarchy (`.him`).
+    pub fn cockpit(&self, class: &str) -> Option<(String, String)> {
+        let full = if class.starts_with("com.") {
+            class.to_owned()
+        } else {
+            format!("com.maddox.il2.objects.{class}")
+        };
+        let names: Vec<String> = self
+            .chain(&full)
+            .iter()
+            .map(|c| c.this_class.replace('/', "."))
+            .collect();
+        let cockpit =
+            names
+                .iter()
+                .find_map(|n| match self.class_properties(n).get("cockpitClass")? {
+                    anim::Value::Str(s) => Some(s.clone()),
+                    anim::Value::List(l) => l.iter().find_map(|v| {
+                        if let anim::Value::Str(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    }),
+                    _ => None,
+                })?;
+        let cf = self.load(&cockpit)?;
+        let him = cf.strings().find(|s| {
+            let l = s.to_ascii_lowercase();
+            l.starts_with("3do/cockpit/") && l.ends_with(".him")
+        })?;
+        Some((cockpit, him.to_owned()))
     }
 
     /// Evaluates a weapon class's `createProperties()` (gun and bullet data), e.g. `MGunMG131si`.
@@ -175,28 +246,54 @@ impl<'a> Classes<'a> {
         if pool.is_empty() {
             return Err(format!("{weapon}: class not found"));
         }
-        anim::evaluate(&pool, "createProperties", "()Lcom/maddox/il2/engine/GunProperties;")
+        anim::evaluate(
+            &pool,
+            "createProperties",
+            "()Lcom/maddox/il2/engine/GunProperties;",
+        )
     }
 
     /// Short names of the class and its superclasses, most derived first (`BF_109G6`, `BF_109`, …).
     pub fn lineage(&self, class: &str) -> Vec<String> {
-        let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };
-        self.chain(&full).iter().map(|c| c.this_class.rsplit('/').next().unwrap_or("").to_owned()).collect()
+        let full = if class.starts_with("com.") {
+            class.to_owned()
+        } else {
+            format!("com.maddox.il2.objects.{class}")
+        };
+        self.chain(&full)
+            .iter()
+            .map(|c| c.this_class.rsplit('/').next().unwrap_or("").to_owned())
+            .collect()
     }
 
     /// For each channel, whether its animation was imported, else why not (diagnostics).
     pub fn animation_report(&self, class: &str) -> Vec<(anim::Channel, Result<(), String>)> {
-        let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };
+        let full = if class.starts_with("com.") {
+            class.to_owned()
+        } else {
+            format!("com.maddox.il2.objects.{class}")
+        };
         let chain = self.chain(&full);
         anim::Channel::ALL
             .iter()
-            .map(|&ch| (ch, anim::sample(&chain, ch).map(|_| ()).ok_or_else(anim::last_abort)))
+            .map(|&ch| {
+                (
+                    ch,
+                    anim::sample(&chain, ch)
+                        .map(|_| ())
+                        .ok_or_else(anim::last_abort),
+                )
+            })
             .collect()
     }
 
     /// Part animation tracks of an aircraft class, imported where possible, else the generic defaults.
     pub fn animations(&self, class: &str) -> Vec<anim::Track> {
-        let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };
+        let full = if class.starts_with("com.") {
+            class.to_owned()
+        } else {
+            format!("com.maddox.il2.objects.{class}")
+        };
         let chain = self.chain(&full);
         anim::Channel::ALL
             .iter()
@@ -206,7 +303,11 @@ impl<'a> Classes<'a> {
 
     /// `air.BF_109G6` or `com.maddox.il2.objects.air.BF_109G6`.
     pub fn aircraft(&self, class: &str) -> Option<AircraftClass> {
-        let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };
+        let full = if class.starts_with("com.") {
+            class.to_owned()
+        } else {
+            format!("com.maddox.il2.objects.{class}")
+        };
         let c = self.load(&full)?;
         let mut flight_model = None;
         let mut meshes: Vec<String> = Vec::new();
@@ -216,7 +317,10 @@ impl<'a> Classes<'a> {
             let l = s.to_ascii_lowercase();
             if l.starts_with("flightmodels/") && l.ends_with(".fmd") && flight_model.is_none() {
                 flight_model = Some(s.to_owned());
-            } else if l.starts_with("3do/plane/") && l.ends_with(".him") && !meshes.iter().any(|m| m == s) {
+            } else if l.starts_with("3do/plane/")
+                && l.ends_with(".him")
+                && !meshes.iter().any(|m| m == s)
+            {
                 // `Property.set(cls, "meshName", path)`: the key directly precedes its value in the
                 // constant pool.
                 if last == "meshName" && default.is_none() {
@@ -227,7 +331,10 @@ impl<'a> Classes<'a> {
             last = s;
         }
         meshes.sort_by_key(|m| (Some(m) != default.as_ref(), m.contains('(')));
-        Some(AircraftClass { flight_model: flight_model?, meshes })
+        Some(AircraftClass {
+            flight_model: flight_model?,
+            meshes,
+        })
     }
 }
 

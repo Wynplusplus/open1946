@@ -17,18 +17,33 @@ pub struct AxisMap {
 impl Default for AxisMap {
     /// Typical flight stick: X, Y, throttle slider on axis 2 (inverted: forward is full), twist on 3.
     fn default() -> Self {
-        AxisMap { aileron: Some((0, false)), elevator: Some((1, false)), throttle: Some((2, true)), rudder: Some((3, false)) }
+        AxisMap {
+            aileron: Some((0, false)),
+            elevator: Some((1, false)),
+            throttle: Some((2, true)),
+            rudder: Some((3, false)),
+        }
     }
 }
 
 impl AxisMap {
     /// Parses `aileron=0,elevator=1,rudder=-3,throttle=2` (a minus sign inverts the axis).
     pub fn parse(s: &str) -> Result<Self, String> {
-        let mut m = AxisMap { aileron: None, elevator: None, rudder: None, throttle: None };
+        let mut m = AxisMap {
+            aileron: None,
+            elevator: None,
+            rudder: None,
+            throttle: None,
+        };
         for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-            let (k, v) = part.split_once('=').ok_or_else(|| format!("bad axis mapping '{part}'"))?;
+            let (k, v) = part
+                .split_once('=')
+                .ok_or_else(|| format!("bad axis mapping '{part}'"))?;
             let inv = v.starts_with('-');
-            let n: u8 = v.trim_start_matches('-').parse().map_err(|_| format!("bad axis number in '{part}'"))?;
+            let n: u8 = v
+                .trim_start_matches('-')
+                .parse()
+                .map_err(|_| format!("bad axis number in '{part}'"))?;
             let slot = match k {
                 "aileron" => &mut m.aileron,
                 "elevator" => &mut m.elevator,
@@ -54,7 +69,10 @@ pub fn decode(b: &[u8; 8]) -> Option<Event> {
     let (kind, number) = (b[6] & !0x80, b[7]);
     match kind {
         1 => Some(Event::Button(number, value != 0)),
-        2 => Some(Event::Axis(number, (value as f64 / 32767.0).clamp(-1.0, 1.0))),
+        2 => Some(Event::Axis(
+            number,
+            (value as f64 / 32767.0).clamp(-1.0, 1.0),
+        )),
         _ => None,
     }
 }
@@ -74,8 +92,21 @@ impl Joystick {
         use std::os::unix::fs::OpenOptionsExt;
         for n in 0..8 {
             let path = format!("/dev/input/js{n}");
-            if let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(0o4000 /* O_NONBLOCK */).open(&path) {
-                return Some((Joystick { file, buf: Vec::new(), axes: [0.0; 16], buttons: [false; 32], seen: [false; 16] }, path));
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(0o4000 /* O_NONBLOCK */)
+                .open(&path)
+            {
+                return Some((
+                    Joystick {
+                        file,
+                        buf: Vec::new(),
+                        axes: [0.0; 16],
+                        buttons: [false; 32],
+                        seen: [false; 16],
+                    },
+                    path,
+                ));
             }
         }
         None

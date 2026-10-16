@@ -163,10 +163,23 @@ pub fn mount(
         if !gun.starts_with("MGun") && !gun.starts_with("Cannon") {
             continue;
         }
-        let Some(spec) = armoury.gun(classes, gun) else { continue };
+        let Some(spec) = armoury.gun(classes, gun) else {
+            continue;
+        };
         let hook = weapons.hooks.get(i).cloned().unwrap_or_default();
-        let Some((_, frame)) = hooks.iter().find(|(n, _)| n.eq_ignore_ascii_case(&hook)) else { continue };
-        out.push(Gun { spec, firing: false, frame: *frame, trigger: weapons.triggers.get(i).copied().unwrap_or(0), ammo: *count, next_shot: 0.0, index: 0, count: 0 });
+        let Some((_, frame)) = hooks.iter().find(|(n, _)| n.eq_ignore_ascii_case(&hook)) else {
+            continue;
+        };
+        out.push(Gun {
+            spec,
+            firing: false,
+            frame: *frame,
+            trigger: weapons.triggers.get(i).copied().unwrap_or(0),
+            ammo: *count,
+            next_shot: 0.0,
+            index: 0,
+            count: 0,
+        });
     }
     out
 }
@@ -216,10 +229,15 @@ pub fn fire(
             g.index = (g.index + 1) % g.spec.bullets.len();
             let b = &g.spec.bullets[g.index];
             let d = g.spec.max_delta_angle;
-            let yaw = (rng.gaussian() * d * 0.37).clamp(-3.0 * d, 3.0 * d).to_radians();
-            let pitch = (rng.gaussian() * d * 0.173).clamp(-2.0 * d, 2.0 * d).to_radians();
+            let yaw = (rng.gaussian() * d * 0.37)
+                .clamp(-3.0 * d, 3.0 * d)
+                .to_radians();
+            let pitch = (rng.gaussian() * d * 0.173)
+                .clamp(-2.0 * d, 2.0 * d)
+                .to_radians();
             let axes = DMat3::from_mat4(g.frame.as_dmat4());
-            let dir_body = axes * (DQuat::from_rotation_z(yaw) * DQuat::from_rotation_y(-pitch) * DVec3::X);
+            let dir_body =
+                axes * (DQuat::from_rotation_z(yaw) * DQuat::from_rotation_y(-pitch) * DVec3::X);
             let dir = (ori * dir_body).normalize();
             let muzzle = pos + ori * g.frame.w_axis.truncate().as_dvec3();
             // A round fired partway through the step has already flown the rest of it.
@@ -289,7 +307,13 @@ pub fn advance(
             let at = DVec3::new(at.x, at.y, at.z.max(field.height_at(at.x, at.y)));
             let ty = b.ty().clone();
             let speed = b.vel.length();
-            let mut killed = objects.shot(obj, 0.5 * ty.mass * speed * speed, ty.shot_type(), speed, rng);
+            let mut killed = objects.shot(
+                obj,
+                0.5 * ty.mass * speed * speed,
+                ty.shot_type(),
+                speed,
+                rng,
+            );
             if ty.power > 0.0 && ty.power_radius > 0.0 {
                 killed |= objects.explode(at, ty.power + 0.03 * ty.mass, ty.power_radius, rng) > 0;
             }
@@ -302,7 +326,11 @@ pub fn advance(
             // Point of impact along the segment.
             let g0 = field.height_at(b.prev.x, b.prev.y);
             let (h0, h1) = (b.prev.z - g0, b.pos.z - ground);
-            let t = if (h0 - h1).abs() > 1e-6 { (h0 / (h0 - h1)).clamp(0.0, 1.0) } else { 1.0 };
+            let t = if (h0 - h1).abs() > 1e-6 {
+                (h0 / (h0 - h1)).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
             let at = b.prev.lerp(b.pos, t);
             let ty = b.ty().clone();
             // Tracer rounds without a blast may ricochet off a glancing hit.
@@ -343,7 +371,12 @@ pub fn advance(
 
 fn ground_normal(field: &HeightField, x: f64, y: f64) -> DVec3 {
     let e = 1.0;
-    DVec3::new(field.height_at(x - e, y) - field.height_at(x + e, y), field.height_at(x, y - e) - field.height_at(x, y + e), 2.0 * e).normalize()
+    DVec3::new(
+        field.height_at(x - e, y) - field.height_at(x + e, y),
+        field.height_at(x, y - e) - field.height_at(x, y + e),
+        2.0 * e,
+    )
+    .normalize()
 }
 
 /// A bomb or rocket type (`docs/behavior/weapons.md`, "Bombs and rockets").
@@ -404,7 +437,9 @@ pub fn ordnance(classes: &il2_data::Classes, gun: &str) -> Option<OrdnanceSpec> 
         return None;
     }
     let gp = classes.class_properties(&format!("com.maddox.il2.objects.weapons.{gun}"));
-    let Some(Value::Str(round)) = gp.get("bulletClass") else { return None };
+    let Some(Value::Str(round)) = gp.get("bulletClass") else {
+        return None;
+    };
     let p = classes.class_properties(round);
     let mass = num(&p, "massa", 6.8);
     Some(OrdnanceSpec {
@@ -427,7 +462,12 @@ pub fn ordnance(classes: &il2_data::Classes, gun: &str) -> Option<OrdnanceSpec> 
 }
 
 /// Bomb racks and rocket rails of a loadout.
-pub fn mount_stores(classes: &il2_data::Classes, weapons: &il2_data::AircraftWeapons, loadout: &str, hooks: &[(String, Mat4)]) -> Vec<Store> {
+pub fn mount_stores(
+    classes: &il2_data::Classes,
+    weapons: &il2_data::AircraftWeapons,
+    loadout: &str,
+    hooks: &[(String, Mat4)],
+) -> Vec<Store> {
     let slots = weapons
         .loadouts
         .iter()
@@ -439,17 +479,41 @@ pub fn mount_stores(classes: &il2_data::Classes, weapons: &il2_data::AircraftWea
     let mut out = Vec::new();
     for (i, slot) in slots.iter().enumerate() {
         let Some((gun, count)) = slot else { continue };
-        let Some(spec) = cache.entry(gun.clone()).or_insert_with(|| ordnance(classes, gun).map(Arc::new)).clone() else { continue };
+        let Some(spec) = cache
+            .entry(gun.clone())
+            .or_insert_with(|| ordnance(classes, gun).map(Arc::new))
+            .clone()
+        else {
+            continue;
+        };
         let hook = weapons.hooks.get(i).cloned().unwrap_or_default();
-        let frame = hooks.iter().find(|(n, _)| n.eq_ignore_ascii_case(&hook)).map_or(Mat4::IDENTITY, |(_, f)| *f);
-        out.push(Store { spec, frame, trigger: weapons.triggers.get(i).copied().unwrap_or(3), count: (*count).max(1), next: 0.0 });
+        let frame = hooks
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(&hook))
+            .map_or(Mat4::IDENTITY, |(_, f)| *f);
+        out.push(Store {
+            spec,
+            frame,
+            trigger: weapons.triggers.get(i).copied().unwrap_or(3),
+            count: (*count).max(1),
+            next: 0.0,
+        });
     }
     out
 }
 
 /// Releases bombs (trigger 3) and fires rockets (trigger 2).
 #[allow(clippy::too_many_arguments)]
-pub fn release(stores: &mut [Store], triggers: &[bool; 4], pos: DVec3, ori: DQuat, vel: DVec3, dt: f64, rng: &mut Rng, out: &mut Vec<Projectile>) {
+pub fn release(
+    stores: &mut [Store],
+    triggers: &[bool; 4],
+    pos: DVec3,
+    ori: DQuat,
+    vel: DVec3,
+    dt: f64,
+    rng: &mut Rng,
+    out: &mut Vec<Projectile>,
+) {
     for s in stores.iter_mut() {
         s.next = (s.next - dt).max(0.0);
         let pressed = triggers.get(s.trigger as usize).copied().unwrap_or(false);
@@ -463,27 +527,65 @@ pub fn release(stores: &mut [Store], triggers: &[bool; 4], pos: DVec3, ori: DQua
         let fwd = ori * DVec3::X;
         let sign = |rng: &mut Rng, a: f64, b: f64| {
             let v = a + (b - a) * rng.uniform();
-            if rng.uniform() > 0.5 { v } else { -v }
+            if rng.uniform() > 0.5 {
+                v
+            } else {
+                -v
+            }
         };
         if sp.rocket {
             // Launch along the aircraft axis at 200 m/s more, a third of the vertical speed kept.
             let mut v_body = ori.inverse() * vel;
             v_body.z /= 3.0;
             v_body.x += 200.0;
-            let dm = if sp.time_fire > 0.0 { (sp.mass - sp.mass_end) / (sp.time_fire / 0.03) } else { 0.0 };
-            out.push(Projectile { spec: sp.clone(), pos: at, prev: at, vel: ori * v_body, dir: fwd, rot_axis: DVec3::ZERO, mass: sp.mass, dm, t: 0.0 });
+            let dm = if sp.time_fire > 0.0 {
+                (sp.mass - sp.mass_end) / (sp.time_fire / 0.03)
+            } else {
+                0.0
+            };
+            out.push(Projectile {
+                spec: sp.clone(),
+                pos: at,
+                prev: at,
+                vel: ori * v_body,
+                dir: fwd,
+                rot_axis: DVec3::ZERO,
+                mass: sp.mass,
+                dm,
+                t: 0.0,
+            });
         } else {
             let k = 0.04;
-            let dir = (fwd + DVec3::new(sign(rng, 0.0, k), sign(rng, 0.0, k), sign(rng, 0.0, k))).normalize();
-            let axis = DVec3::new(sign(rng, 0.1, 1.0), sign(rng, 0.1, 1.0), sign(rng, 0.1, 1.0)).normalize();
+            let dir = (fwd + DVec3::new(sign(rng, 0.0, k), sign(rng, 0.0, k), sign(rng, 0.0, k)))
+                .normalize();
+            let axis = DVec3::new(
+                sign(rng, 0.1, 1.0),
+                sign(rng, 0.1, 1.0),
+                sign(rng, 0.1, 1.0),
+            )
+            .normalize();
             let speed = vel.length();
             let mut angle = sign(rng, 2.0, 35.0).to_radians();
             if speed > 60.0 {
-                let f = if speed < 350.0 { (1.0 - (speed - 60.0) / 290.0) * 0.95 + 0.05 } else { 0.05 };
+                let f = if speed < 350.0 {
+                    (1.0 - (speed - 60.0) / 290.0) * 0.95 + 0.05
+                } else {
+                    0.05
+                };
                 angle *= f;
             }
             let mass = sp.mass * (1.0 + 0.06 * rng.uniform());
-            out.push(Projectile { spec: sp.clone(), pos: at, prev: at, vel, dir, rot_axis: axis * angle, mass, dm: 0.0, t: 0.0 });
+            out.push(Projectile {
+                spec: sp.clone(),
+                pos: at,
+                prev: at,
+                vel,
+                dir,
+                rot_axis: axis * angle,
+                mass,
+                dm: 0.0,
+                t: 0.0,
+            });
         }
     }
 }
@@ -498,7 +600,13 @@ fn kf(v: f64) -> f64 {
 
 /// Flies bombs and rockets one step; impacts and burnt-out rockets explode against map objects.
 /// Returns the explosions: point, kg TNT and objects destroyed.
-pub fn fly(projectiles: &mut Vec<Projectile>, dt: f64, field: &HeightField, objects: &mut crate::objects::MapObjects, rng: &mut Rng) -> Vec<(DVec3, f64, usize)> {
+pub fn fly(
+    projectiles: &mut Vec<Projectile>,
+    dt: f64,
+    field: &HeightField,
+    objects: &mut crate::objects::MapObjects,
+    rng: &mut Rng,
+) -> Vec<(DVec3, f64, usize)> {
     let mut booms = Vec::new();
     let mut i = 0;
     while i < projectiles.len() {
@@ -515,22 +623,38 @@ pub fn fly(projectiles: &mut Vec<Projectile>, dt: f64, field: &HeightField, obje
             } else {
                 0.0
             };
-            let drag = if speed > 330.0 { kf(speed) * kd(p.pos.z) * s } else { 0.2 * s * 1.225 * kd(p.pos.z) * speed * speed / 2.0 };
+            let drag = if speed > 330.0 {
+                kf(speed) * kd(p.pos.z) * s
+            } else {
+                0.2 * s * 1.225 * kd(p.pos.z) * speed * speed / 2.0
+            };
             p.vel += p.dir * ((thrust - drag) / p.mass * dt);
             p.vel.z -= 9.80665 * dt;
             p.pos += p.vel * dt;
             p.dir = p.vel.normalize_or(p.dir);
         } else {
-            let dir_w = if speed < 0.001 { DVec3::NEG_Z } else { p.vel / speed };
+            let dir_w = if speed < 0.001 {
+                DVec3::NEG_Z
+            } else {
+                p.vel / speed
+            };
             let c = p.dir.dot(dir_w);
-            let drag = if speed > 330.0 { kf(speed) * kd(p.pos.z) * s } else { 0.06 * s * 1.225 * kd(p.pos.z) * speed * speed / 2.0 };
+            let drag = if speed > 330.0 {
+                kf(speed) * kd(p.pos.z) * s
+            } else {
+                0.06 * s * 1.225 * kd(p.pos.z) * speed * speed / 2.0
+            };
             let a = drag / p.mass;
             p.vel += (p.dir * (6.0 * c) - dir_w * 7.0) * (a * dt);
             p.vel.z -= 9.80665 * dt;
             p.pos += p.vel * dt;
             // The fins turn the nose into the wind.
             if p.t > 0.35 {
-                let sin = if c <= -0.996 { 0.08 } else { (1.0 - c * c).max(0.0).sqrt() };
+                let sin = if c <= -0.996 {
+                    0.08
+                } else {
+                    (1.0 - c * c).max(0.0).sqrt()
+                };
                 let force = dir_w * -(drag * 0.07 * sin);
                 let arm = p.dir * -(0.2 * sp.kalibr);
                 let j = p.mass * 0.1 * sp.kalibr.powi(4);

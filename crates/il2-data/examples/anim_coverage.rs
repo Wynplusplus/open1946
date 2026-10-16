@@ -3,8 +3,13 @@ fn main() {
     let vfs = il2_vfs::Vfs::open_install(std::env::var("IL2_ROOT").expect("IL2_ROOT")).unwrap();
     let fms = il2_data::FlightModels::open(&vfs).unwrap();
     let classes = il2_data::Classes::new(&vfs, &fms.keys);
-    let ini = String::from_utf8_lossy(&vfs.read("com/maddox/il2/objects/air.ini").unwrap()).into_owned();
-    let mut names: Vec<String> = ini.split_whitespace().filter(|t| t.starts_with("air.")).map(str::to_owned).collect();
+    let ini =
+        String::from_utf8_lossy(&vfs.read("com/maddox/il2/objects/air.ini").unwrap()).into_owned();
+    let mut names: Vec<String> = ini
+        .split_whitespace()
+        .filter(|t| t.starts_with("air."))
+        .map(str::to_owned)
+        .collect();
     names.sort();
     names.dedup();
     let mut counts = [0usize; 5];
@@ -22,5 +27,8 @@ fn main() {
     for (ch, c) in il2_data::anim::Channel::ALL.iter().zip(counts) {
         println!("{ch:?}: {c} imported");
     }
-    println!("gear not imported (first 15): {:?}", &missing_gear[..missing_gear.len().min(15)]);
+    println!(
+        "gear not imported (first 15): {:?}",
+        &missing_gear[..missing_gear.len().min(15)]
+    );
 }

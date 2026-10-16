@@ -26,9 +26,24 @@ struct Kind {
 
 /// Bit 0x20 is the runtime's road type 1 (friction 0.8), 0x80 type 2 (0.0), 0x40 type 3 (5.0).
 const KINDS: [Kind; 3] = [
-    Kind { bit: 0x20, key: "Road", width: 7.0, u: (204.0, 252.0) },
-    Kind { bit: 0x80, key: "Highway", width: 10.0, u: (202.0, 256.0) },
-    Kind { bit: 0x40, key: "Rail", width: 6.0, u: (210.0, 240.0) },
+    Kind {
+        bit: 0x20,
+        key: "Road",
+        width: 7.0,
+        u: (204.0, 252.0),
+    },
+    Kind {
+        bit: 0x80,
+        key: "Highway",
+        width: 10.0,
+        u: (202.0, 256.0),
+    },
+    Kind {
+        bit: 0x40,
+        key: "Rail",
+        width: 6.0,
+        u: (210.0, 240.0),
+    },
 ];
 
 pub struct Roads {
@@ -44,42 +59,75 @@ pub struct Roads {
 }
 
 impl Roads {
-    pub fn load(vfs: &Vfs, ini_path: &str, types: &(u32, u32, Vec<u8>), water: [bool; 32]) -> Option<Self> {
+    pub fn load(
+        vfs: &Vfs,
+        ini_path: &str,
+        types: &(u32, u32, Vec<u8>),
+        water: [bool; 32],
+    ) -> Option<Self> {
         let ini = SectFile::parse(&vfs.read(ini_path).ok()?);
         let sect = ini.section_ci("ROADS")?;
         let textures = KINDS
             .iter()
             .map(|k| {
-                let v = sect.get_ci(k.key)?.trim_start_matches(['=', ' ', '\t']).trim();
+                let v = sect
+                    .get_ci(k.key)?
+                    .trim_start_matches(['=', ' ', '\t'])
+                    .trim();
                 let v = v.split(',').next()?.trim();
                 let path = format!("maps/_Tex/{v}.tga");
                 decode_image(&vfs.read(&path).ok()?, &path).ok()
             })
             .collect();
         let (w, h, t) = types;
-        Some(Roads { cols: *w as usize, rows: *h as usize, types: t.clone(), water, textures, built_for: None, origin: DVec3::ZERO })
+        Some(Roads {
+            cols: *w as usize,
+            rows: *h as usize,
+            types: t.clone(),
+            water,
+            textures,
+            built_for: None,
+            origin: DVec3::ZERO,
+        })
     }
 
     fn has(&self, c: i64, r: i64, bit: u8) -> bool {
-        c >= 0 && r >= 0 && (c as usize) < self.cols && (r as usize) < self.rows && self.types[r as usize * self.cols + c as usize] & bit != 0
+        c >= 0
+            && r >= 0
+            && (c as usize) < self.cols
+            && (r as usize) < self.rows
+            && self.types[r as usize * self.cols + c as usize] & bit != 0
     }
 
     fn water(&self, c: i64, r: i64) -> bool {
-        c >= 0 && r >= 0 && (c as usize) < self.cols && (r as usize) < self.rows && self.water[(self.types[r as usize * self.cols + c as usize] & 31) as usize]
+        c >= 0
+            && r >= 0
+            && (c as usize) < self.cols
+            && (r as usize) < self.rows
+            && self.water[(self.types[r as usize * self.cols + c as usize] & 31) as usize]
     }
 
     /// World position of a land-type pixel's centre.
     fn centre(&self, c: i64, r: i64) -> DVec2 {
-        DVec2::new((c as f64 + 0.5) * CELL, (self.rows as f64 - 1.5 - r as f64) * CELL)
+        DVec2::new(
+            (c as f64 + 0.5) * CELL,
+            (self.rows as f64 - 1.5 - r as f64) * CELL,
+        )
     }
 
     pub fn update(&mut self, field: &HeightField, eye: DVec3) -> Option<MeshData> {
-        let key = ((eye.x / REBUILD).floor() as i64, (eye.y / REBUILD).floor() as i64);
+        let key = (
+            (eye.x / REBUILD).floor() as i64,
+            (eye.y / REBUILD).floor() as i64,
+        );
         if self.built_for == Some(key) {
             return None;
         }
         self.built_for = Some(key);
-        let centre = DVec2::new((key.0 as f64 + 0.5) * REBUILD, (key.1 as f64 + 0.5) * REBUILD);
+        let centre = DVec2::new(
+            (key.0 as f64 + 0.5) * REBUILD,
+            (key.1 as f64 + 0.5) * REBUILD,
+        );
         self.origin = DVec3::new(centre.x, centre.y, field.height_at(centre.x, centre.y));
         Some(self.build(field, centre))
     }
@@ -90,10 +138,15 @@ impl Roads {
         let c1 = ((centre.x + r) / CELL).ceil() as i64;
         let rr = |y: f64| (self.rows as f64 - 1.5 - y / CELL).round() as i64;
         let (r0, r1) = (rr(centre.y + r), rr(centre.y - r));
-        let mut out = MeshData { node_count: 1, ..Default::default() };
+        let mut out = MeshData {
+            node_count: 1,
+            ..Default::default()
+        };
         let o = self.origin;
         for (ki, k) in KINDS.iter().enumerate() {
-            let Some(tex) = &self.textures[ki] else { continue };
+            let Some(tex) = &self.textures[ki] else {
+                continue;
+            };
             let first = out.indices.len() as u32;
             let (tw, th) = (tex.width as f32, tex.height as f32);
             let (ua, ub) = (k.u.0 / 256.0, k.u.1 / 256.0);
@@ -114,7 +167,11 @@ impl Roads {
                             continue;
                         }
                         // A diagonal next to both orthogonal links would make a triangle.
-                        if dc != 0 && dr != 0 && self.has(col + dc, row, k.bit) && self.has(col, row + dr, k.bit) {
+                        if dc != 0
+                            && dr != 0
+                            && self.has(col + dc, row, k.bit)
+                            && self.has(col, row + dr, k.bit)
+                        {
                             continue;
                         }
                         let a = self.centre(col, row);
@@ -125,7 +182,10 @@ impl Roads {
                         // Extend past the centres so joints overlap.
                         let dir = (b - a).normalize();
                         let side = DVec2::new(-dir.y, dir.x) * (k.width as f64 / 2.0);
-                        let (a, b) = (a - dir * (k.width as f64 / 2.0), b + dir * (k.width as f64 / 2.0));
+                        let (a, b) = (
+                            a - dir * (k.width as f64 / 2.0),
+                            b + dir * (k.width as f64 / 2.0),
+                        );
                         let len = (b - a).length();
                         let n = (len / STEP).ceil().max(1.0) as usize;
                         let base = out.vertices.len() as u32;
@@ -135,8 +195,14 @@ impl Roads {
                             let v = (len * t) as f32 / repeat;
                             for (s, u) in [(-1.0, ua), (1.0, ub)] {
                                 let q = p + side * s;
-                                let pos = DVec3::new(q.x, q.y, field.height_at(q.x, q.y) + LIFT) - o;
-                                out.vertices.push(Vertex { pos: pos.as_vec3().into(), normal: [0.0, 0.0, 1.0], uv: [u, v], node: 0 });
+                                let pos =
+                                    DVec3::new(q.x, q.y, field.height_at(q.x, q.y) + LIFT) - o;
+                                out.vertices.push(Vertex {
+                                    pos: pos.as_vec3().into(),
+                                    normal: [0.0, 0.0, 1.0],
+                                    uv: [u, v],
+                                    node: 0,
+                                });
                             }
                         }
                         for i in 0..n as u32 {

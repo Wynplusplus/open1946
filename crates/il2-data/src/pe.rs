@@ -37,7 +37,10 @@ impl Image {
             let raw_size = u32_at(d, s + 16)? as usize;
             let raw_off = u32_at(d, s + 20)? as usize;
             let data = d.get(raw_off..raw_off + raw_size)?.to_vec();
-            sections.push(Section { va: base + va, data });
+            sections.push(Section {
+                va: base + va,
+                data,
+            });
         }
         Some(Image { sections })
     }

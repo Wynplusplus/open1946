@@ -10,7 +10,12 @@ pub struct OrbitCamera {
 
 impl OrbitCamera {
     pub fn new(radius: f32) -> Self {
-        Self { target: Vec3::ZERO, distance: radius * 1.5, yaw: 0.8, pitch: 0.35 }
+        Self {
+            target: Vec3::ZERO,
+            distance: radius * 1.5,
+            yaw: 0.8,
+            pitch: 0.35,
+        }
     }
 
     pub fn eye(&self) -> Vec3 {

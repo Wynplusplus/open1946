@@ -38,19 +38,29 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 fn plane(data: &[u8], w: usize, h: usize, bpp: usize) -> Result<(Vec<u8>, usize), Error> {
     let stride = w * bpp;
     let len = h + stride * h;
-    let data = data.get(..len).ok_or_else(|| Error::Bad("truncated plane".into()))?;
+    let data = data
+        .get(..len)
+        .ok_or_else(|| Error::Bad("truncated plane".into()))?;
     let (filters, px) = data.split_at(h);
     let mut out = vec![0u8; stride * h];
     for y in 0..h {
         let (done, rest) = out.split_at_mut(y * stride);
-        let prev = if y > 0 { &done[(y - 1) * stride..] } else { &[][..] };
+        let prev = if y > 0 {
+            &done[(y - 1) * stride..]
+        } else {
+            &[][..]
+        };
         let cur = &mut rest[..stride];
         let src = &px[y * stride..(y + 1) * stride];
         let f = filters[y];
         for x in 0..stride {
             let a = if x >= bpp { cur[x - bpp] } else { 0 };
             let b = prev.get(x).copied().unwrap_or(0);
-            let c = if x >= bpp { prev.get(x - bpp).copied().unwrap_or(0) } else { 0 };
+            let c = if x >= bpp {
+                prev.get(x - bpp).copied().unwrap_or(0)
+            } else {
+                0
+            };
             let pred = match f {
                 0 => 0,
                 1 => a,
@@ -83,13 +93,19 @@ pub fn decode(data: &[u8]) -> Result<Rgba, Error> {
             rgb
         }
         2 => {
-            let n = data.get(12..16).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+            let n = data
+                .get(12..16)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
             let n = n.ok_or_else(|| Error::Bad("truncated".into()))?;
-            let jpg = data.get(16..16 + n).ok_or_else(|| Error::Bad("truncated JPEG".into()))?;
+            let jpg = data
+                .get(16..16 + n)
+                .ok_or_else(|| Error::Bad("truncated JPEG".into()))?;
             let opts = zune_jpeg::zune_core::options::DecoderOptions::default()
                 .jpeg_set_out_colorspace(zune_jpeg::zune_core::colorspace::ColorSpace::RGB);
             let mut dec = zune_jpeg::JpegDecoder::new_with_options(jpg, opts);
-            let rgb = dec.decode().map_err(|e| Error::Bad(format!("JPEG: {e:?}")))?;
+            let rgb = dec
+                .decode()
+                .map_err(|e| Error::Bad(format!("JPEG: {e:?}")))?;
             if rgb.len() != w * h * 3 {
                 return Err(Error::Bad("JPEG size mismatch".into()));
             }
@@ -106,14 +122,21 @@ pub fn decode(data: &[u8]) -> Result<Rgba, Error> {
         Some(a)
     };
     if pos != data.len() {
-        return Err(Error::Bad(format!("size mismatch: {} bytes, expected {pos}", data.len())));
+        return Err(Error::Bad(format!(
+            "size mismatch: {} bytes, expected {pos}",
+            data.len()
+        )));
     }
     let mut pixels = Vec::with_capacity(w * h * 4);
     for i in 0..w * h {
         pixels.extend_from_slice(&rgb[i * 3..i * 3 + 3]);
         pixels.push(alpha.as_ref().map_or(255, |a| a[i]));
     }
-    Ok(Rgba { width: w as u32, height: h as u32, pixels })
+    Ok(Rgba {
+        width: w as u32,
+        height: h as u32,
+        pixels,
+    })
 }
 
 #[cfg(test)]

@@ -9,7 +9,10 @@ pub struct Section {
 impl Section {
     /// First value for `key`.
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.entries
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     /// First value for `key`, matched like the engine's native reader: ASCII case-insensitive, and
@@ -26,7 +29,10 @@ impl Section {
     }
 
     pub fn get_all<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a str> + 'a {
-        self.entries.iter().filter(move |(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.entries
+            .iter()
+            .filter(move |(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     pub fn get_f32(&self, key: &str) -> Option<f32> {
@@ -128,12 +134,18 @@ impl SectFile {
                 continue;
             }
             if line.len() > 2 && line.starts_with('[') && line.ends_with(']') {
-                f.sections.push(Section { name: line[1..line.len() - 1].to_owned(), entries: Vec::new() });
+                f.sections.push(Section {
+                    name: line[1..line.len() - 1].to_owned(),
+                    entries: Vec::new(),
+                });
             } else if line.starts_with('[') && line.ends_with(']') {
                 // "[]" is neither a section nor an entry.
             } else if let Some(sect) = f.sections.last_mut() {
                 let (key, value) = line.split_once(is_blank).unwrap_or((line, ""));
-                sect.entries.push((key.to_owned(), value.trim_start_matches(is_blank).to_owned()));
+                sect.entries.push((
+                    key.to_owned(),
+                    value.trim_start_matches(is_blank).to_owned(),
+                ));
             }
         }
         f
@@ -146,7 +158,9 @@ impl SectFile {
 
     /// First section with this name, ASCII case-insensitive.
     pub fn section_ci(&self, name: &str) -> Option<&Section> {
-        self.sections.iter().find(|s| s.name.eq_ignore_ascii_case(name))
+        self.sections
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
     }
 
     pub fn get(&self, section: &str, key: &str) -> Option<&str> {

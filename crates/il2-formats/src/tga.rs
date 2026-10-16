@@ -56,7 +56,10 @@ pub fn decode_colormapped(d: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         let src = if top_first { y } else { ht - 1 - y };
         for x in 0..w {
             let i = idx[src * w + x] as usize;
-            let c = palette.get(i.wrapping_sub(map_first)).copied().unwrap_or([0, 0, 0, 255]);
+            let c = palette
+                .get(i.wrapping_sub(map_first))
+                .copied()
+                .unwrap_or([0, 0, 0, 255]);
             out[(y * w + x) * 4..][..4].copy_from_slice(&c);
         }
     }

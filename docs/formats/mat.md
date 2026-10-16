@@ -38,4 +38,5 @@ So a black-on-white grayscale decal combined with `tfTestA` cuts out its black p
 - `tfBlendAdd 1`: additive blending.
 - `tfTestA 1`: discard fragments with alpha below `AlphaTestVal` (default 0.5).
 - `tfDepthOffset 1`, in `[General]` or in a layer: polygon offset so decals win over the coplanar skin.
+- `tfNoTexture 1`: the layer ignores `TextureName` and draws its `ColorScale` colour, alpha included (cockpit `Mask`: zero alpha with `tfBlend 1`, so it's invisible).
   `il2setup.ini` defaults are `PolygonOffsetFactor=-0.0625`, `PolygonOffsetUnits=-1`.

@@ -57,7 +57,9 @@ pub enum Error {
 const HEADER: usize = 28;
 
 fn u32_at(d: &[u8], off: usize) -> Result<u32, Error> {
-    d.get(off..off + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).ok_or(Error::Corrupt("truncated"))
+    d.get(off..off + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .ok_or(Error::Corrupt("truncated"))
 }
 
 pub fn is_binary(data: &[u8]) -> bool {
@@ -98,7 +100,12 @@ impl RowFile {
                     rows: s
                         .entries
                         .iter()
-                        .map(|(k, v)| std::iter::once(k.as_str()).chain(v.split_whitespace()).map(parse).collect())
+                        .map(|(k, v)| {
+                            std::iter::once(k.as_str())
+                                .chain(v.split_whitespace())
+                                .map(parse)
+                                .collect()
+                        })
                         .collect(),
                 })
                 .collect(),
@@ -134,7 +141,9 @@ impl RowFile {
             let count = u16::from_le_bytes([d[e + 8], d[e + 9]]) as usize;
             let (typ, delta) = (d[e + 10], d[e + 11] != 0);
             let n = *d.get(name_off).ok_or(Error::Corrupt("section name"))? as usize;
-            let raw_name = d.get(name_off + 1..name_off + 1 + n).ok_or(Error::Corrupt("section name"))?;
+            let raw_name = d
+                .get(name_off + 1..name_off + 1 + n)
+                .ok_or(Error::Corrupt("section name"))?;
             let raw_name = raw_name.strip_suffix(&[0]).unwrap_or(raw_name);
             // The name runs to the first ']'; some files carry junk after it ("[LOD] 500").
             let name = raw_name
@@ -195,7 +204,9 @@ fn decode_row(line: &[u8], typ: u8) -> Result<Vec<Value>, Error> {
                         p += 5;
                     }
                     n => {
-                        row.push(Value::Str(get(p + 1, p + n)?.iter().map(|&b| b as char).collect()));
+                        row.push(Value::Str(
+                            get(p + 1, p + n)?.iter().map(|&b| b as char).collect(),
+                        ));
                         p += n;
                     }
                 }
@@ -203,12 +214,20 @@ fn decode_row(line: &[u8], typ: u8) -> Result<Vec<Value>, Error> {
             row
         }
         1 => line.iter().map(|&b| Value::Int(b as i32)).collect(),
-        2 => line.chunks_exact(2).map(|c| Value::Int(i16::from_le_bytes([c[0], c[1]]) as i32)).collect(),
+        2 => line
+            .chunks_exact(2)
+            .map(|c| Value::Int(i16::from_le_bytes([c[0], c[1]]) as i32))
+            .collect(),
         3 => line
             .chunks_exact(3)
-            .map(|c| Value::Float((i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8) as f32 / 65536.0))
+            .map(|c| {
+                Value::Float((i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8) as f32 / 65536.0)
+            })
             .collect(),
-        4 => line.chunks_exact(4).map(|c| Value::Float(f32::from_le_bytes(c.try_into().unwrap()))).collect(),
+        4 => line
+            .chunks_exact(4)
+            .map(|c| Value::Float(f32::from_le_bytes(c.try_into().unwrap())))
+            .collect(),
         _ => return Err(Error::Corrupt("unknown column type")),
     })
 }
@@ -253,7 +272,14 @@ mod tests {
         let size = (data_off + lines.len()) as u32;
         deltas.push(size - prev);
         let mut f = vec![0x01, b'B', b'S', 0];
-        for v in [size, sections.len() as u32, nlines as u32, sec_off as u32, 0, line_off as u32] {
+        for v in [
+            size,
+            sections.len() as u32,
+            nlines as u32,
+            sec_off as u32,
+            0,
+            line_off as u32,
+        ] {
             f.extend(v.to_le_bytes());
         }
         f.extend(names);
@@ -268,17 +294,44 @@ mod tests {
     #[test]
     fn decodes_all_column_types() {
         let data = build(&[
-            ("Common", 0, false, vec![vec![9, b'N', b'u', b'm', b'B', b'o', b'n', b'e', b's', 0, 5, 0, 1, 0, 0, 0xC0, 0x3F]]),
-            ("D", 2, true, vec![vec![0x36, 0x03, 0xCC, 0xFF], vec![0xFE, 0xFC, 0, 0]]),
-            ("U", 3, false, vec![vec![0xCF, 0xC2, 0x00, 0x00, 0x00, 0xFF]]),
+            (
+                "Common",
+                0,
+                false,
+                vec![vec![
+                    9, b'N', b'u', b'm', b'B', b'o', b'n', b'e', b's', 0, 5, 0, 1, 0, 0, 0xC0, 0x3F,
+                ]],
+            ),
+            (
+                "D",
+                2,
+                true,
+                vec![vec![0x36, 0x03, 0xCC, 0xFF], vec![0xFE, 0xFC, 0, 0]],
+            ),
+            (
+                "U",
+                3,
+                false,
+                vec![vec![0xCF, 0xC2, 0x00, 0x00, 0x00, 0xFF]],
+            ),
             ("F", 4, false, vec![2.5f32.to_le_bytes().to_vec()]),
         ]);
         let f = RowFile::parse(&data).unwrap();
         assert_eq!(
             f.section("Common").unwrap().rows[0],
-            [Value::Str("NumBones".into()), Value::Int(5), Value::Float(1.5)]
+            [
+                Value::Str("NumBones".into()),
+                Value::Int(5),
+                Value::Float(1.5)
+            ]
         );
-        assert_eq!(f.section("D").unwrap().rows, [vec![Value::Int(822), Value::Int(770)], vec![Value::Int(0), Value::Int(0)]]);
+        assert_eq!(
+            f.section("D").unwrap().rows,
+            [
+                vec![Value::Int(822), Value::Int(770)],
+                vec![Value::Int(0), Value::Int(0)]
+            ]
+        );
         let u = &f.section("U").unwrap().rows[0];
         assert_eq!(u[0], Value::Float(0x00C2CF as f32 / 65536.0));
         assert_eq!(u[1], Value::Float(-1.0));
@@ -287,8 +340,12 @@ mod tests {
 
     #[test]
     fn text_rows() {
-        let f = RowFile::parse(b"[FaceGroups]\n822 770\n0 0 92 0 52 0\n[Materials]\nGloss1D0o\n").unwrap();
+        let f = RowFile::parse(b"[FaceGroups]\n822 770\n0 0 92 0 52 0\n[Materials]\nGloss1D0o\n")
+            .unwrap();
         assert_eq!(f.section("FaceGroups").unwrap().rows[1][2], Value::Int(92));
-        assert_eq!(f.section("Materials").unwrap().rows[0][0], Value::Str("Gloss1D0o".into()));
+        assert_eq!(
+            f.section("Materials").unwrap().rows[0][0],
+            Value::Str("Gloss1D0o".into())
+        );
     }
 }

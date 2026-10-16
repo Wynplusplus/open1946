@@ -39,24 +39,36 @@ impl Hier {
         let mut parents: Vec<Option<String>> = Vec::new();
         for s in &f.sections {
             if s.name.eq_ignore_ascii_case("_ROOT_") {
-                h.visibility_radius = s.get_ci("VisibilitySphere").and_then(|v| atof(v.split_whitespace().next()?));
+                h.visibility_radius = s
+                    .get_ci("VisibilitySphere")
+                    .and_then(|v| atof(v.split_whitespace().next()?));
                 continue;
             }
             let attaching = match s.get_ci("Attaching") {
                 None => IDENTITY,
                 Some(v) => {
                     let n: Vec<f32> = v.split_whitespace().filter_map(atof).collect();
-                    n.try_into().map_err(|_| Error::BadAttaching(s.name.clone()))?
+                    n.try_into()
+                        .map_err(|_| Error::BadAttaching(s.name.clone()))?
                 }
             };
             parents.push(s.get_ci("Parent").map(str::to_owned));
             h.nodes.push(HierNode {
                 name: s.name.clone(),
-                mesh: s.get_ci("Mesh").filter(|m| !m.is_empty()).map(str::to_owned),
+                mesh: s
+                    .get_ci("Mesh")
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_owned),
                 parent: None,
                 attaching,
-                hidden: s.entries.iter().any(|(k, _)| k.eq_ignore_ascii_case("Hidden")),
-                separable: s.entries.iter().any(|(k, _)| k.eq_ignore_ascii_case("Separable")),
+                hidden: s
+                    .entries
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("Hidden")),
+                separable: s
+                    .entries
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("Separable")),
                 collision_objects: s
                     .entries
                     .iter()
@@ -66,12 +78,17 @@ impl Hier {
             });
         }
         for (i, p) in parents.into_iter().enumerate() {
-            let Some(p) = p.filter(|p| !p.eq_ignore_ascii_case("_ROOT_")) else { continue };
+            let Some(p) = p.filter(|p| !p.eq_ignore_ascii_case("_ROOT_")) else {
+                continue;
+            };
             let idx = h
                 .nodes
                 .iter()
                 .position(|n| n.name.eq_ignore_ascii_case(&p))
-                .ok_or_else(|| Error::UnknownParent { node: h.nodes[i].name.clone(), parent: p })?;
+                .ok_or_else(|| Error::UnknownParent {
+                    node: h.nodes[i].name.clone(),
+                    parent: p,
+                })?;
             h.nodes[i].parent = Some(idx);
         }
         Ok(h)

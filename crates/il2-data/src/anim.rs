@@ -17,7 +17,13 @@ pub enum Channel {
 }
 
 impl Channel {
-    pub const ALL: [Channel; 5] = [Channel::Rudder, Channel::Elevator, Channel::Aileron, Channel::Flaps, Channel::Gear];
+    pub const ALL: [Channel; 5] = [
+        Channel::Rudder,
+        Channel::Elevator,
+        Channel::Aileron,
+        Channel::Flaps,
+        Channel::Gear,
+    ];
 
     fn range(self) -> (f32, f32) {
         match self {
@@ -57,7 +63,14 @@ impl Track {
         self.nodes.iter().map(move |(name, s)| {
             let (a, b) = (s[i], s[i + 1]);
             let lerp = |u: [f32; 3], v: [f32; 3]| std::array::from_fn(|k| u[k] + (v[k] - u[k]) * t);
-            (name.as_str(), NodeState { angles: lerp(a.angles, b.angles), offset: lerp(a.offset, b.offset), visible: if t < 0.5 { a.visible } else { b.visible } })
+            (
+                name.as_str(),
+                NodeState {
+                    angles: lerp(a.angles, b.angles),
+                    offset: lerp(a.offset, b.offset),
+                    visible: if t < 0.5 { a.visible } else { b.visible },
+                },
+            )
         })
     }
 }
@@ -67,7 +80,9 @@ const SAMPLES: usize = 41;
 /// The generic default for a channel.
 pub fn default_track(ch: Channel) -> Track {
     let (lo, hi) = ch.range();
-    let inputs: Vec<f32> = (0..SAMPLES).map(|i| lo + (hi - lo) * i as f32 / (SAMPLES - 1) as f32).collect();
+    let inputs: Vec<f32> = (0..SAMPLES)
+        .map(|i| lo + (hi - lo) * i as f32 / (SAMPLES - 1) as f32)
+        .collect();
     let (names, k): (&[&str], f32) = match ch {
         Channel::Rudder => (&["Rudder1_D0"], -30.0),
         Channel::Elevator => (&["VatorL_D0", "VatorR_D0"], -30.0),
@@ -77,9 +92,25 @@ pub fn default_track(ch: Channel) -> Track {
     };
     let nodes = names
         .iter()
-        .map(|n| (n.to_string(), inputs.iter().map(|&x| NodeState { angles: [0.0, k * x, 0.0], ..Default::default() }).collect()))
+        .map(|n| {
+            (
+                n.to_string(),
+                inputs
+                    .iter()
+                    .map(|&x| NodeState {
+                        angles: [0.0, k * x, 0.0],
+                        ..Default::default()
+                    })
+                    .collect(),
+            )
+        })
         .collect();
-    Track { channel: ch, inputs, nodes, imported: false }
+    Track {
+        channel: ch,
+        inputs,
+        nodes,
+        imported: false,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -186,13 +217,23 @@ fn desc_args(desc: &str) -> Vec<char> {
 
 impl<'a> Machine<'a> {
     /// Finds a method along the chain, starting at class `from` (or the most derived when `None`).
-    fn resolve(&self, from: Option<&str>, name: &str, desc: &str) -> Option<(&'a ClassFile, &'a Method)> {
+    fn resolve(
+        &self,
+        from: Option<&str>,
+        name: &str,
+        desc: &str,
+    ) -> Option<(&'a ClassFile, &'a Method)> {
         let start = from.or_else(|| self.chain.first().map(|c| c.this_class.as_str()))?;
         self.resolve_class(start, name, desc)
     }
 
     /// Finds a method in `class` or its superclasses, among the loaded classes.
-    fn resolve_class(&self, class: &str, name: &str, desc: &str) -> Option<(&'a ClassFile, &'a Method)> {
+    fn resolve_class(
+        &self,
+        class: &str,
+        name: &str,
+        desc: &str,
+    ) -> Option<(&'a ClassFile, &'a Method)> {
         let chain: &'a [ClassFile] = self.chain;
         let mut cur = Some(class.to_owned());
         let mut guard = 0;
@@ -229,17 +270,37 @@ impl<'a> Machine<'a> {
             V::F(f) => Value::Num(*f as f64),
             V::D(d) => Value::Num(*d),
             V::Str(s) => Value::Str(s.clone()),
-            V::Arr(a) => Value::List(self.arrays[*a].iter().map(|x| Value::Num(*x as f64)).collect()),
-            V::OArr(a) => Value::List(self.oarrays[*a].iter().map(|x| self.export(x, depth + 1)).collect()),
+            V::Arr(a) => Value::List(
+                self.arrays[*a]
+                    .iter()
+                    .map(|x| Value::Num(*x as f64))
+                    .collect(),
+            ),
+            V::OArr(a) => Value::List(
+                self.oarrays[*a]
+                    .iter()
+                    .map(|x| self.export(x, depth + 1))
+                    .collect(),
+            ),
             V::Obj(o) => Value::Obj(
                 self.objects[*o].0.clone(),
-                self.objects[*o].1.iter().map(|(k, x)| (k.clone(), self.export(x, depth + 1))).collect(),
+                self.objects[*o]
+                    .1
+                    .iter()
+                    .map(|(k, x)| (k.clone(), self.export(x, depth + 1)))
+                    .collect(),
             ),
             _ => Value::Null,
         }
     }
 
-    fn call(&mut self, cf: &'a ClassFile, m: &'a Method, args: Vec<V>, depth: usize) -> Result<Option<V>, Abort> {
+    fn call(
+        &mut self,
+        cf: &'a ClassFile,
+        m: &'a Method,
+        args: Vec<V>,
+        depth: usize,
+    ) -> Result<Option<V>, Abort> {
         if depth > 8 || m.code.is_empty() {
             return Err(Abort);
         }
@@ -261,7 +322,8 @@ impl<'a> Machine<'a> {
         let mut st: Vec<V> = Vec::new();
         let mut pc = 0usize;
         let u8_at = |p: usize| code.get(p).copied().ok_or(Abort);
-        let u16_at = |p: usize| -> Result<u16, Abort> { Ok(u16::from_be_bytes([u8_at(p)?, u8_at(p + 1)?])) };
+        let u16_at =
+            |p: usize| -> Result<u16, Abort> { Ok(u16::from_be_bytes([u8_at(p)?, u8_at(p + 1)?])) };
         let i16_at = |p: usize| -> Result<i16, Abort> { Ok(u16_at(p)? as i16) };
         macro_rules! pop {
             () => {
@@ -313,7 +375,11 @@ impl<'a> Machine<'a> {
                     next = pc + 3;
                 }
                 0x12..=0x14 => {
-                    let idx = if op == 0x12 { u8_at(pc + 1)? as u16 } else { u16_at(pc + 1)? };
+                    let idx = if op == 0x12 {
+                        u8_at(pc + 1)? as u16
+                    } else {
+                        u16_at(pc + 1)?
+                    };
                     next = pc + if op == 0x12 { 2 } else { 3 };
                     st.push(match cf.consts.get(idx as usize) {
                         Some(Const::Int(i)) => V::I(*i),
@@ -328,16 +394,25 @@ impl<'a> Machine<'a> {
                     st.push(locals.get(u8_at(pc + 1)? as usize).cloned().ok_or(Abort)?);
                     next = pc + 2;
                 }
-                0x1A..=0x2D => st.push(locals.get(((op - 0x1A) % 4) as usize).cloned().ok_or(Abort)?),
+                0x1A..=0x2D => st.push(
+                    locals
+                        .get(((op - 0x1A) % 4) as usize)
+                        .cloned()
+                        .ok_or(Abort)?,
+                ),
                 0x32 => {
                     let i = popi!();
-                    let V::OArr(a) = pop!() else { return Err(why("aaload".into())) };
+                    let V::OArr(a) = pop!() else {
+                        return Err(why("aaload".into()));
+                    };
                     st.push(self.oarrays[a].get(i as usize).cloned().ok_or(Abort)?);
                 }
                 0x53 => {
                     let v = pop!();
                     let i = popi!();
-                    let V::OArr(a) = pop!() else { return Err(why("aastore".into())) };
+                    let V::OArr(a) = pop!() else {
+                        return Err(why("aastore".into()));
+                    };
                     *self.oarrays[a].get_mut(i as usize).ok_or(Abort)? = v;
                 }
                 0xBD => {
@@ -473,7 +548,11 @@ impl<'a> Machine<'a> {
                             }
                         }
                     };
-                    next = if take { (pc as i64 + i16_at(pc + 1)? as i64) as usize } else { pc + 3 };
+                    next = if take {
+                        (pc as i64 + i16_at(pc + 1)? as i64) as usize
+                    } else {
+                        pc + 3
+                    };
                 }
                 0x9F..=0xA4 => {
                     let (b, a) = (popi!(), popi!());
@@ -485,7 +564,11 @@ impl<'a> Machine<'a> {
                         0xA3 => a > b,
                         _ => a <= b,
                     };
-                    next = if take { (pc as i64 + i16_at(pc + 1)? as i64) as usize } else { pc + 3 };
+                    next = if take {
+                        (pc as i64 + i16_at(pc + 1)? as i64) as usize
+                    } else {
+                        pc + 3
+                    };
                 }
                 0xA7 => next = (pc as i64 + i16_at(pc + 1)? as i64) as usize,
                 0xAC | 0xAE | 0xAF | 0xB0 => return Ok(Some(pop!())),
@@ -500,7 +583,10 @@ impl<'a> Machine<'a> {
                             if !self.statics.contains_key(&key) {
                                 self.run_clinit(class, depth);
                             }
-                            self.statics.get(&key).cloned().unwrap_or_else(|| default_of(desc))
+                            self.statics
+                                .get(&key)
+                                .cloned()
+                                .unwrap_or_else(|| default_of(desc))
                         }
                     };
                     st.push(v);
@@ -585,7 +671,9 @@ impl<'a> Machine<'a> {
                 0x84 => {
                     let i = u8_at(pc + 1)? as usize;
                     let c = u8_at(pc + 2)? as i8 as i32;
-                    let V::I(v) = locals.get(i).cloned().ok_or(Abort)? else { return Err(Abort) };
+                    let V::I(v) = locals.get(i).cloned().ok_or(Abort)? else {
+                        return Err(Abort);
+                    };
                     locals[i] = V::I(v.wrapping_add(c));
                     next = pc + 3;
                 }
@@ -598,7 +686,9 @@ impl<'a> Machine<'a> {
                 0xC1 => {
                     let target = cf.class_name(u16_at(pc + 1)?).ok_or(Abort)?;
                     let v = pop!();
-                    st.push(V::I((v == V::This && self.chain.iter().any(|c| c.this_class == target)) as i32));
+                    st.push(V::I(
+                        (v == V::This && self.chain.iter().any(|c| c.this_class == target)) as i32,
+                    ));
                     next = pc + 3;
                 }
                 0xB6..=0xB8 => {
@@ -625,7 +715,14 @@ impl<'a> Machine<'a> {
         }
     }
 
-    fn static_call(&mut self, class: &str, name: &str, desc: &str, args: Vec<V>, depth: usize) -> Result<Option<V>, Abort> {
+    fn static_call(
+        &mut self,
+        class: &str,
+        name: &str,
+        desc: &str,
+        args: Vec<V>,
+        depth: usize,
+    ) -> Result<Option<V>, Abort> {
         let f = |v: &V| match v {
             V::F(x) => Ok(*x),
             V::I(i) => Ok(*i as f32),
@@ -663,7 +760,9 @@ impl<'a> Machine<'a> {
         if name == "cvt" && desc == "(FFFFF)F" {
             let x: Vec<f32> = args.iter().map(f).collect::<Result<_, _>>()?;
             let v = x[0].max(x[1]).min(x[2]);
-            return Ok(Some(V::F(x[3] + (x[4] - x[3]) * (v - x[1]) / (x[2] - x[1]))));
+            return Ok(Some(V::F(
+                x[3] + (x[4] - x[3]) * (v - x[1]) / (x[2] - x[1]),
+            )));
         }
         let Some((cf, m)) = self.resolve(Some(class), name, desc) else {
             if self.lenient {
@@ -680,8 +779,12 @@ impl<'a> Machine<'a> {
         if !self.clinit_done.insert(class.to_owned()) {
             return;
         }
-        let Some(cf) = self.chain.iter().find(|c| c.this_class == class) else { return };
-        let Some(m) = cf.method("<clinit>", "()V") else { return };
+        let Some(cf) = self.chain.iter().find(|c| c.this_class == class) else {
+            return;
+        };
+        let Some(m) = cf.method("<clinit>", "()V") else {
+            return;
+        };
         let (was, budget) = (self.lenient, self.budget);
         self.lenient = true;
         self.budget = 2_000_000;
@@ -694,7 +797,16 @@ impl<'a> Machine<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn virtual_call(&mut self, recv: V, special: bool, class: &str, name: &str, desc: &str, args: Vec<V>, depth: usize) -> Result<Option<V>, Abort> {
+    fn virtual_call(
+        &mut self,
+        recv: V,
+        special: bool,
+        class: &str,
+        name: &str,
+        desc: &str,
+        args: Vec<V>,
+        depth: usize,
+    ) -> Result<Option<V>, Abort> {
         match recv {
             V::Hier => {
                 let node = match args.first() {
@@ -712,12 +824,16 @@ impl<'a> Machine<'a> {
                         entry.angles = [f(&args[1])?, f(&args[2])?, f(&args[3])?];
                     }
                     ("chunkSetAngles", "(Ljava/lang/String;[F)V") => {
-                        let V::Arr(a) = args[1] else { return Err(Abort) };
+                        let V::Arr(a) = args[1] else {
+                            return Err(Abort);
+                        };
                         let v = &self.arrays[a];
                         entry.angles = [v[0], v[1], v[2]];
                     }
                     ("chunkSetLocate", "(Ljava/lang/String;[F[F)V") => {
-                        let (V::Arr(x), V::Arr(r)) = (&args[1], &args[2]) else { return Err(Abort) };
+                        let (V::Arr(x), V::Arr(r)) = (&args[1], &args[2]) else {
+                            return Err(Abort);
+                        };
                         let (x, r) = (&self.arrays[*x], &self.arrays[*r]);
                         entry.offset = [x[0], x[1], x[2]];
                         entry.angles = [r[0], r[1], r[2]];
@@ -741,14 +857,20 @@ impl<'a> Machine<'a> {
                     }
                     return Ok(None);
                 }
-                let (cf, m) = self.resolve(special.then_some(class), name, desc).ok_or_else(|| why(format!("this.{name}{desc}")))?;
+                let (cf, m) = self
+                    .resolve(special.then_some(class), name, desc)
+                    .ok_or_else(|| why(format!("this.{name}{desc}")))?;
                 let mut full = vec![V::This];
                 full.extend(args);
                 self.call(cf, m, full, depth + 1)
             }
             V::Obj(_) => {
                 // Constructors and `super.` calls resolve from the referenced class, others from the object's.
-                let start = if special { class.to_owned() } else { self.class_of(&recv).unwrap_or_else(|| class.to_owned()) };
+                let start = if special {
+                    class.to_owned()
+                } else {
+                    self.class_of(&recv).unwrap_or_else(|| class.to_owned())
+                };
                 match self.resolve_class(&start, name, desc) {
                     Some((cf, m)) => {
                         let mut full = vec![recv];
@@ -827,7 +949,9 @@ pub fn evaluate(classes: &[ClassFile], name: &str, desc: &str) -> Result<Value, 
         record: &[],
         recorded: Vec::new(),
     };
-    let (cf, meth) = m.resolve(None, name, desc).ok_or_else(|| format!("no method {name}{desc}"))?;
+    let (cf, meth) = m
+        .resolve(None, name, desc)
+        .ok_or_else(|| format!("no method {name}{desc}"))?;
     match m.call(cf, meth, vec![V::This], 0) {
         Ok(Some(v)) => Ok(m.export(&v, 0)),
         Ok(None) => Ok(Value::Null),
@@ -837,7 +961,10 @@ pub fn evaluate(classes: &[ClassFile], name: &str, desc: &str) -> Result<Value, 
 
 /// Runs the static initializer of `classes[0]` leniently and returns the recorded calls to the
 /// static methods named in `record`.
-pub fn record_clinit(classes: &[ClassFile], record: &'static [&'static str]) -> Vec<(String, Vec<Value>)> {
+pub fn record_clinit(
+    classes: &[ClassFile],
+    record: &'static [&'static str],
+) -> Vec<(String, Vec<Value>)> {
     let mut m = Machine {
         chain: classes,
         arrays: vec![vec![0.0; 3], vec![0.0; 3]],
@@ -863,7 +990,9 @@ pub fn record_clinit(classes: &[ClassFile], record: &'static [&'static str]) -> 
 pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
     const HM: &str = "Lcom/maddox/il2/engine/HierMesh;";
     let (lo, hi) = ch.range();
-    let inputs: Vec<f32> = (0..SAMPLES).map(|i| lo + (hi - lo) * i as f32 / (SAMPLES - 1) as f32).collect();
+    let inputs: Vec<f32> = (0..SAMPLES)
+        .map(|i| lo + (hi - lo) * i as f32 / (SAMPLES - 1) as f32)
+        .collect();
     let mut m = Machine {
         chain,
         arrays: vec![vec![0.0; 3], vec![0.0; 3]],
@@ -887,14 +1016,26 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
         Channel::Gear => "",
     };
     // Gear: the static methods of the most derived class that declares them.
-    let gear3 = chain.iter().find_map(|c| c.method("moveGear", &format!("({HM}FFF)V")).filter(|m| m.is_static).map(|mm| (c, mm)));
-    let gear1 = chain.iter().find_map(|c| c.method("moveGear", &format!("({HM}F)V")).filter(|m| m.is_static).map(|mm| (c, mm)));
+    let gear3 = chain.iter().find_map(|c| {
+        c.method("moveGear", &format!("({HM}FFF)V"))
+            .filter(|m| m.is_static)
+            .map(|mm| (c, mm))
+    });
+    let gear1 = chain.iter().find_map(|c| {
+        c.method("moveGear", &format!("({HM}F)V"))
+            .filter(|m| m.is_static)
+            .map(|mm| (c, mm))
+    });
     if ch == Channel::Gear && gear3.is_none() && gear1.is_none() {
         return None;
     }
-    let virt = (ch != Channel::Gear).then(|| m.resolve(None, virtual_name, "(F)V")).flatten();
+    let virt = (ch != Channel::Gear)
+        .then(|| m.resolve(None, virtual_name, "(F)V"))
+        .flatten();
     // Only use an override below the generic Aircraft base (whose bodies are empty).
-    if ch != Channel::Gear && virt.is_none_or(|(c, _)| c.this_class == "com/maddox/il2/objects/air/Aircraft") {
+    if ch != Channel::Gear
+        && virt.is_none_or(|(c, _)| c.this_class == "com/maddox/il2/objects/air/Aircraft")
+    {
         return None;
     }
     for &x in &inputs {
@@ -902,7 +1043,11 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
         let ok = if ch == Channel::Gear {
             let mut ok = true;
             for (c, mm) in [gear3, gear1].into_iter().flatten() {
-                let args = if mm.desc.contains("FFF") { vec![V::Hier, V::F(x), V::F(x), V::F(x)] } else { vec![V::Hier, V::F(x)] };
+                let args = if mm.desc.contains("FFF") {
+                    vec![V::Hier, V::F(x), V::F(x), V::F(x)]
+                } else {
+                    vec![V::Hier, V::F(x)]
+                };
                 ok &= m.call(c, mm, args, 0).is_ok();
             }
             ok
@@ -918,10 +1063,21 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
     let mut nodes: BTreeMap<String, Vec<NodeState>> = BTreeMap::new();
     for name in frames.iter().flat_map(|f| f.keys()) {
         if !nodes.contains_key(name) {
-            nodes.insert(name.clone(), frames.iter().map(|f| f.get(name).copied().unwrap_or_default()).collect());
+            nodes.insert(
+                name.clone(),
+                frames
+                    .iter()
+                    .map(|f| f.get(name).copied().unwrap_or_default())
+                    .collect(),
+            );
         }
     }
-    Some(Track { channel: ch, inputs, nodes, imported: true })
+    Some(Track {
+        channel: ch,
+        inputs,
+        nodes,
+        imported: true,
+    })
 }
 
 #[cfg(test)]

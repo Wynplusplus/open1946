@@ -43,7 +43,9 @@ impl Container {
         let end = data.len().checked_sub(8).ok_or_else(|| bad("truncated"))?;
         let idx_size = be32(&data, end)? as usize;
         let ent_size = be32(&data, end + 4)? as usize;
-        let idx_start = end.checked_sub(ent_size + idx_size).ok_or_else(|| bad("tailer"))?;
+        let idx_start = end
+            .checked_sub(ent_size + idx_size)
+            .ok_or_else(|| bad("tailer"))?;
         let mut block_offsets = vec![16];
         for i in 0..idx_size / 4 {
             let len = be32(&data, idx_start + 4 * i)?;
@@ -55,21 +57,36 @@ impl Container {
         let mut entries = HashMap::new();
         let mut p = idx_start + idx_size;
         while p < end {
-            let n = u16::from_be_bytes(data.get(p..p + 2).ok_or_else(|| bad("entry"))?.try_into().unwrap()) as usize;
+            let n = u16::from_be_bytes(
+                data.get(p..p + 2)
+                    .ok_or_else(|| bad("entry"))?
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
             // Java modified UTF-8; names here are ASCII.
-            let name = String::from_utf8_lossy(data.get(p + 2..p + 2 + n).ok_or_else(|| bad("entry"))?).into_owned();
+            let name =
+                String::from_utf8_lossy(data.get(p + 2..p + 2 + n).ok_or_else(|| bad("entry"))?)
+                    .into_owned();
             p += 2 + n;
             let len = be32(&data, p)?.max(0) as usize;
             let count = be32(&data, p + 4)?.max(0) as usize;
             p += 8;
-            let blocks = (0..count).map(|i| be32(&data, p + 4 * i).map(|b| b.max(0) as usize)).collect::<Result<Vec<_>, _>>()?;
+            let blocks = (0..count)
+                .map(|i| be32(&data, p + 4 * i).map(|b| b.max(0) as usize))
+                .collect::<Result<Vec<_>, _>>()?;
             p += 4 * count;
             if blocks.iter().any(|&b| b + 1 >= block_offsets.len()) {
                 return Err(bad("block index"));
             }
             entries.insert(name, Entry { len, blocks });
         }
-        Ok(Container { data, compression, block_size: block_size as usize, block_offsets, entries })
+        Ok(Container {
+            data,
+            compression,
+            block_size: block_size as usize,
+            block_offsets,
+            entries,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -81,7 +98,9 @@ impl Container {
     }
 
     pub fn read(&self, name: &str) -> Result<Option<Vec<u8>>, Error> {
-        let Some(e) = self.entries.get(name) else { return Ok(None) };
+        let Some(e) = self.entries.get(name) else {
+            return Ok(None);
+        };
         let mut out = Vec::with_capacity(e.len);
         for (k, &b) in e.blocks.iter().enumerate() {
             let raw = &self.data[self.block_offsets[b]..self.block_offsets[b + 1]];

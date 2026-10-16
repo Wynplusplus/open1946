@@ -19,7 +19,9 @@ pub fn decode(src: &[u8], out: &mut Vec<u8>) {
             ring[r] = c;
             r = (r + 1) & 0xFFF;
         } else {
-            let (Some(&b0), Some(&b1)) = (src.get(i), src.get(i + 1)) else { return };
+            let (Some(&b0), Some(&b1)) = (src.get(i), src.get(i + 1)) else {
+                return;
+            };
             i += 2;
             let mut p = b0 as usize | ((b1 as usize & 0xF0) << 4);
             for _ in 0..(b1 & 0x0F) + 3 {

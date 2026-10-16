@@ -27,20 +27,30 @@ impl Tracers {
             }
             if let Ok(b) = loader.append_hier(&mut mesh, path, false) {
                 if !b.is_empty() {
-                    let lods = mesh.batches[b.start].lod.map(|(g, _)| mesh.lod_distances[g as usize].clone()).unwrap_or_default();
+                    let lods = mesh.batches[b.start]
+                        .lod
+                        .map(|(g, _)| mesh.lod_distances[g as usize].clone())
+                        .unwrap_or_default();
                     classes.insert(path.to_owned(), (b, lods));
                 }
             }
         }
         if std::env::var_os("IL2_TRACE").is_some() {
-            eprintln!("tracer meshes: {:?}, warnings {:?}", classes.keys().collect::<Vec<_>>(), loader.warnings);
+            eprintln!(
+                "tracer meshes: {:?}, warnings {:?}",
+                classes.keys().collect::<Vec<_>>(),
+                loader.warnings
+            );
             for (k, (b, l)) in &classes {
                 eprintln!("  {k}: batches {b:?} lods {l:?}");
             }
         }
         mesh.textures = loader.take_images();
         mesh.node_count = mesh.node_count.max(1);
-        Tracers { data: Some(mesh), classes }
+        Tracers {
+            data: Some(mesh),
+            classes,
+        }
     }
 
     /// Appends instances of arbitrary meshes from this set: `(path, rotation, world position)`.
@@ -53,26 +63,46 @@ impl Tracers {
     ) -> Vec<InstancedDraw<'a>> {
         let mut by_class: HashMap<&str, Vec<InstanceRaw>> = HashMap::new();
         for (path, rot, pos) in items {
-            let Some((name, _)) = self.classes.get_key_value(path) else { continue };
+            let Some((name, _)) = self.classes.get_key_value(path) else {
+                continue;
+            };
             let m = Mat4::from_rotation_translation(rot.as_quat(), (pos - eye).as_vec3());
-            by_class.entry(name.as_str()).or_default().push(InstanceRaw::from_mat4(m));
+            by_class
+                .entry(name.as_str())
+                .or_default()
+                .push(InstanceRaw::from_mat4(m));
         }
         let mut draws = Vec::new();
         for (path, inst) in by_class {
             let (batches, _) = &self.classes[path];
             let start = out.len() as u32;
             out.extend(inst);
-            draws.push(InstancedDraw { mesh, batches: batches.clone(), level: 0, instances: start..out.len() as u32 });
+            draws.push(InstancedDraw {
+                mesh,
+                batches: batches.clone(),
+                level: 0,
+                instances: start..out.len() as u32,
+            });
         }
         draws
     }
 
     /// Appends tracer instances (positions relative to `eye`) and returns their draws.
-    pub fn gather<'a>(&self, mesh: &'a GpuMesh, bullets: &[Bullet], eye: DVec3, out: &mut Vec<InstanceRaw>) -> Vec<InstancedDraw<'a>> {
+    pub fn gather<'a>(
+        &self,
+        mesh: &'a GpuMesh,
+        bullets: &[Bullet],
+        eye: DVec3,
+        out: &mut Vec<InstanceRaw>,
+    ) -> Vec<InstancedDraw<'a>> {
         let mut by_class: HashMap<&str, Vec<InstanceRaw>> = HashMap::new();
         for b in bullets.iter().filter(|b| b.tracer) {
-            let Some(path) = b.ty().trace_mesh.as_deref() else { continue };
-            let Some((_, lods)) = self.classes.get(path) else { continue };
+            let Some(path) = b.ty().trace_mesh.as_deref() else {
+                continue;
+            };
+            let Some((_, lods)) = self.classes.get(path) else {
+                continue;
+            };
             let rel = b.pos - eye;
             if select_lod(lods, rel.length() as f32).is_none() && !lods.is_empty() {
                 continue;
@@ -82,15 +112,24 @@ impl Tracers {
             // OpenIL2: widen distant tracers so they stay a few pixels thick (the original draws
             // lines beyond 500 m).
             let w = (rel.length() / 50.0).max(1.0) as f32;
-            let m = Mat4::from_rotation_translation(rot, rel.as_vec3()) * Mat4::from_scale(glam::Vec3::new(1.0, w, w));
-            by_class.entry(path).or_default().push(InstanceRaw::from_mat4(m));
+            let m = Mat4::from_rotation_translation(rot, rel.as_vec3())
+                * Mat4::from_scale(glam::Vec3::new(1.0, w, w));
+            by_class
+                .entry(path)
+                .or_default()
+                .push(InstanceRaw::from_mat4(m));
         }
         let mut draws = Vec::new();
         for (path, inst) in by_class {
             let (batches, _) = &self.classes[path];
             let start = out.len() as u32;
             out.extend(inst);
-            draws.push(InstancedDraw { mesh, batches: batches.clone(), level: 0, instances: start..out.len() as u32 });
+            draws.push(InstancedDraw {
+                mesh,
+                batches: batches.clone(),
+                level: 0,
+                instances: start..out.len() as u32,
+            });
         }
         draws
     }

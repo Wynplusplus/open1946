@@ -103,7 +103,14 @@ fn deg(r: f64) -> f64 {
 impl Sim {
     /// Starts stopped engines or stops running ones (`at_airfield`: for engines that need ground support).
     pub fn toggle_engines(&mut self, at_airfield: bool) {
-        let env = EngineEnv { dt: TICK, speed: self.vel.length(), altitude: self.pos.z, at_airfield, vmax_h: self.ac.vmax_h, overheat: false };
+        let env = EngineEnv {
+            dt: TICK,
+            speed: self.vel.length(),
+            altitude: self.pos.z,
+            at_airfield,
+            vmax_h: self.ac.vmax_h,
+            overheat: false,
+        };
         for (p, st) in self.ac.engines.iter().zip(&mut self.engines) {
             st.toggle(p, &env);
         }
@@ -147,9 +154,18 @@ impl Sim {
             return if down { 1.0 } else { 0.0 };
         }
         if down {
-            FLAP_STEPS.iter().copied().find(|&s| s > cur + 1e-6).unwrap_or(1.0)
+            FLAP_STEPS
+                .iter()
+                .copied()
+                .find(|&s| s > cur + 1e-6)
+                .unwrap_or(1.0)
         } else {
-            FLAP_STEPS.iter().rev().copied().find(|&s| s < cur - 1e-6).unwrap_or(0.0)
+            FLAP_STEPS
+                .iter()
+                .rev()
+                .copied()
+                .find(|&s| s < cur - 1e-6)
+                .unwrap_or(0.0)
         }
     }
 
@@ -190,7 +206,10 @@ impl Sim {
             ticks: 0,
             last_vx: speed,
             ev: 0.0,
-            ct: Inputs { gear: 1.0, ..Default::default() },
+            ct: Inputs {
+                gear: 1.0,
+                ..Default::default()
+            },
             wing,
             fusel: Polar::fixed(0.02, 0.2, 17.0, 0.0),
             tail: Polar::fixed(0.085, 1.1, 17.0, 0.02),
@@ -229,33 +248,88 @@ impl Sim {
         // Controls (docs/behavior/controls.md).
         let c = &self.ac.controls;
         let vx = self.last_vx;
-        let lim = |thr: f64, p: i32, floor: f64| if vx > thr { (thr.powi(p) / vx.powi(p)).max(floor) } else { 1.0 };
-        let (ail_lim, rud_lim, elev_lim) = (lim(c.thresholds[0], 3, 0.2), lim(c.thresholds[1], 2, 0.2), lim(c.thresholds[2], 2, 0.4));
+        let lim = |thr: f64, p: i32, floor: f64| {
+            if vx > thr {
+                (thr.powi(p) / vx.powi(p)).max(floor)
+            } else {
+                1.0
+            }
+        };
+        let (ail_lim, rud_lim, elev_lim) = (
+            lim(c.thresholds[0], 3, 0.2),
+            lim(c.thresholds[1], 2, 0.2),
+            lim(c.thresholds[2], 2, 0.4),
+        );
         for i in 0..3 {
             self.trim[i] = filter(dt, self.trim_target[i], self.trim[i], 999.9, 0.25);
         }
         let ail = trimmed(input.aileron, self.trim[0], ail_lim);
-        self.ct.aileron = filter(dt, ail, self.ct.aileron, 0.2 * (1.0 + 0.3 * input.aileron.abs()), 0.025);
+        self.ct.aileron = filter(
+            dt,
+            ail,
+            self.ct.aileron,
+            0.2 * (1.0 + 0.3 * input.aileron.abs()),
+            0.025,
+        );
         let ev = trimmed(input.elevator, self.trim[1], elev_lim);
         // The elevator surface lags in `ev`; at high speed the trimmed neutral moves up.
-        self.ev = filter(dt, ev, self.ev, 0.3 * (1.0 + 0.3 * input.elevator.abs()), 0.022);
+        self.ev = filter(
+            dt,
+            ev,
+            self.ev,
+            0.3 * (1.0 + 0.3 * input.elevator.abs()),
+            0.022,
+        );
         self.ct.elevator = (self.ev - 0.25 * (1.0 - elev_lim)).clamp(-1.0, 1.0);
         let rud = trimmed(input.rudder, self.trim[2], rud_lim);
-        self.ct.rudder = filter(dt, rud, self.ct.rudder, 0.35 * (1.0 + 0.3 * input.rudder.abs()), 0.025);
-        let max_throttle = self.ac.engines.iter().map(|e| e.max_throttle()).fold(1.0, f64::max);
+        self.ct.rudder = filter(
+            dt,
+            rud,
+            self.ct.rudder,
+            0.35 * (1.0 + 0.3 * input.rudder.abs()),
+            0.025,
+        );
+        let max_throttle = self
+            .ac
+            .engines
+            .iter()
+            .map(|e| e.max_throttle())
+            .fold(1.0, f64::max);
         // The player's throttle acts directly.
         self.ct.throttle = input.throttle.clamp(0.0, max_throttle);
-        let flaps_target = if c.flaps { input.flaps.clamp(0.0, 1.0) } else { 0.0 };
+        let flaps_target = if c.flaps {
+            input.flaps.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let kmh = vx * 3.6;
         let cvt = |lo: f64, hi: f64| lo + (hi - lo) * ((kmh - 150.0) / 130.0).clamp(0.0, 1.0);
-        let flap_rate = if self.ct.flaps > flaps_target { cvt(0.15, 0.25) } else { cvt(0.15, 0.02) };
+        let flap_rate = if self.ct.flaps > flaps_target {
+            cvt(0.15, 0.25)
+        } else {
+            cvt(0.15, 0.02)
+        };
         self.ct.flaps = filter(dt, flaps_target, self.ct.flaps, 999.0, flap_rate);
-        self.ct.brakes = if input.brakes > self.ct.brakes { (self.ct.brakes + 0.3 * dt).min(input.brakes) } else { input.brakes };
+        self.ct.brakes = if input.brakes > self.ct.brakes {
+            (self.ct.brakes + 0.3 * dt).min(input.brakes)
+        } else {
+            input.brakes
+        };
         self.ct.wep = input.wep;
         self.ct.tail_lock = input.tail_lock && c.tailwheel_lock;
-        self.ct.gear = if c.retractable { filter(dt, input.gear.clamp(0.0, 1.0), self.ct.gear, 999.9, 0.2) } else { 1.0 };
+        self.ct.gear = if c.retractable {
+            filter(dt, input.gear.clamp(0.0, 1.0), self.ct.gear, 999.9, 0.2)
+        } else {
+            1.0
+        };
         if c.airbrake {
-            self.airbrake = filter(dt, input.airbrake.clamp(0.0, 1.0), self.airbrake, 999.9, 0.5);
+            self.airbrake = filter(
+                dt,
+                input.airbrake.clamp(0.0, 1.0),
+                self.airbrake,
+                999.9,
+                0.5,
+            );
         }
         self.ct.airbrake = self.airbrake;
         self.wing.set_flaps(self.ct.flaps);
@@ -289,13 +363,22 @@ impl Sim {
         for (p, st) in ac.engines.iter().zip(&mut self.engines) {
             // OpenIL2 control mapping: a rocket booster fires while the throttle is in the boost range.
             let (t, fuel_left) = match p.kind {
-                EngineKind::RocketBoost => (if throttle > 1.0 { 1.0 } else { 0.0 }, self.nitro > 0.0),
+                EngineKind::RocketBoost => {
+                    (if throttle > 1.0 { 1.0 } else { 0.0 }, self.nitro > 0.0)
+                }
                 EngineKind::Pvrd => (throttle, self.nitro > 0.0),
                 _ => (throttle, self.fuel > 0.0),
             };
             let wep = p.wep_active(t, self.ct.wep, self.nitro > 0.0);
             st.step_any(p, t, wep, vflow.x, v, self.pos.z, dt, fuel_left);
-            let env = EngineEnv { dt, speed: v, altitude: self.pos.z, at_airfield: false, vmax_h: ac.vmax_h, overheat: self.engine_overheat };
+            let env = EngineEnv {
+                dt,
+                speed: v,
+                altitude: self.pos.z,
+                at_airfield: false,
+                vmax_h: ac.vmax_h,
+                overheat: self.engine_overheat,
+            };
             st.manage(p, t, wep, &env);
             thrust += st.thrust;
             torque += st.torque;
@@ -305,7 +388,8 @@ impl Sim {
             if p.piston {
                 let denom = 6.0 * rho * (vflow.x + self.add_vflow).max(1.0);
                 self.add_vflow = 0.95 * self.add_vflow + 0.05 * st.thrust / denom;
-                self.add_vside = (0.95 * self.add_vside + 0.05 * (st.prop_torque / p.prop_r) / denom).max(0.0);
+                self.add_vside =
+                    (0.95 * self.add_vside + 0.05 * (st.prop_torque / p.prop_r) / denom).max(0.0);
             }
         }
         self.fuel = (self.fuel - burn).max(0.0);
@@ -314,17 +398,23 @@ impl Sim {
         let prop_sign = ac.engines.first().map_or(1.0, |e| e.direction);
         let single_prop = ac.engines.len() == 1;
 
-        let radiator = if self.engines.is_empty() { 0.0 } else { self.engines.iter().map(|e| e.radiator).sum::<f64>() / self.engines.len() as f64 };
+        let radiator = if self.engines.is_empty() {
+            0.0
+        } else {
+            self.engines.iter().map(|e| e.radiator).sum::<f64>() / self.engines.len() as f64
+        };
 
         // Wing halves.
-        let delta = ac.wing_v * aos.to_radians().sin() + ac.sens_roll * (1.0 - 0.1 * flap) * 14.0 * self.ct.aileron;
+        let delta = ac.wing_v * aos.to_radians().sin()
+            + ac.sens_roll * (1.0 - 0.1 * flap) * 14.0 * self.ct.aileron;
         let half = |side: f64| {
             let p = DVec3::new(-ac.gcenter, side * 0.85 * ac.arm_wing_out, -0.5);
             let mut vn = w.cross(p) + vflow;
             let a_geo = side * delta - deg(vn.z.atan2(vn.x));
             vn.x += 0.07 * self.add_vflow;
             let qn = q(vn);
-            let a = side * delta - deg((vn.z + side * 0.07 * self.add_vside * prop_sign).atan2(vn.x));
+            let a =
+                side * delta - deg((vn.z + side * 0.07 * self.add_vside * prop_sign).atan2(vn.x));
             let mut ail_drag = 0.015 * side * delta;
             if ail_drag < 0.0 {
                 ail_drag *= 0.18;
@@ -332,9 +422,18 @@ impl Sim {
             let (cx, cy) = self.wing.coeffs_mach(a, full_mach, ac.mach.as_ref());
             let (fcx, fcy) = self.fusel.coeffs(aos);
             // Gear (0.035 when down, none for fixed gear) and dive brake drag.
-            let gear_cx = if ac.controls.retractable { 0.035 * self.ct.gear } else { 0.0 };
+            let gear_cx = if ac.controls.retractable {
+                0.035 * self.ct.gear
+            } else {
+                0.0
+            };
             let radiator_cx = 0.003 * radiator;
-            let cw = DVec3::new(-qn * (cx + ail_drag + gear_cx + radiator_cx + ac.airbrake_cx * self.airbrake) - qn * fcx, -qn * fcy, qn * cy * kq);
+            let cw = DVec3::new(
+                -qn * (cx + ail_drag + gear_cx + radiator_cx + ac.airbrake_cx * self.airbrake)
+                    - qn * fcx,
+                -qn * fcy,
+                qn * cy * kq,
+            );
             (cw, a_geo, qn)
         };
         let (mut cwl, al, ql) = half(1.0);
@@ -354,7 +453,11 @@ impl Sim {
             if height < 10.0 {
                 s *= 0.1 * height;
             }
-            let (stalled, other) = if al > ar { (&mut cwl, &mut cwr) } else { (&mut cwr, &mut cwl) };
+            let (stalled, other) = if al > ar {
+                (&mut cwl, &mut cwr)
+            } else {
+                (&mut cwr, &mut cwl)
+            };
             other.x += 0.02 * s * ac.spin_cx_loss;
             stalled.x -= 0.25 * s * ac.spin_cx_loss;
             other.z += 0.02 * s * ac.spin_cy_loss;
@@ -363,7 +466,9 @@ impl Sim {
         } else {
             self.spin_coeff -= 0.2 * dt;
         }
-        self.spin_coeff = self.spin_coeff.clamp(0.5 + 0.4 * power_out, 1.2 + 0.4 * power_out);
+        self.spin_coeff = self
+            .spin_coeff
+            .clamp(0.5 + 0.4 * power_out, 1.2 + 0.4 * power_out);
 
         // Ground effect.
         if height < 0.4 * ac.length {
@@ -381,14 +486,22 @@ impl Sim {
             let base = (vn.x + r * self.add_vflow).max(0.2);
             let s = (1.0 - 1.5 * yz / base).max(0.0);
             vn.x += s * r * self.add_vflow;
-            let k = if vn.x < 0.0 { 0.0 } else { (0.0011 * vn.x * vn.x).min(1.0) };
+            let k = if vn.x < 0.0 {
+                0.0
+            } else {
+                (0.0011 * vn.x * vn.x).min(1.0)
+            };
             side = s * k * self.add_vside;
         }
         let qt = q(vn);
         let defl_e = self.ct.elevator * if self.ct.elevator > 0.0 { 28.0 } else { 20.0 };
-        let tail_a = |dz: f64| -deg((vn.z + dz).atan2(vn.x)) - 2.0 - 0.002 * v - ac.sens_pitch * defl_e;
+        let tail_a =
+            |dz: f64| -deg((vn.z + dz).atan2(vn.x)) - 2.0 - 0.002 * v - ac.sens_pitch * defl_e;
         let (al_t, ar_t) = if single_prop {
-            (tail_a(-0.36 * side * prop_sign), tail_a(0.36 * side * prop_sign))
+            (
+                tail_a(-0.36 * side * prop_sign),
+                tail_a(0.36 * side * prop_sign),
+            )
         } else {
             (tail_a(0.0), tail_a(0.0))
         };
@@ -398,8 +511,13 @@ impl Sim {
         };
         let fhl = tail_force(al_t);
         let fhr = tail_force(ar_t);
-        let defl_r = if ac.rudder_area < 0.05 { 0.0 } else { 28.0 * self.ct.rudder };
-        let fin_a = -deg((vn.y - 0.5 * side * prop_sign).atan2(vn.x)) + ac.sens_yaw * rudder_infl * defl_r;
+        let defl_r = if ac.rudder_area < 0.05 {
+            0.0
+        } else {
+            28.0 * self.ct.rudder
+        };
+        let fin_a =
+            -deg((vn.y - 0.5 * side * prop_sign).atan2(vn.x)) + ac.sens_yaw * rudder_infl * defl_r;
         let (cx, cy) = self.tail.coeffs(fin_a);
         let fv = DVec3::new(-qt * cx, qt * cy, 0.0) * (0.2 + 1.5 * ac.keel_area + ac.rudder_area);
 
@@ -429,7 +547,9 @@ impl Sim {
             }
             u
         };
-        let xcg = ac.gcenter + ac.gc_flaps_shift * (3.0 * flap).min(1.0) * (1.0 - u) + ac.gc_aoa_shift * u;
+        let xcg = ac.gcenter
+            + ac.gc_flaps_shift * (3.0 * flap).min(1.0) * (1.0 - u)
+            + ac.gc_aoa_shift * u;
         let saos = aos.to_radians().sin();
         let mut am = DVec3::ZERO;
         if aoa.abs() < 12.0 {
@@ -463,7 +583,11 @@ impl Sim {
             self.gear.read_surface(ground, self.pos.x, self.pos.y);
         }
         let mut gear_f = self.gear_forces(ground, mass);
-        let n = if gear_f.0 == DVec3::ZERO && gear_f.1 == DVec3::ZERO { 1 } else { 5 };
+        let n = if gear_f.0 == DVec3::ZERO && gear_f.1 == DVec3::ZERO {
+            1
+        } else {
+            5
+        };
         // Static friction: at low power, small forces and motion leave a grounded aircraft standing.
         self.dry_friction -= 0.01;
         if self.gear.changed {
@@ -473,7 +597,17 @@ impl Sim {
             self.dry_friction += 0.02;
         }
         self.dry_friction = self.dry_friction.clamp(1.0, 32.0);
-        let power = (self.engines.iter().map(|e| if e.running() { self.ct.throttle.min(1.1) * e.readyness } else { 0.0 }).sum::<f64>()
+        let power = (self
+            .engines
+            .iter()
+            .map(|e| {
+                if e.running() {
+                    self.ct.throttle.min(1.1) * e.readyness
+                } else {
+                    0.0
+                }
+            })
+            .sum::<f64>()
             / self.engines.len().max(1) as f64)
             .min(1.1);
         let k = (4.0 * (0.25 - power)).max(0.0).powi(2) * self.dry_friction;

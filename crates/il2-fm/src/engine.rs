@@ -115,7 +115,11 @@ impl EngineParams {
     pub fn load(emd: &SectFile, sub: &str) -> Option<Self> {
         let s = emd.section_ci(sub)?;
         let g = emd.section_ci("Generic");
-        let raw = |k: &str| s.get_ci(k).or_else(|| g.and_then(|g| g.get_ci(k))).map(str::trim);
+        let raw = |k: &str| {
+            s.get_ci(k)
+                .or_else(|| g.and_then(|g| g.get_ci(k)))
+                .map(str::trim)
+        };
         let num = |k: &str, d: f64| raw(k).and_then(atof).map_or(d, f64::from);
         let ty = raw("Type").unwrap_or("Inline");
         let kind = if ty.ends_with("Inline") || ty.ends_with("Radial") {
@@ -154,9 +158,15 @@ impl EngineParams {
         };
         let steps = (num("CompressorSteps", 1.0) as i32 - 1).max(0) as usize + 1;
         let p_ratio = |alt: f64| atmosphere::pressure(alt) / atmosphere::P0;
-        let stage_pressure = (0..steps).map(|i| p_ratio(num(&format!("CompressorAltitude{i}"), 0.0))).collect();
-        let stage_mult = (0..steps).map(|i| num(&format!("CompressorMultiplier{i}"), 0.0)).collect();
-        let stage_base = (0..steps).map(|i| num(&format!("CompressorBaseMultiplier{i}"), 0.8)).collect();
+        let stage_pressure = (0..steps)
+            .map(|i| p_ratio(num(&format!("CompressorAltitude{i}"), 0.0)))
+            .collect();
+        let stage_mult = (0..steps)
+            .map(|i| num(&format!("CompressorMultiplier{i}"), 0.0))
+            .collect();
+        let stage_base = (0..steps)
+            .map(|i| num(&format!("CompressorBaseMultiplier{i}"), 0.8))
+            .collect();
         let max_ata_rpm = num("CompressorMaxATARPM", 1.45);
         let mut ata: Vec<(f64, f64)> = Vec::new();
         let mut insert = |r: f64, a: f64| {
@@ -175,8 +185,16 @@ impl EngineParams {
             insert(num("CompressorRPMPMax", 2600.0), num("CompressorPMax", 1.0));
         }
         for k in 0..16 {
-            let (Some(r), Some(a)) = (raw(&format!("CompressorRPM{k}")), raw(&format!("CompressorATA{k}"))) else { break };
-            insert(atof(r).unwrap_or(2000.0) as f64, atof(a).unwrap_or(1.0) as f64);
+            let (Some(r), Some(a)) = (
+                raw(&format!("CompressorRPM{k}")),
+                raw(&format!("CompressorATA{k}")),
+            ) else {
+                break;
+            };
+            insert(
+                atof(r).unwrap_or(2000.0) as f64,
+                atof(a).unwrap_or(1.0) as f64,
+            );
         }
         // Boost types keep their boost pressure as the last ATA point; it is taken out of the normal curve.
         let afterburner = num("AfterburnerType", 0.0) as i32;
@@ -194,8 +212,14 @@ impl EngineParams {
         let prop_aoa0 = num("PropAoA0", 11.0).to_radians();
         // Jets: the fan is sized so it would give twice the rated thrust at full RPM; the runtime passes
         // the angle in radians to a function that expects degrees, which is kept here.
-        let jet_s = cylinders * cylinders * 2.0 * thrust_max / (fan_cy(prop_aoa0) * atmosphere::RHO0 * w_max * w_max * prop_r * prop_r);
-        let jet_m_max = 0.5 * fan_cx(prop_aoa0.to_degrees()) * atmosphere::RHO0 * (w_max * prop_r).powi(2) * jet_s * prop_r;
+        let jet_s = cylinders * cylinders * 2.0 * thrust_max
+            / (fan_cy(prop_aoa0) * atmosphere::RHO0 * w_max * w_max * prop_r * prop_r);
+        let jet_m_max = 0.5
+            * fan_cx(prop_aoa0.to_degrees())
+            * atmosphere::RHO0
+            * (w_max * prop_r).powi(2)
+            * jet_s
+            * prop_r;
         let default_fuel = match kind {
             EngineKind::Jet => [0.075, 0.075, 0.1, 0.11],
             EngineKind::Pvrd => [0.835; 4],
@@ -233,12 +257,20 @@ impl EngineParams {
             v_schedule: (50.0, 150.0),
             wep_boost: num("WEPBoostFactor", 1.0),
             wep_compressor,
-            gov_max_wep: if raw("PropAnglerAfterburnerParam").is_some() { gov_param("PropAnglerAfterburnerParam") } else { gov_param("PropAnglerMaxParam") },
-            w_wep: raw("PropAnglerAfterburnerParam").and_then(atof).map_or(w_max, |r| rad_s(r as f64)),
+            gov_max_wep: if raw("PropAnglerAfterburnerParam").is_some() {
+                gov_param("PropAnglerAfterburnerParam")
+            } else {
+                gov_param("PropAnglerMaxParam")
+            },
+            w_wep: raw("PropAnglerAfterburnerParam")
+                .and_then(atof)
+                .map_or(w_max, |r| rad_s(r as f64)),
             w_min: rad_s(num("RPMMin", 200.0)),
             w_nom: rad_s(num("RPMNom", 2000.0)),
             w_max,
-            w_max_allowed: raw("RPMMaxAllowed").and_then(atof).map_or(250.0, |r| rad_s(r as f64)),
+            w_max_allowed: raw("RPMMaxAllowed")
+                .and_then(atof)
+                .map_or(250.0, |r| rad_s(r as f64)),
             reductor: num("Reductor", 1.0),
             carburetor: num("Carburetor", 0.0) as i32,
             boost_factor: num("BoostFactor", 1.0),
@@ -263,7 +295,11 @@ impl EngineParams {
             speed_manifold: num("CompressorSpeedManifold", 0.2),
             p_at0: num("CompressorPAt0", 0.3),
             ata,
-            direction: if raw("Direction").is_some_and(|d| d.ends_with("Right")) { -1.0 } else { 1.0 },
+            direction: if raw("Direction").is_some_and(|d| d.ends_with("Right")) {
+                -1.0
+            } else {
+                1.0
+            },
             compressor_p_max: num("CompressorPMax", 1.0),
             rocket_burn: 2.5777,
         })
@@ -315,7 +351,13 @@ fn ata_at(p: &[(f64, f64)], r: f64, h: f64) -> f64 {
         if r >= p[p.len() - 1].0 {
             return p[p.len() - 1].1;
         }
-        let i = if r < p[0].0 { 0 } else { (0..p.len() - 1).find(|&i| p[i].0 <= r && r < p[i + 1].0).unwrap_or(0) };
+        let i = if r < p[0].0 {
+            0
+        } else {
+            (0..p.len() - 1)
+                .find(|&i| p[i].0 <= r && r < p[i + 1].0)
+                .unwrap_or(0)
+        };
         let span = (p[i + 1].0 - p[i].0).max(0.001);
         p[i].1 + (r - p[i].0) * (p[i + 1].1 - p[i].1) / span
     }
@@ -485,7 +527,14 @@ impl EngineState {
                     return;
                 }
                 // Rockets and pulse jets light at once.
-                self.stage = if matches!(p.kind, EngineKind::Rocket | EngineKind::RocketBoost | EngineKind::Pvrd) { 5 } else { 1 };
+                self.stage = if matches!(
+                    p.kind,
+                    EngineKind::Rocket | EngineKind::RocketBoost | EngineKind::Pvrd
+                ) {
+                    5
+                } else {
+                    1
+                };
                 self.stage_time = 0.0;
                 self.stage_len = 0.0;
             }
@@ -512,7 +561,11 @@ impl EngineState {
                 1 => 0.5 * self.rand_range(1.0, 2.0),
                 2 if self.ran => {
                     let l = 0.1 + cold * 7.9 * self.rand_range(2.0, 4.2);
-                    if l > 9.0 { self.rand_range(7.8, 9.6) } else { l }
+                    if l > 9.0 {
+                        self.rand_range(7.8, 9.6)
+                    } else {
+                        l
+                    }
                 }
                 2 => 4.0 * self.rand_range(1.0, 2.0),
                 3 => 0.05 * self.rand_range(1.0, 2.0),
@@ -535,13 +588,14 @@ impl EngineState {
             }
         }
         let f = (self.stage_time / self.stage_len).min(1.0);
-        let w = 0.1047 * match self.stage {
-            1 => 20.0 * f,
-            2 => 20.0 + 15.0 * f,
-            3 => 60.0 + 60.0 * f,
-            4 => 120.0,
-            _ => 120.0 + 120.0 * f,
-        };
+        let w = 0.1047
+            * match self.stage {
+                1 => 20.0 * f,
+                2 => 20.0 + 15.0 * f,
+                3 => 60.0 + 60.0 * f,
+                4 => 120.0,
+                _ => 120.0 + 120.0 * f,
+            };
         self.stage_time += dt;
         if self.stage_time > self.stage_len {
             let next = self.stage + 1;
@@ -571,9 +625,15 @@ impl EngineState {
                     by_speed
                 }
             }
-            (None, RadiatorMode::WaterThermostat) => ((self.t_water - p.t_water_crit + 20.0) / 20.0).clamp(0.0, 1.0),
+            (None, RadiatorMode::WaterThermostat) => {
+                ((self.t_water - p.t_water_crit + 20.0) / 20.0).clamp(0.0, 1.0)
+            }
             (None, RadiatorMode::Governor) => {
-                let power = if self.running() { throttle.min(1.1) * self.readyness } else { 0.0 };
+                let power = if self.running() {
+                    throttle.min(1.1) * self.readyness
+                } else {
+                    0.0
+                };
                 match p.governor {
                     1 | 2 => {
                         if self.radiator > 1.0 - power {
@@ -607,12 +667,30 @@ impl EngineState {
         let speed_cool = 0.8 + 60.0 / (50.0 + kmh);
         if self.running() {
             let target = ambient
-                + p.t_oil_out_max_rpm * (1.0 - 0.15 * r) * (0.65 + 0.45 / rho) * (1.0 + 0.35 * self.oil_damage) * 1.2 * x * x * (0.7 + 0.3 * t) * speed_cool;
+                + p.t_oil_out_max_rpm
+                    * (1.0 - 0.15 * r)
+                    * (0.65 + 0.45 / rho)
+                    * (1.0 + 0.35 * self.oil_damage)
+                    * 1.2
+                    * x
+                    * x
+                    * (0.7 + 0.3 * t)
+                    * speed_cool;
             self.t_oil_out += (target - self.t_oil_out) * dt * p.t_speed;
             let oil_in = self.t_oil_out * 0.8;
             self.t_oil_in += (oil_in - self.t_oil_in) * dt * 0.5;
-            let k7 = if p.kind == EngineKind::Jet { 0.35 + 0.1 / rho } else { 0.45 / rho };
-            let target = ambient + p.t_water_max_rpm * (1.0 - 0.15 * r) * (0.65 + k7) * (0.6 + 0.4 * x) * (0.1 + 1.1 * t) * speed_cool;
+            let k7 = if p.kind == EngineKind::Jet {
+                0.35 + 0.1 / rho
+            } else {
+                0.45 / rho
+            };
+            let target = ambient
+                + p.t_water_max_rpm
+                    * (1.0 - 0.15 * r)
+                    * (0.65 + k7)
+                    * (0.6 + 0.4 * x)
+                    * (0.1 + 1.1 * t)
+                    * speed_cool;
             self.t_water += (target - self.t_water) * dt * p.t_speed;
         } else {
             let k = dt * p.t_speed * (0.2 + 0.2 * r);
@@ -622,7 +700,10 @@ impl EngineState {
         }
         // Overheat: random malfunctions growing with the cube of the excess.
         if env.overheat && p.time_overheat > 0.0 && self.stage < 7 {
-            for (temp, crit, water) in [(self.t_water, p.t_water_crit, true), (self.t_oil_out, p.t_oil_crit, false)] {
+            for (temp, crit, water) in [
+                (self.t_water, p.t_water_crit, true),
+                (self.t_oil_out, p.t_oil_crit, false),
+            ] {
                 if crit <= 0.0 || temp <= crit {
                     continue;
                 }
@@ -660,7 +741,11 @@ impl EngineState {
         }
         let roll = (self.rand() * 100.0) as u32;
         // Water overheat: mostly cylinders; oil overheat: mostly oil and bearings.
-        let (cyl, oil, bearing, fire, charger, dead) = if water { (50, 65, 94, 95, 97, 98) } else { (10, 60, 94, 95, 96, 97) };
+        let (cyl, oil, bearing, fire, charger, dead) = if water {
+            (50, 65, 94, 95, 97, 98)
+        } else {
+            (10, 60, 94, 95, 96, 97)
+        };
         if roll < cyl {
             self.knock_out(p, 1.0);
             self.events.push("cylinder");
@@ -706,7 +791,17 @@ impl EngineState {
 
     /// Advances any engine type; `fuel_left`: whether the tank it burns from has fuel.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_any(&mut self, p: &EngineParams, throttle: f64, wep: bool, v: f64, speed: f64, h: f64, dt: f64, fuel_left: bool) {
+    pub fn step_any(
+        &mut self,
+        p: &EngineParams,
+        throttle: f64,
+        wep: bool,
+        v: f64,
+        speed: f64,
+        h: f64,
+        dt: f64,
+        fuel_left: bool,
+    ) {
         self.fuel_rate = 0.0;
         self.nitro_rate = 0.0;
         if fuel_left && self.stage == 6 && throttle <= 0.0 && p.piston {
@@ -733,17 +828,37 @@ impl EngineState {
         let fuel_left = fuel_left && self.stage == 6;
         match p.kind {
             EngineKind::Piston | EngineKind::PistonHelo => {
-                let v = if p.kind == EngineKind::PistonHelo { v.abs() } else { v };
-                self.step_wep(p, if fuel_left { throttle } else { 0.0 }, wep && fuel_left, v, speed, h, dt);
+                let v = if p.kind == EngineKind::PistonHelo {
+                    v.abs()
+                } else {
+                    v
+                };
+                self.step_wep(
+                    p,
+                    if fuel_left { throttle } else { 0.0 },
+                    wep && fuel_left,
+                    v,
+                    speed,
+                    h,
+                    dt,
+                );
                 if wep && fuel_left {
                     self.nitro_rate = p.wep_nitro_rate();
                 }
             }
             EngineKind::Jet => {
-                let t = if fuel_left { throttle.clamp(0.0, 1.0) } else { 0.0 };
+                let t = if fuel_left {
+                    throttle.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 let running = fuel_left;
                 let x = self.w / p.w_max;
-                let mut m = if running { (p.gov_min + t * (p.gov_max - p.gov_min)) / p.gov_max.max(1e-6) * p.jet_m_max } else { 0.0 };
+                let mut m = if running {
+                    (p.gov_min + t * (p.gov_max - p.gov_min)) / p.gov_max.max(1e-6) * p.jet_m_max
+                } else {
+                    0.0
+                };
                 if !running {
                     m -= 0.002 * self.w * (p.prop_i + p.engine_i) / dt;
                 }
@@ -755,10 +870,16 @@ impl EngineState {
                 self.aw = aw;
                 self.w = (self.w + aw * dt).clamp(-p.w_max_allowed, 2.0 * p.w_max_allowed);
                 let x = self.w / p.w_max;
-                let pe = (atmosphere::pressure(h) + p.speed_manifold * 0.5 * atmosphere::density(h) * speed * speed) * 9.871_668_3e-6;
+                let pe = (atmosphere::pressure(h)
+                    + p.speed_manifold * 0.5 * atmosphere::density(h) * speed * speed)
+                    * 9.871_668_3e-6;
                 let temp = 1.0 - 0.006 * (atmosphere::temperature(h) - 290.0);
                 let ram = 1.0 - 0.0011 * speed;
-                self.thrust = if running { p.thrust_max * x * pe * x * x * temp * ram } else { 0.0 };
+                self.thrust = if running {
+                    p.thrust_max * x * pe * x * x * temp * ram
+                } else {
+                    0.0
+                };
                 self.prop_torque = 0.0;
                 self.torque = 0.0;
                 if running {
@@ -774,7 +895,9 @@ impl EngineState {
                     w = 0.0;
                 }
                 self.w = w;
-                self.thrust = w / p.w_max * p.thrust_max * (p.compressor_p_max / (p.compressor_p_max + 1e-5 * atmosphere::pressure(h)));
+                self.thrust = w / p.w_max
+                    * p.thrust_max
+                    * (p.compressor_p_max / (p.compressor_p_max + 1e-5 * atmosphere::pressure(h)));
                 self.prop_torque = 0.0;
                 self.torque = 0.0;
                 if w > 0.0 {
@@ -806,7 +929,11 @@ impl EngineState {
                 };
                 let mut thrust = w / p.w_max * p.thrust_max * k;
                 if speed > 208.333 {
-                    thrust = if speed > 291.666 { 0.0 } else { thrust * ((291.666 - speed) / 83.333).sqrt() };
+                    thrust = if speed > 291.666 {
+                        0.0
+                    } else {
+                        thrust * ((291.666 - speed) / 83.333).sqrt()
+                    };
                 }
                 self.w = w;
                 self.thrust = thrust;
@@ -826,16 +953,30 @@ impl EngineState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn step_wep(&mut self, p: &EngineParams, throttle: f64, wep: bool, v: f64, speed: f64, h: f64, dt: f64) {
+    pub fn step_wep(
+        &mut self,
+        p: &EngineParams,
+        throttle: f64,
+        wep: bool,
+        v: f64,
+        speed: f64,
+        h: f64,
+        dt: f64,
+    ) {
         // Throttle above 1 (up to 1.1) is boost, only for engines with BoostFactor > 1.
         let throttle = throttle.clamp(0.0, p.max_throttle());
         let t = throttle.min(1.0);
         let rho = atmosphere::density(h);
-        let pe = (atmosphere::pressure(h) + p.speed_manifold * 0.5 * rho * speed * speed) / atmosphere::P0;
+        let pe = (atmosphere::pressure(h) + p.speed_manifold * 0.5 * rho * speed * speed)
+            / atmosphere::P0;
 
         // 2. Propeller forces with the current pitch.
         let wp = self.w * p.reductor;
-        let phi_w = if self.w.abs() < 1e-5 { PI / 2.0 } else { (v / (wp * p.prop_r)).atan() };
+        let phi_w = if self.w.abs() < 1e-5 {
+            PI / 2.0
+        } else {
+            (v / (wp * p.prop_r)).atan()
+        };
         let alpha = (self.phi - phi_w).to_degrees();
         let u = wp * p.prop_r;
         let w2 = v * v + u * u;
@@ -845,14 +986,22 @@ impl EngineState {
         if wl > 300.0 {
             drag *= (1.0 + 0.02 * (wl - 300.0)).min(2.0);
         }
-        let k = if v < p.v_opt { 1.0 - 5e-5 * (p.v_opt - v).powi(2) } else { 1.0 };
+        let k = if v < p.v_opt {
+            1.0 - 5e-5 * (p.v_opt - v).powi(2)
+        } else {
+            1.0
+        };
         let thrust = k * (lift * u - drag * v) / wl;
         let q = (drag * u + lift * v) / wl * p.prop_r;
 
         // 3. Governor.
         let threshold = match p.governor {
             1 | 2 | 7 | 8 => {
-                let auto = if p.boost_factor > 1.0 { 0.75 + 0.227272 * throttle } else { 0.75 + 0.25 * throttle };
+                let auto = if p.boost_factor > 1.0 {
+                    0.75 + 0.227272 * throttle
+                } else {
+                    0.75 + 0.25 * throttle
+                };
                 let lever = self.prop_manual.unwrap_or(auto).clamp(0.0, 1.0);
                 let top = if wep { p.gov_max_wep } else { p.gov_max };
                 let wt = p.gov_min + (top - p.gov_min) * lever;
@@ -930,19 +1079,29 @@ impl EngineState {
             0 => (atmosphere::pressure(h) + 0.5 * rho * speed * speed) / atmosphere::P0,
             2 => {
                 let pr = &p.stage_pressure;
-                let rho_term = |pc: f64| pe * (p.p_at0 + (1.0 - p.p_at0)) * self.w / p.w_max * p.max_ata_rpm / pc + 0.001;
+                let rho_term = |pc: f64| {
+                    pe * (p.p_at0 + (1.0 - p.p_at0)) * self.w / p.w_max * p.max_ata_rpm / pc + 0.001
+                };
                 let (stage, k) = if p.stage_pressure.len() == 2 && rho_term(pr[0]) < threshold {
                     let pc = pr[1];
                     if rho_term(pc) > threshold {
-                        let f = if p.stage_mult[1] >= 1.0 { p.stage_base[1] } else { p.stage_base[1] * p.stage_mult[1] };
+                        let f = if p.stage_mult[1] >= 1.0 {
+                            p.stage_base[1]
+                        } else {
+                            p.stage_base[1] * p.stage_mult[1]
+                        };
                         let mut k = f + (1.0 - pe) / (1.0 - pc).max(1e-4) * (p.stage_mult[1] - f);
-                        k += (p.stage_mult[0] - k) * (rho_term(pc) - 1.0) / (pr[0] * threshold / pc - 1.0);
+                        k += (p.stage_mult[0] - k) * (rho_term(pc) - 1.0)
+                            / (pr[0] * threshold / pc - 1.0);
                         (1, k)
                     } else {
                         (1, p.stage_mult[1])
                     }
                 } else {
-                    (0, 1.0 + (1.0 - pe) / (1.0 - pr[0]).max(1e-4) * (p.stage_mult[0] - 1.0))
+                    (
+                        0,
+                        1.0 + (1.0 - pe) / (1.0 - pr[0]).max(1e-4) * (p.stage_mult[0] - 1.0),
+                    )
                 };
                 let mut m = rpm_factor * pe * p.max_ata_rpm / pr[stage];
                 self.second_throttle = (wf * p.max_ata_rpm / m.max(1e-6)).min(1.0);
@@ -959,9 +1118,14 @@ impl EngineState {
                         let ki = p.stage_mult[i];
                         (ki, ki * pe * rpm_factor / pc)
                     } else {
-                        let f = if p.stage_mult[i] >= 1.0 { p.stage_base[i] } else { p.stage_base[i] * p.stage_mult[i] };
+                        let f = if p.stage_mult[i] >= 1.0 {
+                            p.stage_base[i]
+                        } else {
+                            p.stage_base[i] * p.stage_mult[i]
+                        };
                         let base = f.powi(i as i32);
-                        let ki = base + (1.0 - pe) / (1.0 - pc).max(1e-4) * (p.stage_mult[i] - base);
+                        let ki =
+                            base + (1.0 - pe) / (1.0 - pc).max(1e-4) * (p.stage_mult[i] - base);
                         (ki, ki)
                     };
                     if score > best.0 {
@@ -971,7 +1135,8 @@ impl EngineState {
                 let (_, ki, i) = best;
                 let mut m = rpm_factor * pe * p.max_ata_rpm / p.stage_pressure[i];
                 let target = wf * p.max_ata_rpm / m.max(1e-6);
-                self.second_throttle = (self.second_throttle - 3.0 * dt * (self.second_throttle - target)).min(1.0);
+                self.second_throttle =
+                    (self.second_throttle - 3.0 * dt * (self.second_throttle - target)).min(1.0);
                 m *= self.second_throttle;
                 m *= (threshold / p.max_ata_rpm).min(1.0);
                 self.manifold = m;
@@ -1008,13 +1173,18 @@ impl EngineState {
         let boost = if wep { boost * p.wep_boost } else { boost };
         let torque_curve = (torque_curve * boost).max(-0.8 * self.w / p.w_max * p.m_max);
         let running = self.stage == 6;
-        let mut m = if running { torque_curve * c * self.readyness } else { 0.0 };
+        let mut m = if running {
+            torque_curve * c * self.readyness
+        } else {
+            0.0
+        };
         if !running {
             // Friction of a stopped engine (dt-scaled like the runtime).
             self.friction = (self.friction + 0.1 * dt).min(1.0);
             let x = self.w / p.w_max;
             let inertia = p.prop_i + p.engine_i;
-            m += (-self.friction * (6.0 + 3.8 * x) * inertia / dt).max(-0.99 * self.w * inertia / dt);
+            m += (-self.friction * (6.0 + 3.8 * x) * inertia / dt)
+                .max(-0.99 * self.w * inertia / dt);
         } else {
             self.friction = 0.0;
         }
@@ -1032,7 +1202,8 @@ impl EngineState {
         if running {
             let x = hp_out / p.horse_powers;
             let hp_for = hp_out.max(p.horse_powers * 0.05);
-            self.fuel_rate = Self::specific_fuel(p, x) / 3600.0 * (0.8 + 0.2 * self.w / p.w_wep) * hp_for;
+            self.fuel_rate =
+                Self::specific_fuel(p, x) / 3600.0 * (0.8 + 0.2 * self.w / p.w_wep) * hp_for;
         }
 
         // 7. Forces on the airframe.
@@ -1053,8 +1224,14 @@ mod tests {
     #[test]
     fn blade_coefficients_are_continuous() {
         for a in [16.0, 22.0] {
-            assert!((fan_cy(a - 1e-6) - fan_cy(a + 1e-6)).abs() < 0.02, "Cy jump at {a}");
-            assert!((fan_cx(a - 1e-6) - fan_cx(a + 1e-6)).abs() < 0.02, "Cx jump at {a}");
+            assert!(
+                (fan_cy(a - 1e-6) - fan_cy(a + 1e-6)).abs() < 0.02,
+                "Cy jump at {a}"
+            );
+            assert!(
+                (fan_cx(a - 1e-6) - fan_cx(a + 1e-6)).abs() < 0.02,
+                "Cx jump at {a}"
+            );
         }
     }
 

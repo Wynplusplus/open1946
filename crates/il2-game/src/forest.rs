@@ -41,7 +41,8 @@ pub struct Forest {
 
 /// Deterministic noise in [-0.5, 0.5) per sub-cell.
 fn noise(ix: i64, iy: i64) -> f64 {
-    let mut h = (ix as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (iy as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    let mut h = (ix as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (iy as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     h ^= h >> 29;
     h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 32;
@@ -54,7 +55,10 @@ impl Forest {
         let ini = SectFile::parse(&vfs.read(ini_path).ok()?);
         let wood = ini.section_ci("WOOD")?;
         let tex = |key: &str| -> Option<Image> {
-            let v = wood.get_ci(key)?.trim_start_matches(['=', ' ', '\t']).trim();
+            let v = wood
+                .get_ci(key)?
+                .trim_start_matches(['=', ' ', '\t'])
+                .trim();
             let path = format!("maps/_Tex/{v}");
             decode_image(&vfs.read(&path).ok()?, &path).ok()
         };
@@ -99,20 +103,33 @@ impl Forest {
 
     /// A new mesh when the camera has moved into another tile, else `None`.
     pub fn update(&mut self, field: &HeightField, eye: DVec3) -> Option<MeshData> {
-        let key = ((eye.x / REBUILD).floor() as i64, (eye.y / REBUILD).floor() as i64);
+        let key = (
+            (eye.x / REBUILD).floor() as i64,
+            (eye.y / REBUILD).floor() as i64,
+        );
         if self.built_for == Some(key) {
             return None;
         }
         self.built_for = Some(key);
-        let centre = DVec3::new((key.0 as f64 + 0.5) * REBUILD, (key.1 as f64 + 0.5) * REBUILD, 0.0);
+        let centre = DVec3::new(
+            (key.0 as f64 + 0.5) * REBUILD,
+            (key.1 as f64 + 0.5) * REBUILD,
+            0.0,
+        );
         self.origin = DVec3::new(centre.x, centre.y, field.height_at(centre.x, centre.y));
         Some(self.build(field, centre))
     }
 
     fn build(&self, field: &HeightField, centre: DVec3) -> MeshData {
         let r = RADIUS + REBUILD;
-        let (x0, x1) = (((centre.x - r) / SUB).floor() as i64, ((centre.x + r) / SUB).ceil() as i64);
-        let (y0, y1) = (((centre.y - r) / SUB).floor() as i64, ((centre.y + r) / SUB).ceil() as i64);
+        let (x0, x1) = (
+            ((centre.x - r) / SUB).floor() as i64,
+            ((centre.x + r) / SUB).ceil() as i64,
+        );
+        let (y0, y1) = (
+            ((centre.y - r) / SUB).floor() as i64,
+            ((centre.y + r) / SUB).ceil() as i64,
+        );
         let o = self.origin;
         let point = |x: f64, y: f64, h: f32| -> [f32; 3] {
             let z = field.height_at(x, y) + h as f64;
@@ -127,7 +144,10 @@ impl Forest {
             buf.1.extend([b, b + 1, b + 2, b, b + 2, b + 3]);
         };
         let cols = (x1 - x0) as usize;
-        let inside: Vec<bool> = (y0..y1).flat_map(|iy| (x0..x1).map(move |ix| (ix, iy))).map(|(ix, iy)| self.inside(ix, iy)).collect();
+        let inside: Vec<bool> = (y0..y1)
+            .flat_map(|iy| (x0..x1).map(move |ix| (ix, iy)))
+            .map(|(ix, iy)| self.inside(ix, iy))
+            .collect();
         let is_in = |ix: i64, iy: i64| {
             if ix < x0 || iy < y0 || ix >= x1 || iy >= y1 {
                 return false;
@@ -140,15 +160,37 @@ impl Forest {
                 if !is_in(ix, iy) {
                     continue;
                 }
-                let (xa, ya, xb, yb) = (ix as f64 * SUB, iy as f64 * SUB, (ix + 1) as f64 * SUB, (iy + 1) as f64 * SUB);
-                if (DVec3::new((xa + xb) / 2.0, (ya + yb) / 2.0, 0.0) - centre).truncate().length() > r {
+                let (xa, ya, xb, yb) = (
+                    ix as f64 * SUB,
+                    iy as f64 * SUB,
+                    (ix + 1) as f64 * SUB,
+                    (iy + 1) as f64 * SUB,
+                );
+                if (DVec3::new((xa + xb) / 2.0, (ya + yb) / 2.0, 0.0) - centre)
+                    .truncate()
+                    .length()
+                    > r
+                {
                     continue;
                 }
                 // UVs relative to the sub-cell's tile so they stay precise; the sampler repeats.
-                let (u0, v0) = ((xa / SHELL_TILE as f64).floor(), (ya / SHELL_TILE as f64).floor());
-                let local = |x: f64, y: f64| [(x / SHELL_TILE as f64 - u0) as f32, (y / SHELL_TILE as f64 - v0) as f32];
+                let (u0, v0) = (
+                    (xa / SHELL_TILE as f64).floor(),
+                    (ya / SHELL_TILE as f64).floor(),
+                );
+                let local = |x: f64, y: f64| {
+                    [
+                        (x / SHELL_TILE as f64 - u0) as f32,
+                        (y / SHELL_TILE as f64 - v0) as f32,
+                    ]
+                };
                 for (l, h) in SHELLS.iter().take(layers).enumerate() {
-                    let v = |x: f64, y: f64| Vertex { pos: point(x, y, *h), normal: up, uv: local(x, y), node: 0 };
+                    let v = |x: f64, y: f64| Vertex {
+                        pos: point(x, y, *h),
+                        normal: up,
+                        uv: local(x, y),
+                        node: 0,
+                    };
                     quad(&mut shells[l], [v(xa, ya), v(xb, ya), v(xb, yb), v(xa, yb)]);
                 }
                 // Edge strips where a neighbour is outside, facing out.
@@ -166,23 +208,52 @@ impl Forest {
                     // start for precision), so neighbouring strips line up.
                     let start = if dx == 0 { xa } else { ya };
                     let base = (start / SIDE_TILE as f64).floor();
-                    let along = |p: (f64, f64)| ((if dx == 0 { p.0 } else { p.1 }) / SIDE_TILE as f64 - base) as f32;
+                    let along = |p: (f64, f64)| {
+                        ((if dx == 0 { p.0 } else { p.1 }) / SIDE_TILE as f64 - base) as f32
+                    };
                     let (ua, ub) = (along(a), along(b));
                     quad(
                         &mut sides,
                         [
-                            Vertex { pos: point(a.0, a.1, 0.0), normal: n, uv: [ua, 1.0], node: 0 },
-                            Vertex { pos: point(b.0, b.1, 0.0), normal: n, uv: [ub, 1.0], node: 0 },
-                            Vertex { pos: point(b.0, b.1, TOP), normal: n, uv: [ub, 0.0], node: 0 },
-                            Vertex { pos: point(a.0, a.1, TOP), normal: n, uv: [ua, 0.0], node: 0 },
+                            Vertex {
+                                pos: point(a.0, a.1, 0.0),
+                                normal: n,
+                                uv: [ua, 1.0],
+                                node: 0,
+                            },
+                            Vertex {
+                                pos: point(b.0, b.1, 0.0),
+                                normal: n,
+                                uv: [ub, 1.0],
+                                node: 0,
+                            },
+                            Vertex {
+                                pos: point(b.0, b.1, TOP),
+                                normal: n,
+                                uv: [ub, 0.0],
+                                node: 0,
+                            },
+                            Vertex {
+                                pos: point(a.0, a.1, TOP),
+                                normal: n,
+                                uv: [ua, 0.0],
+                                node: 0,
+                            },
                         ],
                     );
                 }
             }
         }
-        let mut out = MeshData { node_count: 1, ..Default::default() };
+        let mut out = MeshData {
+            node_count: 1,
+            ..Default::default()
+        };
         let side_tex = self.textures.len() - 1;
-        for (texture, (v, i)) in shells.into_iter().enumerate().chain(std::iter::once((side_tex, sides))) {
+        for (texture, (v, i)) in shells
+            .into_iter()
+            .enumerate()
+            .chain(std::iter::once((side_tex, sides)))
+        {
             let base = out.vertices.len() as u32;
             let first = out.indices.len() as u32;
             out.vertices.extend(v);

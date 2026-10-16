@@ -38,13 +38,19 @@ pub struct MatFile {
 impl MatFile {
     pub fn parse(data: &[u8]) -> Self {
         let file = SectFile::parse(data);
-        let based_on = file.section_ci("ClassInfo").and_then(|s| s.get_ci("BasedOn")).filter(|b| !b.is_empty()).map(str::to_owned);
+        let based_on = file
+            .section_ci("ClassInfo")
+            .and_then(|s| s.get_ci("BasedOn"))
+            .filter(|b| !b.is_empty())
+            .map(str::to_owned);
         MatFile { based_on, file }
     }
 }
 
 fn flag(chain: &[&MatFile], sect: &str, key: &str) -> Option<bool> {
-    lookup(chain, sect, key).and_then(|v| v.split_whitespace().next()?.parse::<i32>().ok()).map(|v| v != 0)
+    lookup(chain, sect, key)
+        .and_then(|v| v.split_whitespace().next()?.parse::<i32>().ok())
+        .map(|v| v != 0)
 }
 
 fn num(chain: &[&MatFile], sect: &str, key: &str) -> Option<f32> {
@@ -53,7 +59,13 @@ fn num(chain: &[&MatFile], sect: &str, key: &str) -> Option<f32> {
 
 fn vec4(chain: &[&MatFile], sect: &str, key: &str, default: [f32; 4]) -> [f32; 4] {
     lookup(chain, sect, key)
-        .and_then(|v| v.split_whitespace().map(|t| t.parse().ok()).collect::<Option<Vec<f32>>>()?.try_into().ok())
+        .and_then(|v| {
+            v.split_whitespace()
+                .map(|t| t.parse().ok())
+                .collect::<Option<Vec<f32>>>()?
+                .try_into()
+                .ok()
+        })
         .unwrap_or(default)
 }
 
@@ -64,13 +76,24 @@ fn lookup<'a>(chain: &[&'a MatFile], sect: &str, key: &str) -> Option<&'a str> {
 
 /// Like `lookup`, also returning the chain index of the material that has the key.
 fn lookup_from<'a>(chain: &[&'a MatFile], sect: &str, key: &str) -> Option<(usize, &'a str)> {
-    chain.iter().enumerate().find_map(|(i, m)| Some((i, m.file.section_ci(sect).and_then(|s: &Section| s.get_ci(key))?)))
+    chain.iter().enumerate().find_map(|(i, m)| {
+        Some((
+            i,
+            m.file
+                .section_ci(sect)
+                .and_then(|s: &Section| s.get_ci(key))?,
+        ))
+    })
 }
 
 impl Material {
     /// Resolves a material from its `BasedOn` chain, most-derived first.
     pub fn resolve(chain: &[&MatFile]) -> Self {
-        let has_layer = |i: usize| chain.iter().any(|m| m.file.section_ci(&format!("Layer{i}")).is_some());
+        let has_layer = |i: usize| {
+            chain
+                .iter()
+                .any(|m| m.file.section_ci(&format!("Layer{i}")).is_some())
+        };
         let layers = (0..)
             .take_while(|&i| has_layer(i))
             .map(|i| {
@@ -78,7 +101,10 @@ impl Material {
                 let no_texture = flag(chain, &s, "tfNoTexture").unwrap_or(false);
                 let tex = lookup_from(chain, &s, "TextureName");
                 Layer {
-                    texture: tex.map(|(_, t)| t.trim()).filter(|t| !t.is_empty() && !no_texture).map(str::to_owned),
+                    texture: tex
+                        .map(|(_, t)| t.trim())
+                        .filter(|t| !t.is_empty() && !no_texture)
+                        .map(str::to_owned),
                     texture_from: tex.map_or(0, |(i, _)| i),
                     alpha_test: flag(chain, &s, "tfTestA")
                         .unwrap_or(false)
@@ -123,6 +149,9 @@ mod tests {
         assert_eq!(m.layers[0].alpha_test, Some(0.9));
         assert_eq!(m.layers[0].texture_from, 0);
         let m = Material::resolve(&[&MatFile::parse(b"[ClassInfo]\nBasedOn base.mat\n"), &base]);
-        assert_eq!((m.layers[0].texture.as_deref(), m.layers[0].texture_from), (Some("base.tga"), 1));
+        assert_eq!(
+            (m.layers[0].texture.as_deref(), m.layers[0].texture_from),
+            (Some("base.tga"), 1)
+        );
     }
 }

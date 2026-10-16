@@ -66,11 +66,24 @@ impl Default for Controls {
 
 impl Controls {
     pub fn load(fmd: &SectFile) -> Self {
-        let get = |k: &str, d: f64| fmd.section_ci("Controls").and_then(|s| s.get_ci(k)).and_then(il2_formats::sectfile::atof).map_or(d, f64::from);
+        let get = |k: &str, d: f64| {
+            fmd.section_ci("Controls")
+                .and_then(|s| s.get_ci(k))
+                .and_then(il2_formats::sectfile::atof)
+                .map_or(d, f64::from)
+        };
         let flag = |k: &str, d: bool| get(k, if d { 1.0 } else { 0.0 }) == 1.0;
         Controls {
-            trim: [flag("CAileronTrim", true), flag("CElevatorTrim", true), flag("CRudderTrim", true)],
-            default_trim: [get("DefaultAileronTrim", 0.0), get("DefaultElevatorTrim", 0.0), get("DefaultRudderTrim", 0.0)],
+            trim: [
+                flag("CAileronTrim", true),
+                flag("CElevatorTrim", true),
+                flag("CRudderTrim", true),
+            ],
+            default_trim: [
+                get("DefaultAileronTrim", 0.0),
+                get("DefaultElevatorTrim", 0.0),
+                get("DefaultRudderTrim", 0.0),
+            ],
             flaps: flag("CFlap", false),
             flap_steps: get("CFlapPos", 3.0) >= 3.0,
             airbrake: flag("CDiveBrake", false),
@@ -145,7 +158,15 @@ fn num_or(f: &SectFile, s: &'static str, k: &'static str, d: f64) -> f64 {
 impl Aircraft {
     /// Placeholder without data, for tooling that needs an `Aircraft` value.
     pub fn empty() -> Self {
-        let cfg = PolarCfg { cy0: 0.0, aoa_crit_h: 16.0, aoa_crit_l: -16.0, cy_crit_h: 1.0, cy_crit_l: -1.0, cx_min: 0.02, parab_cx: 8e-4 };
+        let cfg = PolarCfg {
+            cy0: 0.0,
+            aoa_crit_h: 16.0,
+            aoa_crit_l: -16.0,
+            cy_crit_h: 1.0,
+            cy_crit_l: -1.0,
+            cx_min: 0.02,
+            parab_cx: 8e-4,
+        };
         Aircraft {
             length: 1.0,
             wingspan: 1.0,
@@ -175,7 +196,14 @@ impl Aircraft {
             sens_yaw: 1.0,
             spin_cx_loss: 0.0,
             spin_cy_loss: 0.0,
-            wing: PolarParams { line_cy: 0.09, aoa_min_cx_shift: 0.0, decline: 0.007, max_dist_ang: 30.0, parab_angle: 5.0, cfg: [cfg, cfg] },
+            wing: PolarParams {
+                line_cy: 0.09,
+                aoa_min_cx_shift: 0.0,
+                decline: 0.007,
+                max_dist_ang: 30.0,
+                parab_angle: 5.0,
+                cfg: [cfg, cfg],
+            },
             mach: None,
             engines: Vec::new(),
             gear: Vec::new(),
@@ -194,12 +222,33 @@ impl Aircraft {
         let length = num(fmd, "Aircraft", "Length")?;
         let wingspan = num(fmd, "Aircraft", "Wingspan")?;
         let scheme = num_or(fmd, "Aircraft", "Type", 0.0) as i32;
-        let (a, b, c, d) = ((0.35 * length).powi(2), (0.125 * length).powi(2), (0.2 * wingspan).powi(2), (0.07 * length).powi(2));
+        let (a, b, c, d) = (
+            (0.35 * length).powi(2),
+            (0.125 * length).powi(2),
+            (0.2 * wingspan).powi(2),
+            (0.07 * length).powi(2),
+        );
         let j0 = match scheme {
-            2 => DVec3::new(0.3 * d + 0.7 * c, 0.2 * a + 0.1 * b + 0.7 * d, 0.2 * a + 0.1 * b + 0.7 * c),
-            3 => DVec3::new(0.2 * d + 0.8 * c, 0.2 * a + 0.2 * b + 0.6 * d, 0.2 * a + 0.2 * b + 0.6 * c),
-            4..=7 => DVec3::new(0.4 * d + 0.6 * c, 0.25 * a + 0.15 * b + 0.6 * d, 0.25 * a + 0.15 * b + 0.6 * c),
-            _ => DVec3::new(0.6 * d + 0.4 * c, 0.2 * a + 0.4 * b + 0.4 * d, 0.2 * a + 0.4 * b + 0.4 * c),
+            2 => DVec3::new(
+                0.3 * d + 0.7 * c,
+                0.2 * a + 0.1 * b + 0.7 * d,
+                0.2 * a + 0.1 * b + 0.7 * c,
+            ),
+            3 => DVec3::new(
+                0.2 * d + 0.8 * c,
+                0.2 * a + 0.2 * b + 0.6 * d,
+                0.2 * a + 0.2 * b + 0.6 * c,
+            ),
+            4..=7 => DVec3::new(
+                0.4 * d + 0.6 * c,
+                0.25 * a + 0.15 * b + 0.6 * d,
+                0.25 * a + 0.15 * b + 0.6 * c,
+            ),
+            _ => DVec3::new(
+                0.6 * d + 0.4 * c,
+                0.2 * a + 0.4 * b + 0.4 * d,
+                0.2 * a + 0.4 * b + 0.4 * c,
+            ),
         };
         let crew = num_or(fmd, "Aircraft", "Crew", 1.0);
         let mass_empty = num(fmd, "Mass", "Empty")? + num_or(fmd, "Mass", "Oil", 0.0) + 90.0 * crew;
@@ -221,7 +270,9 @@ impl Aircraft {
 
         let p = |k: &'static str, d: f64| num_or(fmd, "Polares", k, d);
         if num(fmd, "Polares", "lineCyCoeff").is_err() {
-            return Err(Error::Bad("flight models without explicit polars are not supported yet".into()));
+            return Err(Error::Bad(
+                "flight models without explicit polars are not supported yet".into(),
+            ));
         }
         let wing = PolarParams {
             line_cy: p("lineCyCoeff", 0.09),
@@ -263,8 +314,12 @@ impl Aircraft {
                 break;
             };
             let e = emd(fam).ok_or_else(|| Error::Bad(format!("engine family {fam} not found")))?;
-            let mut p = EngineParams::load(&e, sub).ok_or_else(|| Error::Bad(format!("engine {fam}/{sub} not found")))?;
-            p.v_schedule = (num_or(fmd, "Params", "Vmin", 160.0) / 3.6, num_or(fmd, "Params", "Vmax", 500.0) / 3.6);
+            let mut p = EngineParams::load(&e, sub)
+                .ok_or_else(|| Error::Bad(format!("engine {fam}/{sub} not found")))?;
+            p.v_schedule = (
+                num_or(fmd, "Params", "Vmin", 160.0) / 3.6,
+                num_or(fmd, "Params", "Vmax", 500.0) / 3.6,
+            );
             engines.push(p);
         }
 
@@ -301,7 +356,12 @@ impl Aircraft {
                 let list = |k: &str| -> Vec<f64> {
                     fmd.section_ci("Polares")
                         .and_then(|s| s.get_ci(k))
-                        .map(|v| v.split(',').filter_map(|t| il2_formats::sectfile::atof(t.trim())).map(f64::from).collect())
+                        .map(|v| {
+                            v.split(',')
+                                .filter_map(|t| il2_formats::sectfile::atof(t.trim()))
+                                .map(f64::from)
+                                .collect()
+                        })
                         .unwrap_or_default()
                 };
                 crate::polar::MachTable::new(&list("mc3"), &list("mc4"), &list("mm"), &list("mz"))

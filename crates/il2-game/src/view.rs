@@ -24,7 +24,13 @@ pub struct WorldView {
 }
 
 impl WorldView {
-    pub fn new(objects: MapObjects, forest: Option<Forest>, roads: Option<Roads>, tracers: Option<Tracers>, effects: crate::particles::Effects) -> Self {
+    pub fn new(
+        objects: MapObjects,
+        forest: Option<Forest>,
+        roads: Option<Roads>,
+        tracers: Option<Tracers>,
+        effects: crate::particles::Effects,
+    ) -> Self {
         WorldView {
             objects,
             objects_gpu: None,
@@ -66,6 +72,7 @@ impl WorldView {
         extra: &[&GpuMesh],
         bullets: &[Bullet],
         projectiles: &[Projectile],
+        foreground: Option<(Mat4, &[&GpuMesh])>,
         capture: bool,
     ) -> Option<Vec<u8>> {
         if let Some(f) = self.forest.as_mut() {
@@ -88,7 +95,11 @@ impl WorldView {
         if let (Some(t), Some(m)) = (&self.tracers, &self.tracers_gpu) {
             draws.extend(t.gather(m, bullets, eye, &mut self.instances));
             let items = projectiles.iter().filter_map(|p| {
-                Some((p.spec.mesh.as_deref()?, glam::DQuat::from_rotation_arc(DVec3::X, p.dir), p.pos))
+                Some((
+                    p.spec.mesh.as_deref()?,
+                    glam::DQuat::from_rotation_arc(DVec3::X, p.dir),
+                    p.pos,
+                ))
             });
             draws.extend(t.gather_meshes(m, items, eye, &mut self.instances));
         }
@@ -106,9 +117,9 @@ impl WorldView {
             meshes.push(g);
         }
         if capture {
-            Some(r.screenshot(vp, 22.0, Some(terrain), &meshes, &draws))
+            Some(r.screenshot(vp, 22.0, Some(terrain), &meshes, &draws, foreground))
         } else {
-            r.render(vp, 22.0, Some(terrain), &meshes, &draws);
+            r.render(vp, 22.0, Some(terrain), &meshes, &draws, foreground);
             None
         }
     }

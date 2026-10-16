@@ -35,16 +35,35 @@ pub fn decode_wav(d: &[u8]) -> Option<Clip> {
     }
     let (fmt, data) = (fmt?, data?);
     let u16_at = |i: usize| u16::from_le_bytes([fmt[i], fmt[i + 1]]);
-    let (tag, channels, rate, bits) = (u16_at(0), u16_at(2).max(1) as usize, u32::from_le_bytes(fmt[4..8].try_into().ok()?), u16_at(14));
+    let (tag, channels, rate, bits) = (
+        u16_at(0),
+        u16_at(2).max(1) as usize,
+        u32::from_le_bytes(fmt[4..8].try_into().ok()?),
+        u16_at(14),
+    );
     if tag != 1 {
         return None;
     }
     let samples: Vec<f32> = match bits {
-        16 => data.chunks_exact(2 * channels).map(|f| f.chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).sum::<f32>() / channels as f32).collect(),
-        8 => data.chunks_exact(channels).map(|f| f.iter().map(|&s| (s as f32 - 128.0) / 128.0).sum::<f32>() / channels as f32).collect(),
+        16 => data
+            .chunks_exact(2 * channels)
+            .map(|f| {
+                f.chunks_exact(2)
+                    .map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0)
+                    .sum::<f32>()
+                    / channels as f32
+            })
+            .collect(),
+        8 => data
+            .chunks_exact(channels)
+            .map(|f| f.iter().map(|&s| (s as f32 - 128.0) / 128.0).sum::<f32>() / channels as f32)
+            .collect(),
         _ => return None,
     };
-    Some(Clip { data: Arc::new(samples), rate: rate as f32 })
+    Some(Clip {
+        data: Arc::new(samples),
+        rate: rate as f32,
+    })
 }
 
 struct Voice {
@@ -83,12 +102,19 @@ impl Mixer {
                 let i = v.pos as usize;
                 let f = (v.pos - i as f64) as f32;
                 let s0 = v.clip.data[i];
-                let s1 = v.clip.data[if i + 1 < n { i + 1 } else if v.looping { 0 } else { i }];
+                let s1 = v.clip.data[if i + 1 < n {
+                    i + 1
+                } else if v.looping {
+                    0
+                } else {
+                    i
+                }];
                 *a += (s0 + (s1 - s0) * f) * v.gain;
                 v.pos += step;
             }
         }
-        self.voices.retain(|v| v.looping || v.pos < v.clip.data.len() as f64);
+        self.voices
+            .retain(|v| v.looping || v.pos < v.clip.data.len() as f64);
         for (i, a) in acc.iter().enumerate() {
             // Soft limiter.
             let s = (a.tanh() * 32000.0) as i16;
@@ -112,8 +138,18 @@ struct Bounds {
 
 impl Bounds {
     fn gain(&self, x: f32) -> f32 {
-        let up = if self.minhi > self.minlo { ((x - self.minlo) / (self.minhi - self.minlo)).clamp(0.0, 1.0) } else if x >= self.minlo { 1.0 } else { 0.0 };
-        let down = if self.maxhi > self.maxlo { 1.0 - ((x - self.maxlo) / (self.maxhi - self.maxlo)).clamp(0.0, 1.0) } else { 1.0 };
+        let up = if self.minhi > self.minlo {
+            ((x - self.minlo) / (self.minhi - self.minlo)).clamp(0.0, 1.0)
+        } else if x >= self.minlo {
+            1.0
+        } else {
+            0.0
+        };
+        let down = if self.maxhi > self.maxlo {
+            1.0 - ((x - self.maxlo) / (self.maxhi - self.maxlo)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
         up * down
     }
 
@@ -121,7 +157,11 @@ impl Bounds {
         let span = (self.maxhi - self.minlo).max(1e-3);
         let t = ((x - self.minlo) / span).clamp(0.0, 1.0);
         let p = self.pmin + (self.pmax - self.pmin) * t;
-        if p > 0.0 { p } else { 1.0 }
+        if p > 0.0 {
+            p
+        } else {
+            1.0
+        }
     }
 }
 
@@ -144,8 +184,15 @@ pub struct Preset {
 impl Preset {
     fn parse(d: &[u8]) -> Self {
         let f = SectFile::parse(d);
-        let spl = f.section_ci("spl").and_then(|s| s.entries.first()).and_then(|(k, _)| atof(k)).unwrap_or(100.0);
-        let names: Vec<String> = f.section_ci("samples").map(|s| s.entries.iter().map(|(k, _)| k.clone()).collect()).unwrap_or_default();
+        let spl = f
+            .section_ci("spl")
+            .and_then(|s| s.entries.first())
+            .and_then(|(k, _)| atof(k))
+            .unwrap_or(100.0);
+        let names: Vec<String> = f
+            .section_ci("samples")
+            .map(|s| s.entries.iter().map(|(k, _)| k.clone()).collect())
+            .unwrap_or_default();
         let samples = names
             .into_iter()
             .map(|file| {
@@ -159,7 +206,15 @@ impl Preset {
                                 let n = |k: &str| b.get_ci(k).and_then(atof).unwrap_or(0.0);
                                 Some((
                                     name.to_owned(),
-                                    Bounds { minlo: n("minlo"), minhi: n("minhi"), maxlo: n("maxlo"), maxhi: n("maxhi"), value: n("value"), pmin: n("pmin"), pmax: n("pmax") },
+                                    Bounds {
+                                        minlo: n("minlo"),
+                                        minhi: n("minhi"),
+                                        maxlo: n("maxlo"),
+                                        maxhi: n("maxhi"),
+                                        value: n("value"),
+                                        pmin: n("pmin"),
+                                        pmax: n("pmax"),
+                                    },
                                 ))
                             })
                             .collect()
@@ -167,7 +222,13 @@ impl Preset {
                     .unwrap_or_default();
                 PresetSample {
                     looping: get("infinite").and_then(atof).unwrap_or(0.0) != 0.0,
-                    env: get("env").map(|e| e.split_whitespace().filter_map(|v| v.parse().ok()).collect()).unwrap_or_default(),
+                    env: get("env")
+                        .map(|e| {
+                            e.split_whitespace()
+                                .filter_map(|v| v.parse().ok())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     controls,
                     file,
                 }
@@ -192,7 +253,10 @@ impl Audio {
     pub fn start() -> Self {
         let mixer = match alsa::Pcm::open(44_100, 60) {
             Ok(mut pcm) => {
-                let m = Arc::new(Mutex::new(Mixer { voices: Vec::new(), rate: pcm.rate as f32 }));
+                let m = Arc::new(Mutex::new(Mixer {
+                    voices: Vec::new(),
+                    rate: pcm.rate as f32,
+                }));
                 let mm = m.clone();
                 std::thread::spawn(move || {
                     let mut buf = vec![0i16; 2 * 512];
@@ -208,23 +272,47 @@ impl Audio {
                 None
             }
         };
-        Audio { mixer, clips: HashMap::new(), presets: HashMap::new(), rng: 0x50D }
+        Audio {
+            mixer,
+            clips: HashMap::new(),
+            presets: HashMap::new(),
+            rng: 0x50D,
+        }
     }
 
     fn clip(&mut self, vfs: &Vfs, file: &str) -> Option<Clip> {
-        self.clips.entry(file.to_ascii_lowercase()).or_insert_with(|| vfs.read(&format!("samples/{file}")).ok().and_then(|d| decode_wav(&d))).clone()
+        self.clips
+            .entry(file.to_ascii_lowercase())
+            .or_insert_with(|| {
+                vfs.read(&format!("samples/{file}"))
+                    .ok()
+                    .and_then(|d| decode_wav(&d))
+            })
+            .clone()
     }
 
     pub fn preset(&mut self, vfs: &Vfs, name: &str) -> Option<Arc<Preset>> {
         self.presets
             .entry(name.to_ascii_lowercase())
-            .or_insert_with(|| vfs.read(&format!("presets/sounds/{name}.prs")).ok().map(|d| Arc::new(Preset::parse(&d))))
+            .or_insert_with(|| {
+                vfs.read(&format!("presets/sounds/{name}.prs"))
+                    .ok()
+                    .map(|d| Arc::new(Preset::parse(&d)))
+            })
             .clone()
     }
 
     /// Updates (or starts) the looping voices of a preset under key `key`, from the control values.
     /// `level` scales the loudness (distance, volume).
-    pub fn drive(&mut self, vfs: &Vfs, key: u64, preset: &Preset, controls: &[(&str, f32)], env: i32, level: f32) {
+    pub fn drive(
+        &mut self,
+        vfs: &Vfs,
+        key: u64,
+        preset: &Preset,
+        controls: &[(&str, f32)],
+        env: i32,
+        level: f32,
+    ) {
         let Some(m) = self.mixer.clone() else { return };
         let mut wanted = Vec::new();
         for (i, s) in preset.samples.iter().enumerate() {
@@ -234,11 +322,16 @@ impl Audio {
             let mut gain = 1.0;
             let mut pitch = 1.0;
             for (name, b) in &s.controls {
-                let x = controls.iter().find(|(n, _)| n == name).map_or(0.0, |(_, v)| *v);
+                let x = controls
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map_or(0.0, |(_, v)| *v);
                 gain *= b.gain(x) * if b.value > 0.0 { b.value / 10.0 } else { 1.0 };
                 pitch *= b.pitch(x);
             }
-            let Some(clip) = self.clip(vfs, &s.file) else { continue };
+            let Some(clip) = self.clip(vfs, &s.file) else {
+                continue;
+            };
             wanted.push((key * 64 + i as u64, clip, gain * level, pitch));
         }
         let mut mx = m.lock().unwrap();
@@ -248,7 +341,14 @@ impl Audio {
                     v.gain = gain;
                     v.pitch = pitch;
                 }
-                None if gain > 0.0 => mx.voices.push(Voice { key: k, clip, pos: 0.0, pitch, gain, looping: true }),
+                None if gain > 0.0 => mx.voices.push(Voice {
+                    key: k,
+                    clip,
+                    pos: 0.0,
+                    pitch,
+                    gain,
+                    looping: true,
+                }),
                 None => {}
             }
         }
@@ -257,7 +357,10 @@ impl Audio {
     /// Stops the looping voices started under `key`.
     pub fn stop(&mut self, key: u64) {
         if let Some(m) = &self.mixer {
-            m.lock().unwrap().voices.retain(|v| !v.looping || v.key / 64 != key);
+            m.lock()
+                .unwrap()
+                .voices
+                .retain(|v| !v.looping || v.key / 64 != key);
         }
     }
 
@@ -271,9 +374,18 @@ impl Audio {
         self.rng ^= self.rng >> 7;
         self.rng ^= self.rng << 17;
         let s = &preset.samples[(self.rng % preset.samples.len() as u64) as usize];
-        let Some(clip) = self.clip(vfs, &s.file) else { return };
+        let Some(clip) = self.clip(vfs, &s.file) else {
+            return;
+        };
         let gain = level * 10f32.powf((preset.spl - 130.0) / 40.0);
-        m.lock().unwrap().voices.push(Voice { key: u64::MAX, clip, pos: 0.0, pitch: 1.0, gain, looping: false });
+        m.lock().unwrap().voices.push(Voice {
+            key: u64::MAX,
+            clip,
+            pos: 0.0,
+            pitch: 1.0,
+            gain,
+            looping: false,
+        });
     }
 }
 
@@ -283,7 +395,15 @@ mod tests {
 
     #[test]
     fn bounds_curve() {
-        let b = Bounds { minlo: 400.0, minhi: 1000.0, maxlo: 1500.0, maxhi: 1900.0, value: 5.0, pmin: 0.5, pmax: 1.5 };
+        let b = Bounds {
+            minlo: 400.0,
+            minhi: 1000.0,
+            maxlo: 1500.0,
+            maxhi: 1900.0,
+            value: 5.0,
+            pmin: 0.5,
+            pmax: 1.5,
+        };
         assert_eq!(b.gain(300.0), 0.0);
         assert_eq!(b.gain(1200.0), 1.0);
         assert!((b.gain(1700.0) - 0.5).abs() < 1e-6);

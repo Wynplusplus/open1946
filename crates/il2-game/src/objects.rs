@@ -55,7 +55,11 @@ fn sphere(mesh: &MeshData, batches: &Range<usize>) -> (Vec3, f32) {
         }
         for &i in &mesh.indices[b.first as usize..(b.first + b.count) as usize] {
             let v = &mesh.vertices[i as usize];
-            let node = mesh.node_init.get(v.node as usize).copied().unwrap_or(Mat4::IDENTITY);
+            let node = mesh
+                .node_init
+                .get(v.node as usize)
+                .copied()
+                .unwrap_or(Mat4::IDENTITY);
             let p = node.transform_point3(Vec3::from(v.pos));
             lo = lo.min(p);
             hi = hi.max(p);
@@ -105,7 +109,14 @@ fn props(ini: &SectFile, class: &str, alive: bool) -> Option<Props> {
     }
     let sect = ini.sections.iter().find(|s| s.name.ends_with(short))?;
     if plate {
-        return Some(Props { mesh: sect.get_ci("Mesh")?.trim().to_owned(), add_height: 0.25, align_to_land: true, use_ground_level: false, body: None, panzer: 0.0 });
+        return Some(Props {
+            mesh: sect.get_ci("Mesh")?.trim().to_owned(),
+            add_height: 0.25,
+            align_to_land: true,
+            use_ground_level: false,
+            body: None,
+            panzer: 0.0,
+        });
     }
     // `equals` names the section that holds the remaining properties.
     let rest = sect
@@ -116,7 +127,11 @@ fn props(ini: &SectFile, class: &str, alive: bool) -> Option<Props> {
     let num = |k: &str| rest.get_ci(k).and_then(atof).unwrap_or(0.0);
     let state = if alive { "Live" } else { "Dead" };
     Some(Props {
-        mesh: sect.get_ci(&format!("Mesh{state}")).map(str::trim).filter(|m| !m.is_empty())?.to_owned(),
+        mesh: sect
+            .get_ci(&format!("Mesh{state}"))
+            .map(str::trim)
+            .filter(|m| !m.is_empty())?
+            .to_owned(),
         add_height: num(&format!("AddHeight{state}")).clamp(-100.0, 100.0),
         align_to_land: num("AlignToLand") > 0.0,
         use_ground_level: true,
@@ -128,14 +143,21 @@ fn props(ini: &SectFile, class: &str, alive: bool) -> Option<Props> {
 /// Height of the object origin above its lowest point: the `Ground_Level` hook if present, else
 /// the bottom of the bounding box.
 fn lift(loader: &Loader, mesh: &MeshData, path: &str, batches: &Range<usize>) -> f32 {
-    if let Some((_, p)) = loader.hier_hooks(path).ok().and_then(|h| h.into_iter().find(|(n, _)| n.eq_ignore_ascii_case("Ground_Level"))) {
+    if let Some((_, p)) = loader.hier_hooks(path).ok().and_then(|h| {
+        h.into_iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("Ground_Level"))
+    }) {
         return -p.z;
     }
     let mut min_z = f32::MAX;
     for b in &mesh.batches[batches.clone()] {
         for &i in &mesh.indices[b.first as usize..(b.first + b.count) as usize] {
             let v = &mesh.vertices[i as usize];
-            let node = mesh.node_init.get(v.node as usize).copied().unwrap_or(Mat4::IDENTITY);
+            let node = mesh
+                .node_init
+                .get(v.node as usize)
+                .copied()
+                .unwrap_or(Mat4::IDENTITY);
             min_z = min_z.min(node.transform_point3(Vec3::from(v.pos)).z);
         }
     }
@@ -279,9 +301,16 @@ impl<'a> Builder<'a> {
                     }
                 }
                 let lift = lift(&self.loader, &self.mesh, path, &b);
-                let lods = self.mesh.batches[b.start].lod.map(|(g, _)| self.mesh.lod_distances[g as usize].clone()).unwrap_or_default();
+                let lods = self.mesh.batches[b.start]
+                    .lod
+                    .map(|(g, _)| self.mesh.lod_distances[g as usize].clone())
+                    .unwrap_or_default();
                 let sphere = sphere(&self.mesh, &b);
-                self.classes.push(Class { batches: b, lods, sphere });
+                self.classes.push(Class {
+                    batches: b,
+                    lods,
+                    sphere,
+                });
                 Some(((self.classes.len() - 1) as u32, lift))
             }
             Ok(_) => None,
@@ -304,31 +333,64 @@ impl<'a> Builder<'a> {
     }
 
     /// Like `place`, with a damage profile from `profile()`.
-    pub fn place_destructible(&mut self, (class, lift): (u32, f32), x: f64, y: f64, yaw: f64, stand: Stand, profile: u16) {
+    pub fn place_destructible(
+        &mut self,
+        (class, lift): (u32, f32),
+        x: f64,
+        y: f64,
+        yaw: f64,
+        stand: Stand,
+        profile: u16,
+    ) {
         let field = self.field;
         let ground = field.height_at(x, y);
         let yaw_q = DQuat::from_rotation_z(yaw.to_radians());
         let tilt = || DQuat::from_rotation_arc(DVec3::Z, ground_normal(field, x, y));
         let (z, rot) = match stand {
-            Stand::Ground { add, align } => (ground + (lift + add) as f64, if align { tilt() * yaw_q } else { yaw_q }),
+            Stand::Ground { add, align } => (
+                ground + (lift + add) as f64,
+                if align { tilt() * yaw_q } else { yaw_q },
+            ),
             Stand::Plate { add } => (ground + add as f64, tilt() * yaw_q),
             Stand::Absolute(z) => (z, yaw_q),
-            Stand::Parked { height, pitch } => {
-                (ground + height as f64, tilt() * yaw_q * DQuat::from_rotation_y(-(pitch as f64).to_radians()))
-            }
+            Stand::Parked { height, pitch } => (
+                ground + height as f64,
+                tilt() * yaw_q * DQuat::from_rotation_y(-(pitch as f64).to_radians()),
+            ),
         };
-        self.objects.push(Object { class, pos: DVec3::new(x, y, z), rot: rot.as_quat(), profile, alive: true });
+        self.objects.push(Object {
+            class,
+            pos: DVec3::new(x, y, z),
+            rot: rot.as_quat(),
+            profile,
+            alive: true,
+        });
     }
 
     /// Adds a map's `.static` houses, plates and bridges.
-    pub fn add_map(&mut self, vfs: &Vfs, ini_path: &str, statics_ini: &SectFile) -> Result<(), String> {
+    pub fn add_map(
+        &mut self,
+        vfs: &Vfs,
+        ini_path: &str,
+        statics_ini: &SectFile,
+    ) -> Result<(), String> {
         let ini = SectFile::parse(&vfs.read(ini_path).map_err(|e| e.to_string())?);
         let dir = &ini_path[..ini_path.rfind('/').map_or(0, |i| i + 1)];
         let winter = self.season == "winter";
         let rows = self.field.height as f64;
         let mut by_name: HashMap<String, Option<((u32, f32), Stand, u16)>> = HashMap::new();
-        for (name, _) in ini.section_ci("static").map(|s| s.entries.as_slice()).unwrap_or_default() {
-            let Some(st) = vfs.read(&format!("{dir}{name}")).ok().and_then(|d| Statics::parse(&d).ok()) else { continue };
+        for (name, _) in ini
+            .section_ci("static")
+            .map(|s| s.entries.as_slice())
+            .unwrap_or_default()
+        {
+            let Some(st) = vfs
+                .read(&format!("{dir}{name}"))
+                .ok()
+                .and_then(|d| Statics::parse(&d).ok())
+            else {
+                continue;
+            };
             let local: Vec<Option<((u32, f32), Stand, u16)>> = st
                 .house_classes
                 .iter()
@@ -342,38 +404,74 @@ impl<'a> Builder<'a> {
                 })
                 .collect();
             for h in &st.houses {
-                let Some((class, stand, profile)) = local[h.class as usize] else { continue };
+                let Some((class, stand, profile)) = local[h.class as usize] else {
+                    continue;
+                };
                 self.place_destructible(class, h.x, h.y, h.yaw as f64, stand, profile);
             }
             for b in &st.bridges {
                 for seg in bridge_segments(b, winter, rows) {
-                    let Some(class) = self.class(&seg.mesh, None) else { continue };
-                    self.place(class, seg.pos.x, seg.pos.y, seg.yaw, Stand::Absolute(seg.pos.z));
+                    let Some(class) = self.class(&seg.mesh, None) else {
+                        continue;
+                    };
+                    self.place(
+                        class,
+                        seg.pos.x,
+                        seg.pos.y,
+                        seg.yaw,
+                        Stand::Absolute(seg.pos.z),
+                    );
                 }
             }
         }
-        self.skipped.extend(by_name.iter().filter(|(_, v)| v.is_none()).map(|(k, _)| k.clone()));
+        self.skipped.extend(
+            by_name
+                .iter()
+                .filter(|(_, v)| v.is_none())
+                .map(|(k, _)| k.clone()),
+        );
         Ok(())
     }
 
     /// A `buildings.House$*` or `buildings.Plate$*` class; `mission` plates sit 0.04 m higher.
-    pub fn house_class(&mut self, statics_ini: &SectFile, class: &str, alive: bool, mission: bool) -> Option<((u32, f32), Stand, u16)> {
+    pub fn house_class(
+        &mut self,
+        statics_ini: &SectFile,
+        class: &str,
+        alive: bool,
+        mission: bool,
+    ) -> Option<((u32, f32), Stand, u16)> {
         let p = props(statics_ini, class, alive)?;
         let c = self.class(&p.mesh, None)?;
         let stand = if p.use_ground_level {
-            Stand::Ground { add: p.add_height, align: p.align_to_land }
+            Stand::Ground {
+                add: p.add_height,
+                align: p.align_to_land,
+            }
         } else {
-            Stand::Plate { add: p.add_height + if mission { 0.04 } else { 0.0 } }
+            Stand::Plate {
+                add: p.add_height + if mission { 0.04 } else { 0.0 },
+            }
         };
         // Live houses can be destroyed: they then show their dead mesh.
         let profile = if alive {
-            let damage = p.body.as_deref().and_then(|b| crate::damage::HouseDamage::new(b, p.panzer));
+            let damage = p
+                .body
+                .as_deref()
+                .and_then(|b| crate::damage::HouseDamage::new(b, p.panzer));
             match damage {
                 Some(damage) => {
                     let dp = props(statics_ini, class, false);
-                    let dead = dp.as_ref().and_then(|d| self.class(&d.mesh, None).map(|c| (c, d.add_height)));
-                    let dz = dead.map_or(0.0, |((_, lift), add)| (lift + add) - (c.1 + p.add_height));
-                    self.profile(Profile { dead: dead.map(|((c, _), _)| c), damage, dz })
+                    let dead = dp
+                        .as_ref()
+                        .and_then(|d| self.class(&d.mesh, None).map(|c| (c, d.add_height)));
+                    let dz =
+                        dead.map_or(0.0, |((_, lift), add)| (lift + add) - (c.1 + p.add_height));
+                    self.profile(Profile {
+                        dead: dead.map(|((c, _), _)| c),
+                        damage,
+                        dz,
+                    })
                 }
                 None => 0,
             }
@@ -412,9 +510,21 @@ impl<'a> Builder<'a> {
             tiles.insert(t, start..i);
         }
         let classes = self.classes;
-        let max_dist = classes.iter().map(|c| c.lods.last().copied().unwrap_or(DEFAULT_MAX_DIST)).fold(0.0, f32::max);
+        let max_dist = classes
+            .iter()
+            .map(|c| c.lods.last().copied().unwrap_or(DEFAULT_MAX_DIST))
+            .fold(0.0, f32::max);
         let buckets = vec![Vec::new(); classes.len() * LEVELS];
-        MapObjects { data: Some(mesh), classes, objects, tiles, max_dist, buckets, skipped: self.skipped, profiles: self.profiles }
+        MapObjects {
+            data: Some(mesh),
+            classes,
+            objects,
+            tiles,
+            max_dist,
+            buckets,
+            skipped: self.skipped,
+            profiles: self.profiles,
+        }
     }
 }
 
@@ -423,12 +533,19 @@ pub fn season(vfs: &Vfs, ini_path: &str) -> String {
     vfs.read(ini_path)
         .ok()
         .map(|d| SectFile::parse(&d))
-        .and_then(|ini| ini.section_ci("WORLDPOS")?.get_ci("CAMOUFLAGE").map(|c| c.trim_start_matches(['=', ' ']).trim().to_ascii_lowercase()))
+        .and_then(|ini| {
+            ini.section_ci("WORLDPOS")?
+                .get_ci("CAMOUFLAGE")
+                .map(|c| c.trim_start_matches(['=', ' ']).trim().to_ascii_lowercase())
+        })
         .unwrap_or_else(|| "summer".to_owned())
 }
 
 pub fn statics_ini(vfs: &Vfs) -> Result<SectFile, String> {
-    Ok(SectFile::parse(&vfs.read("com/maddox/il2/objects/static.ini").map_err(|e| e.to_string())?))
+    Ok(SectFile::parse(
+        &vfs.read("com/maddox/il2/objects/static.ini")
+            .map_err(|e| e.to_string())?,
+    ))
 }
 
 impl MapObjects {
@@ -445,14 +562,22 @@ impl MapObjects {
     pub fn hit(&self, a: DVec3, b: DVec3) -> Option<(usize, DVec3)> {
         let (lo, hi) = (a.min(b), a.max(b));
         let pad = 60.0;
-        let (x0, x1) = (((lo.x - pad) / TILE).floor() as i32, ((hi.x + pad) / TILE).floor() as i32);
-        let (y0, y1) = (((lo.y - pad) / TILE).floor() as i32, ((hi.y + pad) / TILE).floor() as i32);
+        let (x0, x1) = (
+            ((lo.x - pad) / TILE).floor() as i32,
+            ((hi.x + pad) / TILE).floor() as i32,
+        );
+        let (y0, y1) = (
+            ((lo.y - pad) / TILE).floor() as i32,
+            ((hi.y + pad) / TILE).floor() as i32,
+        );
         let d = b - a;
         let len2 = d.length_squared().max(1e-9);
         let mut best: Option<(f64, usize)> = None;
         for ty in y0..=y1 {
             for tx in x0..=x1 {
-                let Some(range) = self.tiles.get(&(tx, ty)) else { continue };
+                let Some(range) = self.tiles.get(&(tx, ty)) else {
+                    continue;
+                };
                 for i in range.clone() {
                     let o = &self.objects[i];
                     if !o.alive || o.profile == 0 || o.class == u32::MAX {
@@ -481,7 +606,14 @@ impl MapObjects {
     }
 
     /// A bullet hit on object `i`; returns whether it destroyed it.
-    pub fn shot(&mut self, i: usize, energy: f64, power_type: i32, speed: f64, rng: &mut crate::weapons::Rng) -> bool {
+    pub fn shot(
+        &mut self,
+        i: usize,
+        energy: f64,
+        power_type: i32,
+        speed: f64,
+        rng: &mut crate::weapons::Rng,
+    ) -> bool {
         let o = &self.objects[i];
         if !o.alive || o.profile == 0 {
             return false;
@@ -495,14 +627,28 @@ impl MapObjects {
     }
 
     /// A blast of `power` kg TNT with `radius`; returns how many objects it destroyed.
-    pub fn explode(&mut self, at: DVec3, power: f64, radius: f64, rng: &mut crate::weapons::Rng) -> usize {
+    pub fn explode(
+        &mut self,
+        at: DVec3,
+        power: f64,
+        radius: f64,
+        rng: &mut crate::weapons::Rng,
+    ) -> usize {
         let reach = radius + 60.0;
-        let (x0, x1) = (((at.x - reach) / TILE).floor() as i32, ((at.x + reach) / TILE).floor() as i32);
-        let (y0, y1) = (((at.y - reach) / TILE).floor() as i32, ((at.y + reach) / TILE).floor() as i32);
+        let (x0, x1) = (
+            ((at.x - reach) / TILE).floor() as i32,
+            ((at.x + reach) / TILE).floor() as i32,
+        );
+        let (y0, y1) = (
+            ((at.y - reach) / TILE).floor() as i32,
+            ((at.y + reach) / TILE).floor() as i32,
+        );
         let mut victims = Vec::new();
         for ty in y0..=y1 {
             for tx in x0..=x1 {
-                let Some(range) = self.tiles.get(&(tx, ty)) else { continue };
+                let Some(range) = self.tiles.get(&(tx, ty)) else {
+                    continue;
+                };
                 for i in range.clone() {
                     let o = &self.objects[i];
                     if !o.alive || o.profile == 0 {
@@ -510,8 +656,16 @@ impl MapObjects {
                     }
                     let (c, r) = self.classes[o.class as usize].sphere;
                     let d = (o.pos + o.rot.as_dquat() * c.as_dvec3() - at).length();
-                    let got = if d - r as f64 > radius { 0.0 } else { crate::damage::received_power_realistic(power, d, r as f64) };
-                    if got > 0.0 && self.profiles[o.profile as usize - 1].damage.explosion_kills(got, rng) {
+                    let got = if d - r as f64 > radius {
+                        0.0
+                    } else {
+                        crate::damage::received_power_realistic(power, d, r as f64)
+                    };
+                    if got > 0.0
+                        && self.profiles[o.profile as usize - 1]
+                            .damage
+                            .explosion_kills(got, rng)
+                    {
                         victims.push(i);
                     }
                 }
@@ -528,16 +682,29 @@ impl MapObjects {
     }
 
     /// Instances near `eye` (positions relative to it), with one draw per class and LOD level.
-    pub fn gather<'a>(&mut self, mesh: &'a GpuMesh, eye: DVec3, out: &mut Vec<InstanceRaw>) -> Vec<InstancedDraw<'a>> {
+    pub fn gather<'a>(
+        &mut self,
+        mesh: &'a GpuMesh,
+        eye: DVec3,
+        out: &mut Vec<InstanceRaw>,
+    ) -> Vec<InstancedDraw<'a>> {
         for b in &mut self.buckets {
             b.clear();
         }
         let r = self.max_dist as f64;
-        let (x0, x1) = (((eye.x - r) / TILE).floor() as i32, ((eye.x + r) / TILE).floor() as i32);
-        let (y0, y1) = (((eye.y - r) / TILE).floor() as i32, ((eye.y + r) / TILE).floor() as i32);
+        let (x0, x1) = (
+            ((eye.x - r) / TILE).floor() as i32,
+            ((eye.x + r) / TILE).floor() as i32,
+        );
+        let (y0, y1) = (
+            ((eye.y - r) / TILE).floor() as i32,
+            ((eye.y + r) / TILE).floor() as i32,
+        );
         for ty in y0..=y1 {
             for tx in x0..=x1 {
-                let Some(range) = self.tiles.get(&(tx, ty)) else { continue };
+                let Some(range) = self.tiles.get(&(tx, ty)) else {
+                    continue;
+                };
                 for o in &self.objects[range.clone()] {
                     if o.class == u32::MAX {
                         continue;
@@ -549,7 +716,9 @@ impl MapObjects {
                     if d >= limit {
                         continue;
                     }
-                    let Some(level) = select_lod(&c.lods, d) else { continue };
+                    let Some(level) = select_lod(&c.lods, d) else {
+                        continue;
+                    };
                     let level = (level as usize).min(LEVELS - 1);
                     let m = Mat4::from_rotation_translation(o.rot, rel.as_vec3());
                     self.buckets[o.class as usize * LEVELS + level].push(InstanceRaw::from_mat4(m));
@@ -590,9 +759,15 @@ mod tests {
             if !seen.insert(ini.to_ascii_lowercase()) {
                 continue;
             }
-            let field = crate::world::load_heights(&vfs, &ini).unwrap_or_else(|e| panic!("{ini}: {e}"));
-            let objects = super::MapObjects::load(&vfs, &ini, &field).unwrap_or_else(|e| panic!("{ini}: {e}"));
-            let bad: Vec<_> = objects.skipped.iter().filter(|c| !c.contains(".Furniture$")).collect();
+            let field =
+                crate::world::load_heights(&vfs, &ini).unwrap_or_else(|e| panic!("{ini}: {e}"));
+            let objects = super::MapObjects::load(&vfs, &ini, &field)
+                .unwrap_or_else(|e| panic!("{ini}: {e}"));
+            let bad: Vec<_> = objects
+                .skipped
+                .iter()
+                .filter(|c| !c.contains(".Furniture$"))
+                .collect();
             assert!(bad.is_empty(), "{ini}: {bad:?}");
             eprintln!("{ini}: {} objects", objects.len());
         }

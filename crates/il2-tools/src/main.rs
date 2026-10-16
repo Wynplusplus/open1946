@@ -83,7 +83,10 @@ fn main() -> ExitCode {
                 files += a.entries().iter().filter(|e| !e.is_dir()).count();
                 blocks += a.block_count();
             }
-            println!("{} archives, {files} files, {blocks} blocks, {failures} failures", paths.len());
+            println!(
+                "{} archives, {files} files, {blocks} blocks, {failures} failures",
+                paths.len()
+            );
         }
         Cmd::Stat => {
             for p in &paths {
@@ -106,15 +109,17 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Cmd::Cat { path } => match il2_vfs::Vfs::open_install(&cli.root).and_then(|v| v.read(&path)) {
-            Ok(data) => {
-                std::io::stdout().write_all(&data).ok();
+        Cmd::Cat { path } => {
+            match il2_vfs::Vfs::open_install(&cli.root).and_then(|v| v.read(&path)) {
+                Ok(data) => {
+                    std::io::stdout().write_all(&data).ok();
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    failures += 1;
+                }
             }
-            Err(e) => {
-                eprintln!("{e}");
-                failures += 1;
-            }
-        },
+        }
         Cmd::Fm { name } => {
             match il2_vfs::Vfs::open_install(&cli.root)
                 .map_err(il2_data::Error::from)
@@ -144,14 +149,21 @@ fn main() -> ExitCode {
                 if !matches!(ext.as_str(), "msh" | "him" | "mat") {
                     continue;
                 }
-                let result = vfs.read(name).map_err(|e| e.to_string()).and_then(|d| match ext.as_str() {
-                    "msh" => il2_formats::msh::Mesh::parse(&d).map(|_| ()).map_err(|e| e.to_string()),
-                    "him" => il2_formats::him::Hier::parse(&d).map(|_| ()).map_err(|e| e.to_string()),
-                    _ => {
-                        il2_formats::mat::MatFile::parse(&d);
-                        Ok(())
-                    }
-                });
+                let result =
+                    vfs.read(name)
+                        .map_err(|e| e.to_string())
+                        .and_then(|d| match ext.as_str() {
+                            "msh" => il2_formats::msh::Mesh::parse(&d)
+                                .map(|_| ())
+                                .map_err(|e| e.to_string()),
+                            "him" => il2_formats::him::Hier::parse(&d)
+                                .map(|_| ())
+                                .map_err(|e| e.to_string()),
+                            _ => {
+                                il2_formats::mat::MatFile::parse(&d);
+                                Ok(())
+                            }
+                        });
                 let st = stats.entry(ext).or_default();
                 st.0 += 1;
                 if let Err(e) = result {
@@ -175,7 +187,13 @@ fn main() -> ExitCode {
                 }
             };
             let seeds: Vec<String> = seeds
-                .map(|p| std::fs::read_to_string(p).unwrap_or_default().lines().map(str::to_owned).collect())
+                .map(|p| {
+                    std::fs::read_to_string(p)
+                        .unwrap_or_default()
+                        .lines()
+                        .map(str::to_owned)
+                        .collect()
+                })
                 .unwrap_or_default();
             let n = names::Names::recover(&vfs, &seeds);
             let mut list: Vec<&String> = n.found.values().collect();
@@ -187,5 +205,9 @@ fn main() -> ExitCode {
             }
         }
     }
-    if failures == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if failures == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }

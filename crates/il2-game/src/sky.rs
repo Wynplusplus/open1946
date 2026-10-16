@@ -22,7 +22,11 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
 }
 
 fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
 }
 
 pub fn environment(hours: f64, day: f64, lat_deg: f64) -> Environment {
@@ -34,11 +38,28 @@ pub fn environment(hours: f64, day: f64, lat_deg: f64) -> Environment {
     let night_z = [0.01, 0.015, 0.035];
     let day_h = Environment::default().horizon;
     let day_z = Environment::default().zenith;
-    let horizon = mix(mix(night_h, day_h, day_light), [0.80, 0.52, 0.36], low * 0.8);
-    let zenith = mix(mix(night_z, day_z, day_light), [0.22, 0.26, 0.45], low * 0.5);
+    let horizon = mix(
+        mix(night_h, day_h, day_light),
+        [0.80, 0.52, 0.36],
+        low * 0.8,
+    );
+    let zenith = mix(
+        mix(night_z, day_z, day_light),
+        [0.22, 0.26, 0.45],
+        low * 0.5,
+    );
     // Below the horizon, light comes from the moon/sky, from above.
-    let lit_from = if sun.z > 0.0 { sun } else { Vec3::new(sun.x * 0.3, sun.y * 0.3, 1.0).normalize() };
-    Environment { sun: lit_from, light: 0.18 + 0.82 * day_light, horizon, zenith }
+    let lit_from = if sun.z > 0.0 {
+        sun
+    } else {
+        Vec3::new(sun.x * 0.3, sun.y * 0.3, 1.0).normalize()
+    };
+    Environment {
+        sun: lit_from,
+        light: 0.18 + 0.82 * day_light,
+        horizon,
+        zenith,
+    }
 }
 
 /// Day of the year for the middle of `day` in `month` (1-based).

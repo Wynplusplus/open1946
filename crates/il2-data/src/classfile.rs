@@ -44,7 +44,10 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn bytes(&mut self, n: usize) -> Result<&[u8], Error> {
-        let s = self.d.get(self.p..self.p + n).ok_or(Error::Bad("truncated"))?;
+        let s = self
+            .d
+            .get(self.p..self.p + n)
+            .ok_or(Error::Bad("truncated"))?;
         self.p += n;
         Ok(s)
     }
@@ -92,7 +95,11 @@ impl ClassFile {
                     let lo = r.u32()? as u64;
                     let v = hi << 32 | lo;
                     // Value in the first slot, the second slot is unusable.
-                    consts.push(if tag == 5 { Const::Long(v as i64) } else { Const::Double(f64::from_bits(v)) });
+                    consts.push(if tag == 5 {
+                        Const::Long(v as i64)
+                    } else {
+                        Const::Double(f64::from_bits(v))
+                    });
                     Const::Other
                 }
                 7 => Const::Class(r.u16()?),
@@ -133,7 +140,12 @@ impl ClassFile {
             r.bytes(6)?;
             skip_attrs(&mut r)?;
         }
-        let mut cf = ClassFile { consts, this_class: String::new(), super_class: None, methods: Vec::new() };
+        let mut cf = ClassFile {
+            consts,
+            this_class: String::new(),
+            super_class: None,
+            methods: Vec::new(),
+        };
         cf.this_class = cf.class_name(this_idx).unwrap_or_default().to_owned();
         cf.super_class = cf.class_name(super_idx).map(str::to_owned);
         for _ in 0..r.u16()? {
@@ -153,7 +165,13 @@ impl ClassFile {
                     code = c.bytes(code_len)?.to_vec();
                 }
             }
-            cf.methods.push(Method { name, desc, is_static: access & 0x0008 != 0, code, max_locals });
+            cf.methods.push(Method {
+                name,
+                desc,
+                is_static: access & 0x0008 != 0,
+                code,
+                max_locals,
+            });
         }
         Ok(cf)
     }
@@ -178,12 +196,16 @@ impl ClassFile {
             Const::FieldRef(c, nt) | Const::MethodRef(c, nt) => (*c, *nt),
             _ => return None,
         };
-        let Const::NameAndType(n, d) = self.consts.get(nt as usize)? else { return None };
+        let Const::NameAndType(n, d) = self.consts.get(nt as usize)? else {
+            return None;
+        };
         Some((self.class_name(c)?, self.utf8(*n)?, self.utf8(*d)?))
     }
 
     pub fn method(&self, name: &str, desc: &str) -> Option<&Method> {
-        self.methods.iter().find(|m| m.name == name && m.desc == desc)
+        self.methods
+            .iter()
+            .find(|m| m.name == name && m.desc == desc)
     }
 
     /// All UTF-8 string constants.
@@ -202,7 +224,10 @@ impl ClassFile {
             Int(i32),
             Arr(usize),
         }
-        let code = self.method("<clinit>", "()V").map(|m| m.code.as_slice()).ok_or(Error::Bad("no <clinit>"))?;
+        let code = self
+            .method("<clinit>", "()V")
+            .map(|m| m.code.as_slice())
+            .ok_or(Error::Bad("no <clinit>"))?;
         let mut arrays: Vec<Vec<i32>> = Vec::new();
         let mut stack: Vec<V> = Vec::new();
         let mut out = HashMap::new();
@@ -212,14 +237,18 @@ impl ClassFile {
             _ => Err(Error::Bad("stack")),
         };
         let u16_at = |pc: usize| -> Result<u16, Error> {
-            code.get(pc..pc + 2).map(|b| u16::from_be_bytes([b[0], b[1]])).ok_or(Error::Bad("truncated code"))
+            code.get(pc..pc + 2)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
+                .ok_or(Error::Bad("truncated code"))
         };
         while pc < code.len() {
             let op = code[pc];
             match op {
                 0x02..=0x08 => stack.push(V::Int(op as i32 - 3)),
                 0x10 => {
-                    stack.push(V::Int(*code.get(pc + 1).ok_or(Error::Bad("truncated code"))? as i8 as i32));
+                    stack.push(V::Int(
+                        *code.get(pc + 1).ok_or(Error::Bad("truncated code"))? as i8 as i32,
+                    ));
                     pc += 1;
                 }
                 0x11 => {
@@ -254,12 +283,18 @@ impl ClassFile {
                 0x4F | 0x54 => {
                     let v = pop_int(&mut stack)?;
                     let i = pop_int(&mut stack)?;
-                    let Some(V::Arr(a)) = stack.pop() else { return Err(Error::Bad("stack")) };
+                    let Some(V::Arr(a)) = stack.pop() else {
+                        return Err(Error::Bad("stack"));
+                    };
                     let slot = arrays[a].get_mut(i as usize).ok_or(Error::Bad("index"))?;
                     *slot = if op == 0x54 { v as i8 as i32 } else { v };
                 }
                 0xB3 => {
-                    let name = self.member(u16_at(pc + 1)?).ok_or(Error::Bad("field ref"))?.1.to_owned();
+                    let name = self
+                        .member(u16_at(pc + 1)?)
+                        .ok_or(Error::Bad("field ref"))?
+                        .1
+                        .to_owned();
                     if let Some(V::Arr(a)) = stack.pop() {
                         out.insert(name, arrays[a].clone());
                     }

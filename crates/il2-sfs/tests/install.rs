@@ -12,7 +12,9 @@ fn root() -> PathBuf {
 #[ignore]
 fn files_sfs_known_entries() {
     let a = Archive::open(root().join("files.SFS")).unwrap();
-    let e = a.find("com/maddox/il2/objects/air.ini").expect("air.ini present");
+    let e = a
+        .find("com/maddox/il2/objects/air.ini")
+        .expect("air.ini present");
     let data = a.read(e).unwrap();
     assert!(!data.is_empty());
     assert!(data.iter().all(|&b| b.is_ascii()), "air.ini is plain text");

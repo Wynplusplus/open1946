@@ -40,7 +40,15 @@ impl MachTable {
         if [mc3, mc4, mm, mz].iter().any(|t| t.len() < 8) {
             return None;
         }
-        let mut t = MachTable { mc: [0.0; 8], mm: [0.0; 8], mc2: [0.0; 8], mc3: [0.0; 8], mc4: [0.0; 8], md: [0.0; 8], mc_min: 999.0 };
+        let mut t = MachTable {
+            mc: [0.0; 8],
+            mm: [0.0; 8],
+            mc2: [0.0; 8],
+            mc3: [0.0; 8],
+            mc4: [0.0; 8],
+            md: [0.0; 8],
+            mc_min: 999.0,
+        };
         for i in 0..8 {
             let z = mz[i];
             t.mm[i] = mm[i];
@@ -203,7 +211,9 @@ impl Polar {
                     } else {
                         let end = deep(K1, mda);
                         let span = mda - self.p.parab_angle - self.aoa_crit_h;
-                        let top = self.cy_crit_h - self.p.decline * self.p.parab_angle * self.p.parab_angle - end;
+                        let top = self.cy_crit_h
+                            - self.p.decline * self.p.parab_angle * self.p.parab_angle
+                            - end;
                         let d = mda - a;
                         end + top / (span * span) * d * d
                     }
@@ -211,7 +221,11 @@ impl Polar {
                     deep(K1, a)
                 }
             } else if a <= 140.0 {
-                let (sign, a) = if a > 90.0 { (-1.0, 180.0 - a) } else { (1.0, a) };
+                let (sign, a) = if a > 90.0 {
+                    (-1.0, 180.0 - a)
+                } else {
+                    (1.0, a)
+                };
                 sign * 0.9 * (std::f64::consts::FRAC_PI_2 + K2 * (a - 40.0)).sin()
             } else {
                 -deep(K1, 180.0 - a)
@@ -225,7 +239,11 @@ impl Polar {
         } else {
             let a = -a;
             if a <= 140.0 {
-                let (sign, a) = if a > 90.0 { (1.0, 180.0 - a) } else { (-1.0, a) };
+                let (sign, a) = if a > 90.0 {
+                    (1.0, 180.0 - a)
+                } else {
+                    (-1.0, a)
+                };
                 sign * 0.9 * (std::f64::consts::FRAC_PI_2 + K2 * (a - 40.0)).sin()
             } else {
                 deep(K1, 180.0 - a)
@@ -274,8 +292,24 @@ mod tests {
             max_dist_ang: 38.0,
             parab_angle: 6.0,
             cfg: [
-                PolarCfg { cy0: 0.15, aoa_crit_h: 21.0, aoa_crit_l: -16.0, cy_crit_h: 1.48, cy_crit_l: -1.02, cx_min: 0.0275, parab_cx: 6.2e-4 },
-                PolarCfg { cy0: 0.63, aoa_crit_h: 17.0, aoa_crit_l: -19.0, cy_crit_h: 1.72, cy_crit_l: -0.7, cx_min: 0.118, parab_cx: 8.7e-4 },
+                PolarCfg {
+                    cy0: 0.15,
+                    aoa_crit_h: 21.0,
+                    aoa_crit_l: -16.0,
+                    cy_crit_h: 1.48,
+                    cy_crit_l: -1.02,
+                    cx_min: 0.0275,
+                    parab_cx: 6.2e-4,
+                },
+                PolarCfg {
+                    cy0: 0.63,
+                    aoa_crit_h: 17.0,
+                    aoa_crit_l: -19.0,
+                    cy_crit_h: 1.72,
+                    cy_crit_l: -0.7,
+                    cx_min: 0.118,
+                    parab_cx: 8.7e-4,
+                },
             ],
         })
     }

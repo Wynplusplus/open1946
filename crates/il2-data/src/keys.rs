@@ -30,7 +30,8 @@ impl KeyTable {
         let exe = vfs.root().join("il2fb.exe");
         let launcher_err = |e: String| Error::Launcher(exe.display().to_string(), e);
         let bytes = std::fs::read(&exe).map_err(|e| launcher_err(e.to_string()))?;
-        let image = pe::Image::parse(&bytes).ok_or_else(|| launcher_err("not a PE32 image".into()))?;
+        let image =
+            pe::Image::parse(&bytes).ok_or_else(|| launcher_err("not a PE32 image".into()))?;
         let scrambled = vfs.read_hash(FINGER_CLASS_HASH)?;
 
         let mut tried = std::collections::HashSet::new();
@@ -61,7 +62,9 @@ impl KeyTable {
         let n = len as i64;
         let klen = ((n + h / 5) % 16 + 14).max(10);
         let start = (n + h / 19) % k;
-        (0..klen).map(|i| self.0[((start + i) % k) as usize]).collect()
+        (0..klen)
+            .map(|i| self.0[((start + i) % k) as usize])
+            .collect()
     }
 }
 
@@ -72,7 +75,12 @@ fn try_key(scrambled: &[u8], key: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let mut class = CLASS_HEADER.to_vec();
-    class.extend(scrambled.iter().enumerate().map(|(i, b)| b ^ key[i % key.len()]));
+    class.extend(
+        scrambled
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ key[i % key.len()]),
+    );
     let arrays = ClassFile::parse(&class).ok()?.static_arrays().ok()?;
     let k = arrays.get("kTable")?;
     (k.len() >= 256).then(|| k.iter().map(|&v| v as u8).collect())
@@ -85,7 +93,9 @@ impl KeyTable {
         let h = (h as i64).abs();
         let len = (h % 16 + 14).max(10);
         let start = h % k;
-        (0..len).map(|i| self.0[((start + i) % k) as usize]).collect()
+        (0..len)
+            .map(|i| self.0[((start + i) % k) as usize])
+            .collect()
     }
 }
 

@@ -7,7 +7,11 @@ fn main() {
     let w = classes.aircraft_weapons(&name).expect("class not found");
     println!("triggers {:?}\nhooks {:?}", w.triggers, w.hooks);
     for (n, slots) in &w.loadouts {
-        let s: Vec<String> = slots.iter().flatten().map(|(g, c)| format!("{g} {c}")).collect();
+        let s: Vec<String> = slots
+            .iter()
+            .flatten()
+            .map(|(g, c)| format!("{g} {c}"))
+            .collect();
         println!("{n}: {}", s.join(", "));
     }
 }

@@ -54,7 +54,9 @@ impl ApplicationHandler for App {
         }
         let window = Arc::new(
             event_loop
-                .create_window(winit::window::Window::default_attributes().with_title("OpenIL2 viewer"))
+                .create_window(
+                    winit::window::Window::default_attributes().with_title("OpenIL2 viewer"),
+                )
                 .expect("create window"),
         );
         let r = Renderer::new(window);
@@ -65,7 +67,9 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        let Some(r) = self.renderer.as_mut() else { return };
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
         let redraw = |r: &Renderer| {
             if let Some(w) = &r.window {
                 w.request_redraw();
@@ -74,12 +78,17 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(s) => r.resize(s.width, s.height),
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
                 self.dragging = state == ElementState::Pressed;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if let (true, Some((x, y))) = (self.dragging, self.last_cursor) {
-                    self.camera.rotate((position.x - x) as f32, (position.y - y) as f32);
+                    self.camera
+                        .rotate((position.x - x) as f32, (position.y - y) as f32);
                     redraw(r);
                 }
                 self.last_cursor = Some((position.x, position.y));
@@ -95,7 +104,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let vp = self.camera.view_proj(r.aspect());
                 let meshes: Vec<&GpuMesh> = self.meshes.iter().collect();
-                r.render(vp, self.camera.distance, None, &meshes, &[]);
+                r.render(vp, self.camera.distance, None, &meshes, &[], None);
             }
             _ => {}
         }
@@ -159,12 +168,27 @@ fn main() {
         let (w, h) = (1280, 720);
         let r = Renderer::headless(w, h);
         let mesh = r.upload(&data);
-        let px = r.screenshot(camera.view_proj(w as f32 / h as f32), camera.distance, None, &[&mesh], &[]);
-        image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).expect("save screenshot");
+        let px = r.screenshot(
+            camera.view_proj(w as f32 / h as f32),
+            camera.distance,
+            None,
+            &[&mesh],
+            &[],
+            None,
+        );
+        image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8)
+            .expect("save screenshot");
         return;
     }
 
     let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App { data: Some(data), renderer: None, meshes: Vec::new(), camera, dragging: false, last_cursor: None };
+    let mut app = App {
+        data: Some(data),
+        renderer: None,
+        meshes: Vec::new(),
+        camera,
+        dragging: false,
+        last_cursor: None,
+    };
     event_loop.run_app(&mut app).expect("run");
 }

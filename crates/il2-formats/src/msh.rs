@@ -60,7 +60,11 @@ fn floats(sect: &RowSection, width: usize) -> Result<Vec<Vec<f32>>, Error> {
         .map(|v| v.as_f32().ok_or_else(|| Error::BadData(sect.name.clone())))
         .collect::<Result<_, _>>()?;
     Ok((0..sect.rows.len())
-        .map(|r| (0..width).map(|c| flat.get(r * width + c).copied().unwrap_or(0.0)).collect())
+        .map(|r| {
+            (0..width)
+                .map(|c| flat.get(r * width + c).copied().unwrap_or(0.0))
+                .collect()
+        })
         .collect())
 }
 
@@ -93,15 +97,27 @@ impl Mesh {
                     .iter()
                     .zip(m)
                     .map(|(r, m)| Hook {
-                        name: r.first().and_then(Value::as_str).unwrap_or_default().to_owned(),
-                        parent: r.get(1).and_then(Value::as_str).unwrap_or_default().to_owned(),
+                        name: r
+                            .first()
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        parent: r
+                            .get(1)
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
                         matrix: m.try_into().unwrap(),
                     })
                     .collect()
             }
             _ => Vec::new(),
         };
-        Ok(Mesh { lod_distances, lods, hooks })
+        Ok(Mesh {
+            lod_distances,
+            lods,
+            hooks,
+        })
     }
 }
 
@@ -113,16 +129,26 @@ fn parse_lod(f: &RowFile, prefix: &str) -> Result<Lod, Error> {
     let materials = get("Materials")?
         .rows
         .iter()
-        .map(|r| r.first().and_then(Value::as_str).unwrap_or_default().to_owned())
+        .map(|r| {
+            r.first()
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        })
         .collect();
     let fg = get("FaceGroups")?;
     let bad = || Error::BadData(fg.name.clone());
     let header = fg.rows.first().and_then(|r| ints(r)).ok_or_else(bad)?;
-    let (nverts, nfaces) = (*header.first().ok_or_else(bad)? as usize, *header.get(1).ok_or_else(bad)? as usize);
+    let (nverts, nfaces) = (
+        *header.first().ok_or_else(bad)? as usize,
+        *header.get(1).ok_or_else(bad)? as usize,
+    );
     let groups = fg.rows[1..]
         .iter()
         .map(|r| {
-            let v = ints(r).filter(|v| v.len() >= 5 && v.iter().take(5).all(|&x| x >= 0)).ok_or_else(bad)?;
+            let v = ints(r)
+                .filter(|v| v.len() >= 5 && v.iter().take(5).all(|&x| x >= 0))
+                .ok_or_else(bad)?;
             Ok(FaceGroup {
                 material: v[0] as usize,
                 start_vertex: v[1] as u32,
@@ -143,7 +169,9 @@ fn parse_lod(f: &RowFile, prefix: &str) -> Result<Lod, Error> {
         let (fs, fc) = (g.start_face as usize, g.face_count as usize);
         let rows = faces_sect.rows.get(fs..fs + fc).ok_or_else(bad)?;
         for (dst, r) in faces[fs..fs + fc].iter_mut().zip(rows) {
-            let v = ints(r).filter(|v| v.len() == 3).ok_or_else(|| Error::BadData(faces_sect.name.clone()))?;
+            let v = ints(r)
+                .filter(|v| v.len() == 3)
+                .ok_or_else(|| Error::BadData(faces_sect.name.clone()))?;
             for k in 0..3 {
                 if v[k] < 0 || v[k] as u32 >= g.vertex_count {
                     return Err(Error::BadData(faces_sect.name.clone()));
@@ -168,7 +196,8 @@ mod tests {
 
     #[test]
     fn parses_text_mesh() {
-        let text = b"[Common]\nNumBones 0\n[LOD]\n50\n[Materials]\nskin\n[FaceGroups]\n4 2\n0 0 4 0 2 0\n\
+        let text =
+            b"[Common]\nNumBones 0\n[LOD]\n50\n[Materials]\nskin\n[FaceGroups]\n4 2\n0 0 4 0 2 0\n\
             [Vertices_Frame0]\n0 0 0 0 0 1\n1 0 0 0 0 1\n1 1 0 0 0 1\n0 1 0 0 0 1\n\
             [MaterialMapping]\n0 0\n1 0\n1 1\n0 1\n[Faces]\n0 1 2\n0 2 3\n";
         let m = Mesh::parse(text).unwrap();

@@ -89,7 +89,12 @@ impl GearState {
     }
 
     /// Ground force and moment in the body frame.
-    pub fn forces(&mut self, points: &[GearPoint], ground: &impl Ground, c: &GearInputs) -> (DVec3, DVec3) {
+    pub fn forces(
+        &mut self,
+        points: &[GearPoint],
+        ground: &impl Ground,
+        c: &GearInputs,
+    ) -> (DVec3, DVec3) {
         let (mut f, mut m) = (DVec3::ZERO, DVec3::ZERO);
         self.wheels_on_ground = 0;
         self.points_on_ground = 0;
@@ -147,7 +152,11 @@ impl GearState {
                 d += self.rand(-2.0, 1.0) * 0.04 * bump * mass_coeff;
                 let mut spring = (-9500.0 * (d - 0.1)).max(-950_000.0 * d);
                 if slot == 2 {
-                    spring *= if p.pos.x > 0.0 && fd.dot(normal) >= 0.0 { 0.45 } else { 0.6 };
+                    spring *= if p.pos.x > 0.0 && fd.dot(normal) >= 0.0 {
+                        0.45
+                    } else {
+                        0.6
+                    };
                 }
                 spring -= 40_000.0 * nvp;
                 tn = normal * spring;
@@ -171,7 +180,11 @@ impl GearState {
                         let (cf, cr) = ((fvp / speed).abs(), (rvp / speed).abs());
                         let mut k = 5.0;
                         if p.pos.y * rvp > 0.0 {
-                            k = if p.pos.y > 0.0 { k + 7.0 * rvp } else { k - 7.0 * rvp };
+                            k = if p.pos.y > 0.0 {
+                                k + 7.0 * rvp
+                            } else {
+                                k - 7.0 * rvp
+                            };
                             k = k.min(20.0);
                         }
                         let mut cap = 15_000.0;
@@ -182,7 +195,9 @@ impl GearState {
                         let fric_r = lim(-k * 100_000.0 * rvp * n, cap * n * cr);
                         let roll_cap = k * (200.0 * (1.0 - 0.04 * speed)).max(5.0) * n * cf;
                         let mut fric_f = lim(-k * 600.0 * fvp * n, roll_cap);
-                        let nose = points.iter().any(|q| q.kind == ContactKind::Castor && q.pos.x > 0.0);
+                        let nose = points
+                            .iter()
+                            .any(|q| q.kind == ContactKind::Castor && q.pos.x > 0.0);
                         let mut b = if nose { 0.06 } else { 0.03 };
                         if fvp.abs() < 1.0 {
                             b += 3.0 * (1.0 - fvp.abs());
@@ -208,7 +223,8 @@ impl GearState {
                     _ => {
                         if c.tail_locked && self.steer_angle.abs() < 5.0 {
                             self.steer_angle = 0.0;
-                            tn += forward * (-400.0 * fvp).clamp(-400.0, 400.0) + right * (-10_000.0 * rvp).clamp(-40_000.0, 40_000.0);
+                            tn += forward * (-400.0 * fvp).clamp(-400.0, 400.0)
+                                + right * (-10_000.0 * rvp).clamp(-40_000.0, 40_000.0);
                         } else if p.pos.x > -1.0 {
                             // Steerable nose wheel.
                             let dir = DVec3::new(1.0, -0.5 * c.rudder, 0.0);
@@ -218,7 +234,10 @@ impl GearState {
                             let nf = nr.cross(normal);
                             let (fv, rv) = (nf.dot(vs), nr.dot(vs));
                             let s = fv.hypot(rv).max(0.01);
-                            let (mut ff, mut fr) = ((-100.0 * fv).clamp(-4000.0, 4000.0), (-500.0 * rv).clamp(-4000.0, 4000.0));
+                            let (mut ff, mut fr) = (
+                                (-100.0 * fv).clamp(-4000.0, 4000.0),
+                                (-500.0 * rv).clamp(-4000.0, 4000.0),
+                            );
                             let max = 5000.0 * (1.0 - 0.02 * s).max(0.1);
                             let fric = ff.hypot(fr);
                             if fric > max {
@@ -269,7 +288,8 @@ impl GearState {
                 }
                 tn += forward * (ff * 0.8) + right * (fr * 0.8);
                 if nvp < 0.0 {
-                    let severity = (fvp * fvp + rvp * rvp) * 2.366_863_9e-4 + nvp * nvp * 0.020_408_16;
+                    let severity =
+                        (fvp * fvp + rvp * rvp) * 2.366_863_9e-4 + nvp * nvp * 0.020_408_16;
                     if severity > 1.0 {
                         self.hits.push((i, severity));
                     }

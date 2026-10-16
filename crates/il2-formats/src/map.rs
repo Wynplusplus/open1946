@@ -28,7 +28,11 @@ pub struct HeightField {
 impl HeightField {
     /// From the decoded 8-bit height map, rows top to bottom.
     pub fn from_raw(width: usize, height: usize, raw: &[u8]) -> Self {
-        HeightField { width, height, heights: raw.iter().map(|&v| self::height(v)).collect() }
+        HeightField {
+            width,
+            height,
+            heights: raw.iter().map(|&v| self::height(v)).collect(),
+        }
     }
 
     fn at(&self, c: usize, r_from_south: usize) -> f64 {
@@ -47,7 +51,12 @@ impl HeightField {
             return 0.0;
         }
         let (u, v) = (fx - c as f64, fy - r as f64);
-        let (h00, h10, h01, h11) = (self.at(c, r), self.at(c + 1, r), self.at(c, r + 1), self.at(c + 1, r + 1));
+        let (h00, h10, h01, h11) = (
+            self.at(c, r),
+            self.at(c + 1, r),
+            self.at(c, r + 1),
+            self.at(c + 1, r + 1),
+        );
         if u >= v {
             h00 + (h10 - h00) * u + (h11 - h10) * v
         } else {

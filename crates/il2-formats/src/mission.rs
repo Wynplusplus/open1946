@@ -39,15 +39,31 @@ pub struct Placed {
 }
 
 fn placed(f: &SectFile, sect: &str) -> Vec<Placed> {
-    let Some(s) = f.section_ci(sect) else { return Vec::new() };
+    let Some(s) = f.section_ci(sect) else {
+        return Vec::new();
+    };
     s.entries
         .iter()
         .filter_map(|(name, v)| {
             let mut t = v.split_whitespace();
             let class = t.next()?.to_owned();
-            let mut num = || t.next().map_or(0.0, |v| v.parse::<f64>().ok().or_else(|| atof(v).map(f64::from)).unwrap_or(0.0));
+            let mut num = || {
+                t.next().map_or(0.0, |v| {
+                    v.parse::<f64>()
+                        .ok()
+                        .or_else(|| atof(v).map(f64::from))
+                        .unwrap_or(0.0)
+                })
+            };
             let (flag, x, y, yaw) = (num() as i32, num(), num(), num());
-            Some(Placed { name: name.clone(), class, flag, x, y, yaw })
+            Some(Placed {
+                name: name.clone(),
+                class,
+                flag,
+                x,
+                y,
+                yaw,
+            })
         })
         .collect()
 }
@@ -84,9 +100,19 @@ impl Mission {
                         w.entries
                             .iter()
                             .map(|(kind, v)| {
-                                let n: Vec<f64> = v.split_whitespace().take(4).map(|t| atof(t).map_or(0.0, f64::from)).collect();
+                                let n: Vec<f64> = v
+                                    .split_whitespace()
+                                    .take(4)
+                                    .map(|t| atof(t).map_or(0.0, f64::from))
+                                    .collect();
                                 let at = |i: usize| n.get(i).copied().unwrap_or(0.0);
-                                Waypoint { kind: kind.clone(), x: at(0), y: at(1), z: at(2), speed: at(3) }
+                                Waypoint {
+                                    kind: kind.clone(),
+                                    x: at(0),
+                                    y: at(1),
+                                    z: at(2),
+                                    speed: at(3),
+                                }
                             })
                             .collect()
                     })
@@ -95,7 +121,9 @@ impl Mission {
                     class: s.get_ci("Class")?.trim().to_owned(),
                     planes: num("Planes", 1.0) as u32,
                     fuel_percent: num("Fuel", 100.0),
-                    weapons: s.get_ci("weapons").map_or("default".to_owned(), |w| w.trim().to_owned()),
+                    weapons: s
+                        .get_ci("weapons")
+                        .map_or("default".to_owned(), |w| w.trim().to_owned()),
                     waypoints,
                     name,
                 })
@@ -137,7 +165,10 @@ mod tests {
         assert_eq!(w.waypoints[1].z, 1500.0);
         let m = super::Mission::parse(b"[NStationary]\n  0_Static ships.Ship$USSEssexCV9 1 8015.45 4946.58 580.00 0.0 0 2\n[Buildings]\n  0_bld House$Hangar 0 10 20 90\n");
         assert_eq!(m.stationary[0].class, "ships.Ship$USSEssexCV9");
-        assert_eq!((m.stationary[0].flag, m.stationary[0].x, m.stationary[0].yaw), (1, 8015.45, 580.0));
+        assert_eq!(
+            (m.stationary[0].flag, m.stationary[0].x, m.stationary[0].yaw),
+            (1, 8015.45, 580.0)
+        );
         assert_eq!((m.buildings[0].flag, m.buildings[0].y), (0, 20.0));
     }
 }
