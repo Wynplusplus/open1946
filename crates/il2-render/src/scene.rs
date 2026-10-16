@@ -82,6 +82,12 @@ pub struct Loader<'a> {
     images: Vec<Image>,
     materials: HashMap<String, Option<MatInfo>>,
     pub warnings: Vec<String>,
+    /// Materials taken from elsewhere by name (lower-case, without directory or `.mat`), like the
+    /// runtime's `materialReplace`: a cockpit shows the aircraft's own skin.
+    pub replace: HashMap<String, String>,
+    /// Face groups whose material name ends with this (lower-case) are left out: cockpits draw
+    /// their `_night` materials only with the panel lights on.
+    pub skip_suffix: Option<String>,
 }
 
 impl<'a> Loader<'a> {
@@ -93,6 +99,8 @@ impl<'a> Loader<'a> {
             images: vec![Image::solid([255, 0, 255, 255])],
             materials: HashMap::new(),
             warnings: Vec::new(),
+            replace: HashMap::new(),
+            skip_suffix: None,
         }
     }
 
@@ -138,6 +146,16 @@ impl<'a> Loader<'a> {
 
     /// Resolves a material (with its `BasedOn` chain) to the texture and alpha test of its first layer.
     fn material(&mut self, path: &str) -> Option<MatInfo> {
+        let stem = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+        let stem = stem.strip_suffix(".mat").unwrap_or(&stem);
+        if let Some(other) = self
+            .replace
+            .get(stem)
+            .filter(|o| !o.eq_ignore_ascii_case(path))
+        {
+            let other = other.clone();
+            return self.material(&other);
+        }
         let key = path.to_ascii_lowercase();
         if let Some(&t) = self.materials.get(&key) {
             return t;
@@ -170,7 +188,12 @@ impl<'a> Loader<'a> {
                 // Untextured layers (`tfNoTexture`) draw their `ColorScale` colour.
                 let texture = match &l.texture {
                     Some(t) => self.texture(&format!("{}{t}", dir_of(&files[l.texture_from].0))),
-                    None => self.solid(l.color_scale),
+                    None => {
+                        if std::env::var_os("IL2_TRACE").is_some() {
+                            eprintln!("material {path}: untextured {:?}", l.color_scale);
+                        }
+                        self.solid(l.color_scale)
+                    }
                 };
                 MatInfo {
                     texture,
@@ -237,6 +260,13 @@ impl<'a> Loader<'a> {
             }
             for g in &lod.groups {
                 let mat_name = lod.materials.get(g.material).cloned().unwrap_or_default();
+                if self
+                    .skip_suffix
+                    .as_ref()
+                    .is_some_and(|x| mat_name.to_ascii_lowercase().ends_with(x.as_str()))
+                {
+                    continue;
+                }
                 let info = self
                     .material(&format!("{dir}{mat_name}.mat"))
                     .unwrap_or(MatInfo {

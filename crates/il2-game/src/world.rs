@@ -255,7 +255,7 @@ pub fn load_aircraft(
     }
     .unwrap_or((num("H", 2.0), num("Pitch", 10.0)));
     let hook_frames = loader.hier_hook_frames(&him, &rest).unwrap_or_default();
-    let cockpit = crate::cockpit::Cockpit::load(vfs, &classes, class);
+    let cockpit = crate::cockpit::Cockpit::load(vfs, &classes, class, &him);
     Ok(AircraftAssets {
         him,
         hook_frames,

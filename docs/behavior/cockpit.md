@@ -31,10 +31,20 @@ Cockpits use untextured layers (`tfNoTexture 1`) that draw their `ColorScale` co
 is the `Mask` material: black with zero alpha and blending on, which hides geometry without
 being seen. See `docs/formats/mat.md`.
 
+Cockpits ship 1×1 placeholder textures for the aircraft's skin materials (`Gloss1D0o`,
+`Matt1D0o`, `Gloss1D1o`, …, `OverlayD0o`). Most cockpit constructors replace them with the
+aircraft's own materials (`mesh.materialReplace("Gloss1D0o", aircraft.material(...))`), so the
+fuselage seen from inside wears the outside skin. OpenIL2 does this for every cockpit by name.
+
+Materials named `…_night` are the lit versions of gauge faces, drawn as extra face groups.
+`setNightMats(on)` enables them when the pilot switches on the panel lights. They are off at
+start, so OpenIL2 leaves them out.
+
 ## OpenIL2 controls
 
 F1 cockpit, F2 free orbit camera, F3 chase camera. In the cockpit, dragging with the left mouse
 button turns the head (up to 150° either side, 35° down, 80° up). These limits are OpenIL2's own.
+`IL2_HIDE=node,node` hides cockpit nodes (diagnostics).
 
 ## Instruments
 

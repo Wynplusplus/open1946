@@ -1543,7 +1543,6 @@ impl Instruments {
         // Whatever the constructor did, these are the flight model and the cockpit mesh.
         m.fields.insert("fm".into(), V::Sym("fm".into()));
         m.fields.insert("mesh".into(), V::Hier);
-        m.out.clear();
         let reflect = m.resolve(None, "reflectWorldToInstruments", "(F)V");
         Some(Instruments { m, reflect, error })
     }

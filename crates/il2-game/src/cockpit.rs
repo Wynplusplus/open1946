@@ -32,9 +32,36 @@ pub struct Cockpit {
 }
 
 impl Cockpit {
-    pub fn load(vfs: &Vfs, classes: &il2_data::Classes, class: &str) -> Option<Cockpit> {
+    /// `aircraft_him` is the aircraft's own model, whose skin materials the cockpit shows.
+    pub fn load(
+        vfs: &Vfs,
+        classes: &il2_data::Classes,
+        class: &str,
+        aircraft_him: &str,
+    ) -> Option<Cockpit> {
         let (cockpit_class, path) = classes.cockpit(class)?;
         let mut loader = Loader::new(vfs);
+        // The aircraft's skin, as it's loaded for the outside view.
+        loader.season = Some("summer".into());
+        loader.skip_suffix = Some("_night".into());
+        // Cockpits ship 1×1 placeholders for the skin materials and take the aircraft's at run
+        // time (`materialReplace("Gloss1D0o", …)`).
+        let dir = &aircraft_him[..aircraft_him.rfind('/').map_or(0, |i| i + 1)];
+        for kind in ["Gloss", "Matt"] {
+            for n in 1..=2 {
+                for d in 0..=2 {
+                    let name = format!("{kind}{n}D{d}o");
+                    loader
+                        .replace
+                        .insert(name.to_ascii_lowercase(), format!("{dir}{name}.mat"));
+                }
+            }
+        }
+        for d in 0..=2 {
+            loader
+                .replace
+                .insert(format!("overlayd{d}o"), format!("{dir}OverlayD{d}o.mat"));
+        }
         let mut mesh = loader.load_hier(&path, true).ok()?;
         mesh.textures = loader.take_images();
         if std::env::var_os("IL2_TRACE").is_some() {
@@ -97,6 +124,13 @@ impl Cockpit {
             if std::env::var_os("IL2_TRACE").is_some() {
                 if let Some(e) = &ins.error {
                     eprintln!("cockpit: {e}");
+                }
+            }
+        }
+        if let Ok(hide) = std::env::var("IL2_HIDE") {
+            for n in hide.split(',') {
+                if let Some(i) = self.rig.find(n) {
+                    self.visible[i] = false;
                 }
             }
         }
