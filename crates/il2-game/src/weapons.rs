@@ -330,12 +330,16 @@ pub fn advance(
             hits.push((b, Hit::Air(at)));
             continue;
         }
-        if let Some((id, node, at)) = crate::hitbox::first_hit(targets, b.prev, b.pos, b.owner) {
+        // Rounds of other machines and played-back tracks are for show.
+        let visual = b.owner == usize::MAX;
+        if let Some((id, node, at)) =
+            crate::hitbox::first_hit(targets, b.prev, b.pos, b.owner).filter(|_| !visual)
+        {
             let b = bullets.swap_remove(i);
             hits.push((b, Hit::Aircraft(id, node, at)));
             continue;
         }
-        if let Some((obj, at)) = objects.hit(b.prev, b.pos) {
+        if let Some((obj, at)) = objects.hit(b.prev, b.pos).filter(|_| !visual) {
             let at = DVec3::new(at.x, at.y, at.z.max(field.height_at(at.x, at.y)));
             let ty = b.ty().clone();
             let speed = b.vel.length();

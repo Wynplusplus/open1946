@@ -14,6 +14,7 @@ mod hud;
 mod joystick;
 mod menu;
 mod mission_objects;
+mod net;
 mod objectives;
 mod objects;
 mod particles;
@@ -76,6 +77,21 @@ struct Args {
     /// Render a menu screen to a PNG: `main|single|quick,out.png`.
     #[arg(long, value_delimiter = ',')]
     menu_shot: Option<Vec<String>>,
+    /// Host a multiplayer game on this UDP port (the flight's options go to those who join).
+    #[arg(long)]
+    host: Option<u16>,
+    /// Join a multiplayer game at this address (`host:port`), flying `--aircraft`.
+    #[arg(long)]
+    join: Option<String>,
+    /// Pilot name in multiplayer.
+    #[arg(long)]
+    name: Option<String>,
+    /// Start this far (x,y metres) from the usual start (given to multiplayer pilots).
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+    spawn_offset: Option<Vec<f64>>,
+    /// Fly this aircraft even in a mission that names another (multiplayer).
+    #[arg(long)]
+    force_aircraft: Option<String>,
     /// Leave the flight after this many seconds (automated runs).
     #[arg(long)]
     quit_after: Option<f64>,
@@ -210,6 +226,7 @@ fn build_targets(
     af: &airframe::Airframe,
     traffic: Option<&traffic::Traffic>,
     ground: Option<&ground::Ground>,
+    net: Option<&net::Net>,
 ) -> Vec<hitbox::Target> {
     let mut nodes = world::pose(assets, &sim.ct);
     af.apply(&mut nodes, sim);
@@ -225,6 +242,9 @@ fn build_targets(
     }
     if let Some(g) = ground {
         g.targets(&mut out);
+    }
+    if let Some(n) = net {
+        n.targets(&mut out);
     }
     out
 }
@@ -348,15 +368,34 @@ fn apply_aircraft_hits(
         }
         if *id == 0 {
             af.shot(sim, *node, tnt, &assets.toughness);
-        } else if let Some(t) = traffic.as_deref_mut() {
-            t.shot(id - 1, *node, tnt);
+        } else if *id < ground::ID_BASE {
+            if let Some(t) = traffic.as_deref_mut() {
+                t.shot(id - 1, *node, tnt);
+            }
         }
     }
 }
 
-/// The command-line options a recorded track repeats: everything but recording, playback and result
-/// options.
-fn record_options() -> Vec<String> {
+/// Our rounds that hit other pilots' aircraft: the damage goes to their owners.
+fn net_hits(combat: &Combat, net: &mut net::Net) {
+    for (b, h) in &combat.hits {
+        let weapons::Hit::Aircraft(id, node, _) = h else {
+            continue;
+        };
+        if *id >= net::ID_BASE {
+            let ty = b.ty();
+            let speed = b.vel.length();
+            let mut tnt = 0.5 * ty.mass * speed * speed * 2.4e-7;
+            if ty.power > 0.0 && ty.power_radius > 0.0 {
+                tnt += 0.5 * (ty.power + 0.03 * ty.mass);
+            }
+            net.shot(*id, *node, tnt);
+        }
+    }
+}
+
+/// Command-line options without the named ones (and their values).
+fn options_without(names: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     let mut skip = false;
     for a in std::env::args().skip(1) {
@@ -364,25 +403,31 @@ fn record_options() -> Vec<String> {
             skip = false;
             continue;
         }
-        if ["--record", "--play", "--result", "--root", "--quit-after"].contains(&a.as_str()) {
+        if names.contains(&a.as_str()) {
             skip = true;
             continue;
         }
-        if [
-            "--record=",
-            "--play=",
-            "--result=",
-            "--root=",
-            "--quit-after=",
-        ]
-        .iter()
-        .any(|p| a.starts_with(p))
-        {
+        if names.iter().any(|n| a.starts_with(&format!("{n}="))) {
             continue;
         }
         out.push(a);
     }
     out
+}
+
+/// The command-line options a recorded track repeats: everything but recording, playback and result
+/// options.
+fn record_options() -> Vec<String> {
+    options_without(&[
+        "--record",
+        "--play",
+        "--result",
+        "--root",
+        "--quit-after",
+        "--host",
+        "--join",
+        "--name",
+    ])
 }
 
 struct Playback {
@@ -560,6 +605,8 @@ struct Game {
     mission: Option<il2_formats::mission::Mission>,
     devicelink: Option<devicelink::DeviceLink>,
     recorder: Option<track::Recorder>,
+    net: Option<net::Net>,
+    fms: il2_data::FlightModels,
     playback: Option<Playback>,
     /// Gun data by name, for rounds of played-back tracks.
     gun_specs: std::collections::HashMap<String, std::sync::Arc<weapons::GunSpec>>,
@@ -738,6 +785,44 @@ impl Game {
                 }
             }
         }
+    }
+
+    /// Multiplayer: messages in (damage to us, others' rounds, news), our state out.
+    fn net_step(&mut self) {
+        let Some(net) = self.net.as_mut() else { return };
+        for e in net.poll(&self.vfs, &self.fms, &self.field) {
+            match e {
+                net::Event::Damage(chunk, n) => {
+                    self.airframe.next_dmg_levels(&mut self.sim, n, &chunk)
+                }
+                net::Event::Message(m) => self.hud.message(m),
+                net::Event::Fire(spawns) => {
+                    for b in spawns {
+                        let Some(spec) = self.gun_specs.get(&b.gun).cloned().or_else(|| {
+                            let classes = il2_data::Classes::new(&self.vfs, &self.fms.keys);
+                            let g = weapons::Armoury::default().gun(&classes, &b.gun)?;
+                            self.gun_specs.insert(b.gun.clone(), g.clone());
+                            Some(g)
+                        }) else {
+                            continue;
+                        };
+                        self.combat.bullets.push(weapons::Bullet {
+                            pos: b.pos,
+                            prev: b.pos,
+                            vel: b.vel.as_dvec3(),
+                            life: b.life as f64,
+                            kind: (b.kind as usize).min(spec.bullets.len().saturating_sub(1)),
+                            spec,
+                            tracer: b.tracer,
+                            owner: usize::MAX,
+                            fuse: b.fuse.map(|v| v as f64),
+                            id: 0,
+                        });
+                    }
+                }
+            }
+        }
+        net.send_own(&self.sim, &self.combat.bullets);
     }
 
     /// Track playback: aircraft and ground units take the recorded states, events are replayed.
@@ -1019,6 +1104,7 @@ impl Game {
         self.last = now;
         self.update_inputs(dt);
         self.device_link();
+        self.net_step();
         self.acc += dt;
         self.clock += dt;
         if self.playback.is_some() {
@@ -1043,6 +1129,7 @@ impl Game {
                 &self.airframe,
                 self.traffic.as_ref(),
                 self.ground.as_ref(),
+                self.net.as_ref(),
             );
             self.combat
                 .step(&mut self.sim, &triggers, field, &mut self.view, &targets);
@@ -1053,6 +1140,9 @@ impl Game {
                 &self.assets,
                 self.traffic.as_mut(),
             );
+            if let Some(n) = self.net.as_mut() {
+                net_hits(&self.combat, n);
+            }
             aircraft_blasts(
                 &self.combat,
                 &targets,
@@ -1240,6 +1330,9 @@ impl Game {
             .unwrap_or_default();
         if let Some(g) = self.ground.as_mut() {
             outside.extend(g.prepare(r, eye));
+        }
+        if let Some(n) = self.net.as_mut() {
+            outside.extend(n.prepare(r, eye));
         }
         let fg = match fg_vp {
             Some(m) => Some((m, cockpit.as_slice())),
@@ -1654,6 +1747,47 @@ fn main() {
         );
         playback_track = Some(t);
     }
+    // Multiplayer: a joining pilot flies the host's flight in its own aircraft.
+    let mut net_conn = None;
+    let pilot = args
+        .name
+        .clone()
+        .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "pilot".into()));
+    if let Some(addr) = args.join.clone() {
+        let (n, options) =
+            net::Net::join(&addr, &pilot, &args.aircraft, 1).unwrap_or_else(|e| fail(e));
+        let old = std::mem::replace(
+            &mut args,
+            Args::parse_from(std::iter::once("openil2".to_owned()).chain(options)),
+        );
+        args.root = old.root;
+        args.aircraft = old.aircraft.clone();
+        args.force_aircraft = Some(old.aircraft);
+        args.quit_after = old.quit_after;
+        args.record = old.record;
+        args.result = old.result;
+        net_conn = Some(n);
+    }
+    if let Some(port) = args.host {
+        let options = options_without(&[
+            "--record",
+            "--play",
+            "--result",
+            "--root",
+            "--quit-after",
+            "--host",
+            "--join",
+            "--name",
+            "--aircraft",
+        ]);
+        let mut n = net::Net::host(port, &pilot, options).unwrap_or_else(|e| fail(e));
+        n.set_own(&args.aircraft, 1);
+        net_conn = Some(n);
+    }
+    if net_conn.is_some() {
+        // Every machine would fly its own copy of the mission's AI: multiplayer flies without it.
+        args.no_ai = true;
+    }
     if let Some(bt) = &args.bomb_test {
         print!(
             "{}",
@@ -1689,7 +1823,10 @@ fn main() {
             .player()
             .unwrap_or_else(|| fail("mission has no player flight"));
         args.map = format!("maps/{}", m.map);
-        args.aircraft = wing.class.clone();
+        args.aircraft = args
+            .force_aircraft
+            .clone()
+            .unwrap_or_else(|| wing.class.clone());
         fuel = wing.fuel_percent / 100.0;
         eprintln!(
             "mission: {} on {}, flight {} ({} x {})",
@@ -1881,6 +2018,12 @@ fn main() {
         }
     };
     sim.fuel *= fuel;
+    if let Some(o) = &args.spawn_offset {
+        sim.pos.x += o.first().copied().unwrap_or(0.0);
+        sim.pos.y += o.get(1).copied().unwrap_or(0.0);
+        let ground = field.height_at(sim.pos.x, sim.pos.y);
+        sim.pos.z = sim.pos.z.max(ground + assets.parked.0);
+    }
     sim.structure.twin_fin = assets.twin_fin;
     if let Some(class) = &args.enemy {
         let fwd = sim.ori * DVec3::X;
@@ -1950,7 +2093,8 @@ fn main() {
         let mut max_g = (0.0f64, 0.0f64);
         for _ in 0..(args.seconds / TICK) as usize {
             sim.tick(&inputs, &ground);
-            let targets = build_targets(&sim, &assets, &af, traffic.as_ref(), columns.as_ref());
+            let targets =
+                build_targets(&sim, &assets, &af, traffic.as_ref(), columns.as_ref(), None);
             combat.step(&mut sim, &triggers, &field, &mut view, &targets);
             apply_aircraft_hits(&combat, &mut sim, &mut af, &assets, traffic.as_mut());
             aircraft_blasts(
@@ -2175,6 +2319,8 @@ fn main() {
             idx: 0,
             t: 0.0,
         }),
+        net: net_conn.take(),
+        fms: il2_data::FlightModels::open(&vfs).unwrap_or_else(|e| fail(e)),
         gun_specs: {
             let mut m = std::collections::HashMap::new();
             for g in guns
@@ -2248,6 +2394,14 @@ fn main() {
     el.run_app(&mut game).expect("run");
     if let Some(r) = game.recorder.as_mut() {
         r.flush();
+    }
+    if let Some(n) = &game.net {
+        if std::env::var_os("IL2_TRACE").is_some() {
+            for r in &n.remotes {
+                eprintln!("remote pilot {} ({}): {:.0?}", r.name, r.id, r.sim.pos);
+            }
+        }
+        n.bye();
     }
     if std::env::var_os("IL2_TRACE").is_some() {
         eprintln!(

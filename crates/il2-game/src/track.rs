@@ -51,76 +51,140 @@ pub struct Frame {
     pub bullets: Vec<BulletSpawn>,
 }
 
-struct W<'a>(&'a mut Vec<u8>);
+pub(crate) struct W<'a>(pub(crate) &'a mut Vec<u8>);
 
 impl W<'_> {
-    fn u8(&mut self, v: u8) {
+    pub(crate) fn u8(&mut self, v: u8) {
         self.0.push(v);
     }
-    fn u16(&mut self, v: usize) {
+    pub(crate) fn u16(&mut self, v: usize) {
         self.0.extend((v.min(65535) as u16).to_le_bytes());
     }
-    fn u32(&mut self, v: u32) {
+    pub(crate) fn u32(&mut self, v: u32) {
         self.0.extend(v.to_le_bytes());
     }
-    fn f32(&mut self, v: f32) {
+    pub(crate) fn f32(&mut self, v: f32) {
         self.0.extend(v.to_le_bytes());
     }
-    fn f64(&mut self, v: f64) {
+    pub(crate) fn f64(&mut self, v: f64) {
         self.0.extend(v.to_le_bytes());
     }
-    fn str(&mut self, s: &str) {
+    pub(crate) fn str(&mut self, s: &str) {
         self.u16(s.len());
         self.0.extend(&s.as_bytes()[..s.len().min(65535)]);
     }
-    fn dvec3(&mut self, v: DVec3) {
+    pub(crate) fn dvec3(&mut self, v: DVec3) {
         self.f64(v.x);
         self.f64(v.y);
         self.f64(v.z);
     }
-    fn vec3(&mut self, v: Vec3) {
+    pub(crate) fn vec3(&mut self, v: Vec3) {
         self.f32(v.x);
         self.f32(v.y);
         self.f32(v.z);
     }
 }
 
-struct R<'a> {
-    d: &'a [u8],
-    p: usize,
+pub(crate) struct R<'a> {
+    pub(crate) d: &'a [u8],
+    pub(crate) p: usize,
 }
 
 impl R<'_> {
-    fn take(&mut self, n: usize) -> Option<&[u8]> {
+    pub(crate) fn take(&mut self, n: usize) -> Option<&[u8]> {
         let s = self.d.get(self.p..self.p + n)?;
         self.p += n;
         Some(s)
     }
-    fn u8(&mut self) -> Option<u8> {
+    pub(crate) fn u8(&mut self) -> Option<u8> {
         Some(self.take(1)?[0])
     }
-    fn u16(&mut self) -> Option<usize> {
+    pub(crate) fn u16(&mut self) -> Option<usize> {
         Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?) as usize)
     }
-    fn u32(&mut self) -> Option<u32> {
+    pub(crate) fn u32(&mut self) -> Option<u32> {
         Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
-    fn f32(&mut self) -> Option<f32> {
+    pub(crate) fn f32(&mut self) -> Option<f32> {
         Some(f32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
-    fn f64(&mut self) -> Option<f64> {
+    pub(crate) fn f64(&mut self) -> Option<f64> {
         Some(f64::from_le_bytes(self.take(8)?.try_into().ok()?))
     }
-    fn str(&mut self) -> Option<String> {
+    pub(crate) fn str(&mut self) -> Option<String> {
         let n = self.u16()?;
         Some(String::from_utf8_lossy(self.take(n)?).into_owned())
     }
-    fn dvec3(&mut self) -> Option<DVec3> {
+    pub(crate) fn dvec3(&mut self) -> Option<DVec3> {
         Some(DVec3::new(self.f64()?, self.f64()?, self.f64()?))
     }
-    fn vec3(&mut self) -> Option<Vec3> {
+    pub(crate) fn vec3(&mut self) -> Option<Vec3> {
         Some(Vec3::new(self.f32()?, self.f32()?, self.f32()?))
     }
+}
+
+/// Encodes one aircraft's state (as in track frames).
+pub(crate) fn put_state(w: &mut W, a: &AircraftState) {
+    w.u32(a.id);
+    w.dvec3(a.pos);
+    for c in a.ori.to_array() {
+        w.f32(c);
+    }
+    w.vec3(a.vel);
+    for c in a.ct {
+        w.f32(c);
+    }
+    w.u8(a.destroyed as u8);
+}
+
+pub(crate) fn get_state(r: &mut R) -> Option<AircraftState> {
+    let id = r.u32()?;
+    let pos = r.dvec3()?;
+    let ori = Quat::from_array([r.f32()?, r.f32()?, r.f32()?, r.f32()?]);
+    let vel = r.vec3()?;
+    let mut ct = [0f32; 7];
+    for c in &mut ct {
+        *c = r.f32()?;
+    }
+    Some(AircraftState {
+        id,
+        pos,
+        ori,
+        vel,
+        ct,
+        destroyed: r.u8()? != 0,
+    })
+}
+
+pub(crate) fn put_bullet(w: &mut W, b: &BulletSpawn) {
+    w.dvec3(b.pos);
+    w.vec3(b.vel);
+    w.str(&b.gun);
+    w.u8(b.kind);
+    w.u8(b.tracer as u8);
+    w.f32(b.life);
+    w.f32(b.fuse.unwrap_or(-1.0));
+}
+
+pub(crate) fn get_bullet(r: &mut R) -> Option<BulletSpawn> {
+    let (pos, vel, gun, kind, tracer, life, fuse) = (
+        r.dvec3()?,
+        r.vec3()?,
+        r.str()?,
+        r.u8()?,
+        r.u8()? != 0,
+        r.f32()?,
+        r.f32()?,
+    );
+    Some(BulletSpawn {
+        pos,
+        vel,
+        gun,
+        kind,
+        tracer,
+        life,
+        fuse: (fuse >= 0.0).then_some(fuse),
+    })
 }
 
 /// Writes `options` (the command line that sets the flight up) and then frames.
