@@ -50,7 +50,8 @@ impl Hud {
             }
         }
         let (mut x, mut y, mut row) = (8u32, 0u32, 0u32);
-        for c in (32u8..127).map(char::from).chain("°".chars()) {
+        // ASCII, Latin-1 and Latin Extended-A: the install's English, German, French and Polish texts.
+        for c in (32u32..127).chain(160..384).filter_map(char::from_u32) {
             let g = scaled.scaled_glyph(c);
             let advance = scaled.h_advance(g.id);
             let Some(outlined) = font.outline_glyph(g) else {
@@ -167,6 +168,27 @@ impl Hud {
                 pen += adv;
             }
         }
+    }
+
+    /// Starts a new overlay (menus draw with `rect` and `text`, then `finish`).
+    pub fn begin(&mut self) {
+        self.verts.clear();
+    }
+
+    pub fn finish(&self) -> &[OverlayVertex] {
+        &self.verts
+    }
+
+    /// Width of `s` in pixels.
+    pub fn text_width(&self, s: &str) -> f32 {
+        s.chars()
+            .filter_map(|c| self.glyphs.get(&c))
+            .map(|g| g.advance)
+            .sum()
+    }
+
+    pub fn line_height(&self) -> f32 {
+        self.line
     }
 
     /// Builds this frame's overlay: `lines` in the bottom-left speed bar, messages above, and the

@@ -25,7 +25,10 @@ No game files, decompiled code or key material are part of this repository. Form
 | Weapons | Loadouts and gun, bomb and rocket data from the install; ballistics, tracers, house destruction |
 | Effects and sound | Particle effects from `.eff` files for impacts and explosions; engine, gun and explosion sounds from the game's presets (ALSA) |
 
-Not yet: AI, moving ground units, menus, campaigns, multiplayer (see `docs/roadmap.md`).
+| AI and the world | AI flights fly missions (takeoff, waypoints, formation, air combat, level bombing, landing), gunners, anti-aircraft guns, moving ground and naval columns |
+| Menus | Single missions with localized briefings, Quick Mission Builder from the install's templates |
+
+Not yet: campaigns, track recording, multiplayer, DeviceLink (see `docs/roadmap.md`).
 
 ## Usage
 
@@ -39,6 +42,9 @@ target/release/il2 stat
 target/release/il2 cat com/maddox/il2/objects/air.ini
 target/release/il2 names --out names.txt    # recover archive path names (~75%)
 target/release/il2 parse-all --names names.txt
+
+# Menus: single missions with briefings, Quick Mission Builder (no options = menus)
+target/release/openil2
 
 # Fly (arrows: stick, Z/X: rudder, PageUp/PageDown or 1-9/0/W: throttle, F/V: flaps, G: gear, B: brakes,
 #      I: start/stop engines, R: radiator (auto / 33 / 67 / 100 %), W: emergency boost, ,/.: elevator trim, [/]: aileron trim, ;/': rudder trim, N: dive brake, L: tail wheel lock, O: prop pitch auto/manual, Q/E: prop lever,

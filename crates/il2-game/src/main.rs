@@ -11,6 +11,7 @@ mod gunners;
 mod hitbox;
 mod hud;
 mod joystick;
+mod menu;
 mod mission_objects;
 mod objects;
 mod particles;
@@ -69,6 +70,12 @@ struct Args {
     /// An AI aircraft of this class 150 m ahead, flying straight (gunnery practice, tests).
     #[arg(long)]
     enemy: Option<String>,
+    /// Render a menu screen to a PNG: `main|single|quick,out.png`.
+    #[arg(long, value_delimiter = ',')]
+    menu_shot: Option<Vec<String>>,
+    /// Show the menus (also the default without any options).
+    #[arg(long)]
+    menu: bool,
     /// Leave out the mission's AI aircraft.
     #[arg(long)]
     no_ai: bool,
@@ -1250,6 +1257,19 @@ enum Start {
 
 fn main() {
     let mut args = Args::parse();
+    if let Some(ms) = &args.menu_shot {
+        menu::screenshot(
+            args.root.clone(),
+            &ms[0],
+            std::path::Path::new(ms.get(1).map_or("menu.png", |s| s.as_str())),
+        );
+        return;
+    }
+    // Without any options: the menus.
+    if args.menu || std::env::args().len() == 1 {
+        menu::run(args.root.clone());
+        return;
+    }
     let vfs = il2_vfs::Vfs::open_install(&args.root).unwrap_or_else(|e| fail(e));
     let fms = il2_data::FlightModels::open(&vfs).unwrap_or_else(|e| fail(e));
     if args.survey {
@@ -1279,7 +1299,12 @@ fn main() {
     let mut start = Start::Default;
     let mut fuel = 1.0;
     let mission = args.mission.as_ref().map(|path| {
-        il2_formats::mission::Mission::parse(&vfs.read(path).unwrap_or_else(|e| fail(e)))
+        let data = if std::path::Path::new(path).is_absolute() {
+            std::fs::read(path).unwrap_or_else(|e| fail(e))
+        } else {
+            vfs.read(path).unwrap_or_else(|e| fail(e))
+        };
+        il2_formats::mission::Mission::parse(&data)
     });
     if let (Some(path), Some(m)) = (&args.mission, &mission) {
         let wing = m
