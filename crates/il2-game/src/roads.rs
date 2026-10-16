@@ -35,6 +35,8 @@ pub struct Roads {
     cols: usize,
     rows: usize,
     types: Vec<u8>,
+    /// Land-type slots that are water.
+    water: [bool; 32],
     /// Texture per kind (`None` if the map has none).
     textures: Vec<Option<Image>>,
     built_for: Option<(i64, i64)>,
@@ -42,7 +44,7 @@ pub struct Roads {
 }
 
 impl Roads {
-    pub fn load(vfs: &Vfs, ini_path: &str, types: &(u32, u32, Vec<u8>)) -> Option<Self> {
+    pub fn load(vfs: &Vfs, ini_path: &str, types: &(u32, u32, Vec<u8>), water: [bool; 32]) -> Option<Self> {
         let ini = SectFile::parse(&vfs.read(ini_path).ok()?);
         let sect = ini.section_ci("ROADS")?;
         let textures = KINDS
@@ -55,7 +57,7 @@ impl Roads {
             })
             .collect();
         let (w, h, t) = types;
-        Some(Roads { cols: *w as usize, rows: *h as usize, types: t.clone(), textures, built_for: None, origin: DVec3::ZERO })
+        Some(Roads { cols: *w as usize, rows: *h as usize, types: t.clone(), water, textures, built_for: None, origin: DVec3::ZERO })
     }
 
     fn has(&self, c: i64, r: i64, bit: u8) -> bool {
@@ -63,7 +65,7 @@ impl Roads {
     }
 
     fn water(&self, c: i64, r: i64) -> bool {
-        c >= 0 && r >= 0 && (c as usize) < self.cols && (r as usize) < self.rows && self.types[r as usize * self.cols + c as usize] & 31 >= 28
+        c >= 0 && r >= 0 && (c as usize) < self.cols && (r as usize) < self.rows && self.water[(self.types[r as usize * self.cols + c as usize] & 31) as usize]
     }
 
     /// World position of a land-type pixel's centre.

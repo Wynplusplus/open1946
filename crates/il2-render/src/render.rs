@@ -77,6 +77,8 @@ pub struct TerrainData {
     pub fields: Vec<Image>,
     /// Repeat length in metres per slot.
     pub tile: [f32; 32],
+    /// Slots drawn as water: water-group slots (28..31) whose texture is a water texture.
+    pub water: [bool; 32],
 }
 
 pub struct GpuTerrain {
@@ -590,14 +592,18 @@ impl Renderer {
     }
 
     pub fn upload(&self, mesh: &MeshData) -> GpuMesh {
+        // Buffers can't be empty; an empty mesh gets one unused vertex and triangle.
+        let one_vertex = [Vertex::default()];
+        let vertices: &[Vertex] = if mesh.vertices.is_empty() { &one_vertex } else { &mesh.vertices };
+        let indices: &[u32] = if mesh.indices.is_empty() { &[0, 0, 0] } else { &mesh.indices };
         let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vertices"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
+            contents: bytemuck::cast_slice(vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let ibuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("indices"),
-            contents: bytemuck::cast_slice(&mesh.indices),
+            contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX,
         });
         let instance = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -690,6 +696,12 @@ impl Renderer {
         info[1] = *w as f32;
         info[2] = *h as f32;
         info[4..].copy_from_slice(&t.tile);
+        // Water slots are flagged by a negative repeat length.
+        for (i, w) in t.water.iter().enumerate() {
+            if *w {
+                info[4 + i] = -info[4 + i];
+            }
+        }
         let info_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("terrain info"),
             contents: bytemuck::cast_slice(&info),

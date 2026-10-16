@@ -30,6 +30,12 @@ from east (unlike `.static` houses).
   (`z = 0` on shipped maps).
 - `vehicles.planes.Plane$X`: `technics.ini [X] Class air.Y` names an aircraft class; its default model is
   shown with the gear down ("Static aircraft").
+- `vehicles.aeronautics.Aeronautics$X` (barrage and observation balloons): `technics.ini [X]` with
+  `MeshAnchor*`, `MeshBalloon*`, `MeshRope*` (season suffix as above), `Height` (25–4001, default 25) and
+  `RopeSegLength` (10–1000, default 10). The anchor stands like a stationary object; the balloon floats `Height`
+  m above the ground; the rope is the rope mesh (centred on its origin) repeated `1 + ⌊Height/RopeSegLength⌋`
+  times with centres at `top − i·len − len/2`. Beyond 50 m the runtime draws the rope as lines instead, and
+  not at all beyond 750 m.
 - `vehicles.stationary.Smoke$*`, `Campfire$*`, `Siren$*`, `vehicles.lights.Searchlight$*`,
   `vehicles.radios.Beacon$*`: effects and sounds (TODO).
 

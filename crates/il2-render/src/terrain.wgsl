@@ -48,10 +48,14 @@ fn vs_main(v: VsIn) -> VsOut {
 }
 
 fn tile_len(slot: u32) -> f32 {
-    return info.tile[slot / 4u][slot % 4u];
+    return abs(info.tile[slot / 4u][slot % 4u]);
 }
 
-// rgb: field colour, a: 1 for water slots (28..31)
+fn is_water(slot: u32) -> bool {
+    return info.tile[slot / 4u][slot % 4u] < 0.0;
+}
+
+// rgb: field colour, a: 1 for water slots
 fn field(col: i32, row: i32, xy: vec2<f32>) -> vec4<f32> {
     let cols = i32(info.grid.y);
     let rows = i32(info.grid.z);
@@ -59,7 +63,7 @@ fn field(col: i32, row: i32, xy: vec2<f32>) -> vec4<f32> {
     let r = clamp(row, 0, rows - 1);
     let slot = textureLoad(types, vec2<i32>(c, r), 0).r & 31u;
     let rgb = textureSample(fields, samp, xy / tile_len(slot), i32(slot)).rgb;
-    return vec4<f32>(rgb, select(0.0, 1.0, slot >= 28u));
+    return vec4<f32>(rgb, select(0.0, 1.0, is_water(slot)));
 }
 
 @fragment

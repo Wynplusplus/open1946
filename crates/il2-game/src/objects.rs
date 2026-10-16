@@ -250,6 +250,10 @@ impl<'a> Builder<'a> {
         c
     }
 
+    pub fn ground(&self, x: f64, y: f64) -> f64 {
+        self.field.height_at(x, y)
+    }
+
     /// Places an instance of `class` at `(x, y)` with `yaw` degrees counter-clockwise from east.
     pub fn place(&mut self, (class, lift): (u32, f32), x: f64, y: f64, yaw: f64, stand: Stand) {
         let field = self.field;

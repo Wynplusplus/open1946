@@ -84,15 +84,23 @@ impl<'a> Classes<'a> {
         let c = self.load(&full)?;
         let mut flight_model = None;
         let mut meshes: Vec<String> = Vec::new();
+        let mut default = None;
+        let mut last = "";
         for s in c.strings() {
             let l = s.to_ascii_lowercase();
             if l.starts_with("flightmodels/") && l.ends_with(".fmd") && flight_model.is_none() {
                 flight_model = Some(s.to_owned());
-            } else if l.starts_with("3do/plane/") && l.ends_with("/hier.him") && !meshes.iter().any(|m| m == s) {
+            } else if l.starts_with("3do/plane/") && l.ends_with(".him") && !meshes.iter().any(|m| m == s) {
+                // `Property.set(cls, "meshName", path)`: the key directly precedes its value in the
+                // constant pool.
+                if last == "meshName" && default.is_none() {
+                    default = Some(s.to_owned());
+                }
                 meshes.push(s.to_owned());
             }
+            last = s;
         }
-        meshes.sort_by_key(|m| m.contains('('));
+        meshes.sort_by_key(|m| (Some(m) != default.as_ref(), m.contains('(')));
         Some(AircraftClass { flight_model: flight_model?, meshes })
     }
 }

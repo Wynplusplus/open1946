@@ -37,7 +37,9 @@ One byte per height-map pixel. **Verified** from the runtime's road lookup: land
 `x ∈ [200c, 200c + 200)` and `(rows − 1) − y/200 ∈ [r, r + 1)`, i.e. the height-map cell between height
 pixels `(c, r)` and `(c + 1, r + 1)`; its centre is at `(200(c + ½), 200(rows − 1.5 − r))`. The low 5 bits select one of 32 field slots in the order of `[FIELDS]`:
 `LowLand0..3`, `MidLand0..3`, `Mount0..3`, `Country0..3`, `City0..3`, `AirField0..3`, `Wood0..3`, `Water0..3`.
-Slots 28–31 are water. The upper 3 bits are roads (see below).
+Slots 28–31 are the water group. Some maps put land textures there (Kurland: `Water2 = land/summer/mount.tga`);
+OpenIL2 draws a water-group slot as water only if its texture is under `water/` (empty slots follow `Water0`).
+The upper 3 bits are roads (see below).
 
 `[FIELDS]` values are texture paths relative to `maps/_Tex/`, optionally followed by `,N`. The native loader
 accepts only `N ∈ {−2, 1, 2, 4, 8}` (others: warning, treated as 1); OpenIL2 treats it as a tiling scale. Slot 0 (`LowLand0`) is required, and other slots may be empty.

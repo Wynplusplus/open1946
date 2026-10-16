@@ -447,6 +447,7 @@ impl Loader<'_> {
 
         let mut fields: Vec<Option<Image>> = Vec::with_capacity(32);
         let mut tile = [400.0f32; 32];
+        let mut water_tex = [false; 32];
         for (g, group) in FIELD_GROUPS.iter().enumerate() {
             for v in 0..4 {
                 let slot = g * 4 + v;
@@ -456,6 +457,7 @@ impl Loader<'_> {
                     if let Some(s) = scale {
                         tile[slot] = 400.0 * s;
                     }
+                    water_tex[slot] = file.to_ascii_lowercase().starts_with("water/");
                     let path = format!("maps/_Tex/{file}");
                     match self.vfs.read(&path).map_err(|e| e.to_string()).and_then(|d| decode_image(&d, &path)) {
                         Ok(img) => Some(resize(img, FIELD_SIZE)),
@@ -474,7 +476,13 @@ impl Loader<'_> {
         let fields: Vec<Image> = (0..32)
             .map(|i| fields[i].clone().or_else(|| fields[i / 4 * 4].clone()).unwrap_or_else(|| fallback.clone()))
             .collect();
-        Ok(TerrainData { mesh, cell: il2_formats::map::PIXEL_SIZE, types, fields, tile })
+        // Water-group slots are water when their texture (or the group's first, for empty slots) is.
+        let mut water = [false; 32];
+        for (i, w) in water.iter_mut().enumerate().skip(28) {
+            let has = value("FIELDS", &format!("Water{}", i - 28)).is_some();
+            *w = if has { water_tex[i] } else { water_tex[28] };
+        }
+        Ok(TerrainData { mesh, cell: il2_formats::map::PIXEL_SIZE, types, fields, tile, water })
     }
 }
 

@@ -440,7 +440,7 @@ fn main() {
     }
     eprintln!("map objects: {} placed in {:.1} s ({} classes skipped)", map_objects.len(), t0.elapsed().as_secs_f64(), map_objects.skipped.len());
     let mut forest = forest::Forest::load(&vfs, &args.map, &terrain.types);
-    let mut roads = roads::Roads::load(&vfs, &args.map, &terrain.types);
+    let mut roads = roads::Roads::load(&vfs, &args.map, &terrain.types, terrain.water);
     let mut assets = assets;
     let plane_mesh = std::mem::take(&mut assets.mesh);
     let (h, pitch) = assets.parked;
