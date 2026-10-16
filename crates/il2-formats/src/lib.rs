@@ -9,6 +9,7 @@ pub mod mat;
 pub mod msh;
 pub mod sectfile;
 pub mod statics;
+pub mod tga;
 
 pub use binsect::{RowFile, RowSection, Value};
 pub use sectfile::{Section, SectFile};

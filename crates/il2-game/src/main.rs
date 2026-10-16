@@ -1,3 +1,4 @@
+mod objects;
 mod world;
 
 use clap::Parser;
@@ -6,7 +7,7 @@ use gilrs::{Axis, Gilrs};
 use glam::{DMat4, DVec3, Mat4};
 use il2_fm::{Inputs, Sim, TICK};
 use il2_formats::map::HeightField;
-use il2_render::{GpuMesh, Renderer};
+use il2_render::{GpuMesh, InstanceRaw, Renderer};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,6 +31,9 @@ struct Args {
     /// Mission file (e.g. Missions/Single/SK/Bf-109F-4/Bf-109F-4_1.mis); sets map, aircraft and start.
     #[arg(long)]
     mission: Option<String>,
+    /// Start position "x,y" in world metres (without a mission; default: map centre).
+    #[arg(long, value_delimiter = ',')]
+    at: Option<Vec<f64>>,
     /// Start altitude above ground, metres (without a mission).
     #[arg(long, default_value_t = 1500.0)]
     agl: f64,
@@ -75,6 +79,9 @@ struct Game {
     renderer: Option<Renderer>,
     terrain: Option<il2_render::GpuTerrain>,
     plane: Option<GpuMesh>,
+    objects: objects::MapObjects,
+    objects_gpu: Option<GpuMesh>,
+    instances: Vec<InstanceRaw>,
     keys: HashSet<KeyCode>,
     #[cfg(feature = "gamepad")]
     gilrs: Option<Gilrs>,
@@ -148,7 +155,12 @@ impl Game {
         let (vp, eye) = chase_camera(s, field, r.aspect());
         place(r, terrain, plane, s, eye);
         r.set_nodes(plane, &world::pose(&self.assets, &s.ct));
-        r.render(vp, 22.0, Some(terrain), &[plane]);
+        let draws = match &self.objects_gpu {
+            Some(m) => self.objects.gather(m, eye, &mut self.instances),
+            None => Vec::new(),
+        };
+        r.set_instances(&self.instances);
+        r.render(vp, 22.0, Some(terrain), &[plane], &draws);
 
         self.title_timer -= dt;
         if self.title_timer <= 0.0 {
@@ -179,6 +191,7 @@ impl ApplicationHandler for Game {
         let r = Renderer::new(window);
         self.terrain = self.terrain_data.take().map(|d| r.upload_terrain(&d));
         self.plane = self.plane_data.take().map(|d| r.upload(&d));
+        self.objects_gpu = self.objects.data.take().map(|d| r.upload(&d));
         self.renderer = Some(r);
         self.last = Instant::now();
     }
@@ -383,13 +396,22 @@ fn main() {
         }
         t
     };
+    let t0 = Instant::now();
+    let mut map_objects = objects::MapObjects::load(&vfs, &args.map, &field).unwrap_or_else(|e| fail(e));
+    eprintln!("map objects: {} placed in {:.1} s", map_objects.len(), t0.elapsed().as_secs_f64());
     let mut assets = assets;
     let plane_mesh = std::mem::take(&mut assets.mesh);
     let (h, pitch) = assets.parked;
     let mut sim = match start {
         Start::Takeoff { x, y, heading } => world::spawn_on_ground(assets.fm.clone(), &field, x, y, heading, h, pitch),
         Start::Air { pos, toward, speed } => world::spawn_at(assets.fm.clone(), pos, toward, speed),
-        Start::Default => world::spawn_airborne(assets.fm.clone(), &field, args.agl, 110.0),
+        Start::Default => {
+            let mut sim = world::spawn_airborne(assets.fm.clone(), &field, args.agl, 110.0);
+            if let Some([x, y]) = args.at.as_deref().and_then(|a| <[f64; 2]>::try_from(a).ok()) {
+                sim.pos = DVec3::new(x, y, field.height_at(x, y) + args.agl);
+            }
+            sim
+        }
     };
     sim.fuel *= fuel;
     let on_ground_start = matches!(start, Start::Takeoff { .. });
@@ -418,8 +440,9 @@ fn main() {
             sim.tick(&inputs, &ground);
         }
         let (w, h) = (1280, 720);
-        let r = Renderer::headless(w, h);
+        let mut r = Renderer::headless(w, h);
         let (terrain, plane) = (r.upload_terrain(&terrain), r.upload(&plane_mesh));
+        let objects_gpu = map_objects.data.take().map(|d| r.upload(&d));
         let (mut vp, mut eye) = chase_camera(&sim, &field, w as f32 / h as f32);
         if let Some(o) = &args.orbit {
             let fwd = sim.ori * DVec3::X;
@@ -441,7 +464,21 @@ fn main() {
             eprintln!("ct: {:?}", sim.ct);
         }
         r.set_nodes(&plane, &posed);
-        let px = r.screenshot(vp, 22.0, Some(&terrain), &[&plane]);
+        let mut instances = Vec::new();
+        let t0 = Instant::now();
+        let draws = match &objects_gpu {
+            Some(m) => map_objects.gather(m, eye, &mut instances),
+            None => Vec::new(),
+        };
+        eprintln!(
+            "drawing {} object instances in {} draws (gathered in {:.2} ms, radius {:.0} m)",
+            instances.len(),
+            draws.len(),
+            t0.elapsed().as_secs_f64() * 1e3,
+            map_objects.max_dist()
+        );
+        r.set_instances(&instances);
+        let px = r.screenshot(vp, 22.0, Some(&terrain), &[&plane], &draws);
         image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).unwrap_or_else(|e| fail(e));
         return;
     }
@@ -455,6 +492,9 @@ fn main() {
         renderer: None,
         terrain: None,
         plane: None,
+        objects: map_objects,
+        objects_gpu: None,
+        instances: Vec::new(),
         keys: HashSet::new(),
         #[cfg(feature = "gamepad")]
         gilrs: Gilrs::new().ok(),

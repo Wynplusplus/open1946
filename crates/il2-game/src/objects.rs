@@ -1,0 +1,266 @@
+//! Map houses and trees (`docs/formats/static.md`): loaded from the map's `.static` files and
+//! `com/maddox/il2/objects/static.ini`, drawn instanced around the camera.
+
+use glam::{DQuat, DVec3, Mat4, Vec3};
+use il2_formats::map::HeightField;
+use il2_formats::sectfile::atof;
+use il2_formats::statics::Statics;
+use il2_formats::SectFile;
+use il2_render::render::select_lod;
+use il2_render::scene::Loader;
+use il2_render::{GpuMesh, InstanceRaw, InstancedDraw, MeshData};
+use il2_vfs::Vfs;
+use std::collections::HashMap;
+use std::ops::Range;
+
+/// Side of the square tiles objects are bucketed into for distance queries.
+const TILE: f64 = 1000.0;
+/// Draw limit for meshes whose LODs set none.
+const DEFAULT_MAX_DIST: f32 = 3000.0;
+/// LOD levels kept apart per class; deeper levels share the last bucket.
+const LEVELS: usize = 8;
+
+struct Class {
+    batches: Range<usize>,
+    /// LOD limits of the class's first mesh.
+    lods: Vec<f32>,
+}
+
+struct Object {
+    class: u32,
+    pos: DVec3,
+    rot: glam::Quat,
+}
+
+pub struct MapObjects {
+    /// Shared mesh of all classes, until uploaded.
+    pub data: Option<MeshData>,
+    classes: Vec<Class>,
+    objects: Vec<Object>,
+    /// Object ranges per tile, objects sorted by tile.
+    tiles: HashMap<(i32, i32), Range<usize>>,
+    max_dist: f32,
+    /// Scratch: instances per (class, level).
+    buckets: Vec<Vec<InstanceRaw>>,
+    /// Classes named by the map that can't be drawn.
+    pub skipped: Vec<String>,
+}
+
+/// Per-class placement rules from `static.ini`.
+struct Props {
+    mesh: String,
+    add_height: f32,
+    align_to_land: bool,
+    /// Lift the origin by the mesh's own ground level (houses) rather than a fixed amount (plates).
+    use_ground_level: bool,
+}
+
+/// Rules for the runtime classes that map objects use: `buildings.House$*` and `buildings.Plate$*`.
+/// Other classes (e.g. `Furniture$*`) have no runtime class in the install and are not drawn.
+fn props(ini: &SectFile, class: &str) -> Option<Props> {
+    // The runtime matches the section whose name ends with the short class name, e.g. `House$Urban_05`.
+    let short = &class[class.rfind('.').map_or(0, |i| i + 1)..];
+    let plate = short.starts_with("Plate$");
+    if !plate && !short.starts_with("House$") {
+        return None;
+    }
+    let sect = ini.sections.iter().find(|s| s.name.ends_with(short))?;
+    if plate {
+        return Some(Props { mesh: sect.get_ci("Mesh")?.trim().to_owned(), add_height: 0.25, align_to_land: true, use_ground_level: false });
+    }
+    // `equals` names the section that holds the remaining properties.
+    let rest = sect
+        .get_ci("equals")
+        .filter(|e| !e.is_empty())
+        .and_then(|e| ini.sections.iter().find(|s| s.name == e))
+        .unwrap_or(sect);
+    let num = |k: &str| rest.get_ci(k).and_then(atof).unwrap_or(0.0);
+    Some(Props {
+        mesh: sect.get_ci("MeshLive")?.trim().to_owned(),
+        add_height: num("AddHeightLive").clamp(-100.0, 100.0),
+        align_to_land: num("AlignToLand") > 0.0,
+        use_ground_level: true,
+    })
+}
+
+/// Height of the object origin above its lowest point: the `Ground_Level` hook if present, else
+/// the bottom of the bounding box.
+fn lift(loader: &Loader, mesh: &MeshData, path: &str, batches: &Range<usize>) -> f32 {
+    if let Some((_, p)) = loader.hier_hooks(path).ok().and_then(|h| h.into_iter().find(|(n, _)| n.eq_ignore_ascii_case("Ground_Level"))) {
+        return -p.z;
+    }
+    let mut min_z = f32::MAX;
+    for b in &mesh.batches[batches.clone()] {
+        for &i in &mesh.indices[b.first as usize..(b.first + b.count) as usize] {
+            let v = &mesh.vertices[i as usize];
+            let node = mesh.node_init.get(v.node as usize).copied().unwrap_or(Mat4::IDENTITY);
+            min_z = min_z.min(node.transform_point3(Vec3::from(v.pos)).z);
+        }
+    }
+    if min_z == f32::MAX {
+        0.0
+    } else {
+        -min_z
+    }
+}
+
+fn ground_normal(field: &HeightField, x: f64, y: f64) -> DVec3 {
+    let d = 2.0;
+    let dx = field.height_at(x + d, y) - field.height_at(x - d, y);
+    let dy = field.height_at(x, y + d) - field.height_at(x, y - d);
+    DVec3::new(-dx, -dy, 2.0 * d).normalize()
+}
+
+impl MapObjects {
+    pub fn load(vfs: &Vfs, ini_path: &str, field: &HeightField) -> Result<Self, String> {
+        let ini = SectFile::parse(&vfs.read(ini_path).map_err(|e| e.to_string())?);
+        let dir = &ini_path[..ini_path.rfind('/').map_or(0, |i| i + 1)];
+        let statics_ini = SectFile::parse(&vfs.read("com/maddox/il2/objects/static.ini").map_err(|e| e.to_string())?);
+        let season = ini
+            .section_ci("WORLDPOS")
+            .and_then(|s| s.get_ci("CAMOUFLAGE"))
+            .map_or("summer".to_owned(), |c| c.trim_start_matches(['=', ' ']).trim().to_ascii_lowercase());
+        let mut loader = Loader::new(vfs);
+        loader.season = Some(season);
+        let mut mesh = MeshData::default();
+        let mut classes = Vec::new();
+        // Class name -> (index into `classes`, lift, align) or None if it can't be drawn.
+        let mut by_name: HashMap<String, Option<(u32, f32, f32, bool)>> = HashMap::new();
+        let mut objects = Vec::new();
+        for (name, _) in ini.section_ci("static").map(|s| s.entries.as_slice()).unwrap_or_default() {
+            let Some(st) = vfs.read(&format!("{dir}{name}")).ok().and_then(|d| Statics::parse(&d).ok()) else { continue };
+            let local: Vec<Option<(u32, f32, f32, bool)>> = st
+                .house_classes
+                .iter()
+                .map(|c| {
+                    *by_name.entry(c.clone()).or_insert_with(|| {
+                        let p = props(&statics_ini, c)?;
+                        let batches = match loader.append_hier(&mut mesh, &p.mesh, false) {
+                            Ok(b) if !b.is_empty() => b,
+                            Ok(_) => return None,
+                            Err(e) => {
+                                loader.warnings.push(format!("{c}: {}: {e}", p.mesh));
+                                return None;
+                            }
+                        };
+                        let lift = if p.use_ground_level { lift(&loader, &mesh, &p.mesh, &batches) } else { 0.0 };
+                        let lods = mesh.batches[batches.start]
+                            .lod
+                            .map(|(g, _)| mesh.lod_distances[g as usize].clone())
+                            .unwrap_or_default();
+                        classes.push(Class { batches, lods });
+                        Some(((classes.len() - 1) as u32, lift, p.add_height, p.align_to_land))
+                    })
+                })
+                .collect();
+            for h in &st.houses {
+                let Some((class, lift, add, align)) = local[h.class as usize] else { continue };
+                let z = field.height_at(h.x, h.y) + (lift + add) as f64;
+                let mut rot = DQuat::from_rotation_z((h.yaw as f64).to_radians());
+                if align {
+                    rot = DQuat::from_rotation_arc(DVec3::Z, ground_normal(field, h.x, h.y)) * rot;
+                }
+                objects.push(Object { class, pos: DVec3::new(h.x, h.y, z), rot: rot.as_quat() });
+            }
+        }
+        for w in &loader.warnings {
+            eprintln!("warning: {w}");
+        }
+        let mut skipped: Vec<String> = by_name.iter().filter(|(_, v)| v.is_none()).map(|(k, _)| k.clone()).collect();
+        skipped.sort();
+        mesh.textures = loader.take_images();
+        mesh.node_count = mesh.node_count.max(1);
+        let tile_of = |p: DVec3| ((p.x / TILE).floor() as i32, (p.y / TILE).floor() as i32);
+        objects.sort_by_key(|o| tile_of(o.pos));
+        let mut tiles = HashMap::new();
+        let mut i = 0;
+        while i < objects.len() {
+            let t = tile_of(objects[i].pos);
+            let start = i;
+            while i < objects.len() && tile_of(objects[i].pos) == t {
+                i += 1;
+            }
+            tiles.insert(t, start..i);
+        }
+        let max_dist = classes.iter().map(|c| c.lods.last().copied().unwrap_or(DEFAULT_MAX_DIST)).fold(0.0, f32::max);
+        let buckets = vec![Vec::new(); classes.len() * LEVELS];
+        Ok(MapObjects { data: Some(mesh), classes, objects, tiles, max_dist, buckets, skipped })
+    }
+
+    /// Distance beyond which no object is drawn.
+    pub fn max_dist(&self) -> f32 {
+        self.max_dist
+    }
+
+    pub fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    /// Instances near `eye` (positions relative to it), with one draw per class and LOD level.
+    pub fn gather<'a>(&mut self, mesh: &'a GpuMesh, eye: DVec3, out: &mut Vec<InstanceRaw>) -> Vec<InstancedDraw<'a>> {
+        for b in &mut self.buckets {
+            b.clear();
+        }
+        let r = self.max_dist as f64;
+        let (x0, x1) = (((eye.x - r) / TILE).floor() as i32, ((eye.x + r) / TILE).floor() as i32);
+        let (y0, y1) = (((eye.y - r) / TILE).floor() as i32, ((eye.y + r) / TILE).floor() as i32);
+        for ty in y0..=y1 {
+            for tx in x0..=x1 {
+                let Some(range) = self.tiles.get(&(tx, ty)) else { continue };
+                for o in &self.objects[range.clone()] {
+                    let rel = o.pos - eye;
+                    let c = &self.classes[o.class as usize];
+                    let limit = c.lods.last().copied().unwrap_or(DEFAULT_MAX_DIST);
+                    let d = rel.length() as f32;
+                    if d >= limit {
+                        continue;
+                    }
+                    let Some(level) = select_lod(&c.lods, d) else { continue };
+                    let level = (level as usize).min(LEVELS - 1);
+                    let m = Mat4::from_rotation_translation(o.rot, rel.as_vec3());
+                    self.buckets[o.class as usize * LEVELS + level].push(InstanceRaw::from_mat4(m));
+                }
+            }
+        }
+        out.clear();
+        let mut draws = Vec::new();
+        for (i, b) in self.buckets.iter().enumerate() {
+            if b.is_empty() {
+                continue;
+            }
+            let start = out.len() as u32;
+            out.extend_from_slice(b);
+            draws.push(InstancedDraw {
+                mesh,
+                batches: self.classes[i / LEVELS].batches.clone(),
+                level: (i % LEVELS) as u8,
+                instances: start..out.len() as u32,
+            });
+        }
+        draws
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every shipped map: static files parse and every class except `Furniture$*` gets a mesh.
+    /// Run with `IL2_ROOT=/path/to/game cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn all_maps_place_objects() {
+        let vfs = il2_vfs::Vfs::open_install(std::env::var("IL2_ROOT").unwrap()).unwrap();
+        let all = il2_formats::SectFile::parse(&vfs.read("maps/all.ini").unwrap());
+        let mut seen = std::collections::HashSet::new();
+        for (_, v) in &all.section_ci("all").unwrap().entries {
+            let ini = format!("maps/{}", v.split_whitespace().next().unwrap());
+            if !seen.insert(ini.to_ascii_lowercase()) {
+                continue;
+            }
+            let field = crate::world::load_heights(&vfs, &ini).unwrap_or_else(|e| panic!("{ini}: {e}"));
+            let objects = super::MapObjects::load(&vfs, &ini, &field).unwrap_or_else(|e| panic!("{ini}: {e}"));
+            let bad: Vec<_> = objects.skipped.iter().filter(|c| !c.contains(".Furniture$")).collect();
+            assert!(bad.is_empty(), "{ini}: {bad:?}");
+            eprintln!("{ini}: {} objects", objects.len());
+        }
+    }
+}

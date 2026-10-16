@@ -4,8 +4,10 @@ use crate::sectfile::{SectFile, Section};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layer {
-    /// Texture path relative to the material's directory; `None` for untextured layers.
+    /// Texture path relative to the directory of the material that names it; `None` for untextured layers.
     pub texture: Option<String>,
+    /// Index in the `BasedOn` chain of the material that names `texture`.
+    pub texture_from: usize,
     pub alpha_test: Option<f32>,
     pub blend: bool,
     pub blend_add: bool,
@@ -57,7 +59,12 @@ fn vec4(chain: &[&MatFile], sect: &str, key: &str, default: [f32; 4]) -> [f32; 4
 
 /// Looks a key up in the most-derived material first, then in its bases.
 fn lookup<'a>(chain: &[&'a MatFile], sect: &str, key: &str) -> Option<&'a str> {
-    chain.iter().find_map(|m| m.file.section_ci(sect).and_then(|s: &Section| s.get_ci(key)))
+    lookup_from(chain, sect, key).map(|(_, v)| v)
+}
+
+/// Like `lookup`, also returning the chain index of the material that has the key.
+fn lookup_from<'a>(chain: &[&'a MatFile], sect: &str, key: &str) -> Option<(usize, &'a str)> {
+    chain.iter().enumerate().find_map(|(i, m)| Some((i, m.file.section_ci(sect).and_then(|s: &Section| s.get_ci(key))?)))
 }
 
 impl Material {
@@ -69,11 +76,10 @@ impl Material {
             .map(|i| {
                 let s = format!("Layer{i}");
                 let no_texture = flag(chain, &s, "tfNoTexture").unwrap_or(false);
+                let tex = lookup_from(chain, &s, "TextureName");
                 Layer {
-                    texture: lookup(chain, &s, "TextureName")
-                        .map(str::trim)
-                        .filter(|t| !t.is_empty() && !no_texture)
-                        .map(str::to_owned),
+                    texture: tex.map(|(_, t)| t.trim()).filter(|t| !t.is_empty() && !no_texture).map(str::to_owned),
+                    texture_from: tex.map_or(0, |(i, _)| i),
                     alpha_test: flag(chain, &s, "tfTestA")
                         .unwrap_or(false)
                         .then(|| num(chain, &s, "AlphaTestVal").unwrap_or(0.5)),
@@ -115,5 +121,8 @@ mod tests {
         assert_eq!(m.layers.len(), 1);
         assert_eq!(m.layers[0].texture.as_deref(), Some("skin1o.tga"));
         assert_eq!(m.layers[0].alpha_test, Some(0.9));
+        assert_eq!(m.layers[0].texture_from, 0);
+        let m = Material::resolve(&[&MatFile::parse(b"[ClassInfo]\nBasedOn base.mat\n"), &base]);
+        assert_eq!((m.layers[0].texture.as_deref(), m.layers[0].texture_from), (Some("base.tga"), 1));
     }
 }

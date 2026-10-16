@@ -7,9 +7,11 @@ Open items carried forward:
 - Name recovery for the remaining ~25% of entries (sounds, some map data, `cod/` entries).
 - `0xCA` archives beyond `filesserver.SFS`; the one unidentified protected directory in `vfs.md`.
 
-## M2: world
-Terrain with land-type texturing (`TypeMap` + `[FIELDS]`), water, forests, roads; sky cube, fog and sun;
-static objects (`*.static`, `static.ini`); mission (`.mis`) loading; free camera.
+## M2: world (done except the items below)
+Done: land-type texturing, water, sky gradient and fog, map objects (`*.static` houses, tree lines, plates),
+mission start positions.
+Open: forests (`[WOOD]`) and roads/rails from the `TypeMap` upper bits, bridges, sky cube, sun, mission
+objects (`[NStationary]`, `[Buildings]`, `[Chiefs]`), free camera.
 
 ## M3: flight
 Flight-model tables (`krypto.md`: container `gui/game/buttons`), a generic flight model, joystick input,

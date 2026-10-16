@@ -35,6 +35,9 @@ pub fn decode_image(d: &[u8], path: &str) -> Result<Image, String> {
         let img = il2_formats::imf::decode(d).map_err(|e| e.to_string())?;
         return Ok(Image { width: img.width, height: img.height, rgba: img.pixels });
     }
+    if let Some((width, height, rgba)) = il2_formats::tga::decode_colormapped(d) {
+        return Ok(Image { width, height, rgba });
+    }
     let fmt = image::ImageFormat::from_path(path).unwrap_or(image::ImageFormat::Tga);
     let img = image::load_from_memory_with_format(d, fmt).map_err(|e| e.to_string())?;
     // One-channel images are alpha-only in the engine (docs/formats/mat.md).
@@ -113,9 +116,9 @@ impl<'a> Loader<'a> {
         } else {
             let chain: Vec<&MatFile> = files.iter().map(|(_, m)| m).collect();
             let mat = Material::resolve(&chain);
-            // Textures are relative to the material that names them; approximate with the leaf's dir.
+            // Textures are relative to the material that names them.
             mat.layers.first().and_then(|l| {
-                let p = format!("{}{}", dir_of(path), l.texture.as_ref()?);
+                let p = format!("{}{}", dir_of(&files[l.texture_from].0), l.texture.as_ref()?);
                 Some(MatInfo {
                     texture: self.texture(&p),
                     alpha_cutoff: l.alpha_test.unwrap_or(0.0),
@@ -223,6 +226,15 @@ impl<'a> Loader<'a> {
     /// Loads all visible nodes of a hierarchical mesh into one draw list. Geometry stays in node
     /// space; `MeshData::node_init` holds the rest pose.
     pub fn load_hier(&mut self, him_path: &str, show_hidden: bool) -> Result<MeshData, String> {
+        let mut out = MeshData::default();
+        self.append_hier(&mut out, him_path, show_hidden)?;
+        out.node_count = out.node_count.max(1);
+        Ok(out)
+    }
+
+    /// Appends a hierarchical mesh to `out` with its own nodes, LOD groups and batches; returns the
+    /// range of batches it added. Textures index into this loader's images (`take_images`).
+    pub fn append_hier(&mut self, out: &mut MeshData, him_path: &str, show_hidden: bool) -> Result<std::ops::Range<usize>, String> {
         let data = self.vfs.read(him_path).map_err(|e| e.to_string())?;
         let hier = Hier::parse(&data).map_err(|e| e.to_string())?;
         let dir = dir_of(him_path).to_owned();
@@ -230,17 +242,23 @@ impl<'a> Loader<'a> {
         // `Hidden` hides only the node's own mesh; its children (e.g. gear legs under a hidden
         // gear-bay node) stay visible.
         let visible: Vec<bool> = hier.nodes.iter().map(|n| show_hidden || !n.hidden).collect();
-        let mut out = MeshData { node_count: hier.nodes.len().max(1), node_init: world, ..Default::default() };
+        let base = out.node_init.len();
+        // Earlier nodes without explicit transforms are identity.
+        out.node_init.resize(out.node_count.max(base), Mat4::IDENTITY);
+        let base = out.node_init.len();
+        out.node_init.extend(&world);
+        out.node_count = out.node_init.len();
+        let first = out.batches.len();
         for (i, n) in hier.nodes.iter().enumerate() {
             let Some(mesh) = &n.mesh else { continue };
             if !visible[i] {
                 continue;
             }
-            if let Err(e) = self.add_mesh_node(&mut out, &format!("{dir}{mesh}.msh"), Mat4::IDENTITY, i as u32) {
+            if let Err(e) = self.add_mesh_node(out, &format!("{dir}{mesh}.msh"), Mat4::IDENTITY, (base + i) as u32) {
                 self.warnings.push(format!("node {}: {e}", n.name));
             }
         }
-        Ok(out)
+        Ok(first..out.batches.len())
     }
 
     pub fn take_images(&mut self) -> Vec<Image> {

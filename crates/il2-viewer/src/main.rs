@@ -14,7 +14,7 @@ struct Args {
     /// Game install directory.
     #[arg(long, env = "IL2_ROOT")]
     root: PathBuf,
-    /// Hierarchical mesh (.him), single mesh (.msh) or map (load.ini) to show.
+    /// Hierarchical mesh (.him, .sim), single mesh (.msh) or map (load.ini) to show.
     path: String,
     /// Also show initially hidden nodes (damage states).
     #[arg(long)]
@@ -95,7 +95,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let vp = self.camera.view_proj(r.aspect());
                 let meshes: Vec<&GpuMesh> = self.meshes.iter().collect();
-                r.render(vp, self.camera.distance, None, &meshes);
+                r.render(vp, self.camera.distance, None, &meshes, &[]);
             }
             _ => {}
         }
@@ -107,7 +107,7 @@ fn load(args: &Args) -> Result<MeshData, String> {
     let mut loader = scene::Loader::new(&vfs);
     loader.season = Some(args.season.clone());
     let lower = args.path.to_ascii_lowercase();
-    let mut data = if lower.ends_with(".him") {
+    let mut data = if lower.ends_with(".him") || lower.ends_with(".sim") {
         loader.load_hier(&args.path, args.show_hidden)?
     } else if lower.ends_with(".ini") {
         loader.load_map(&args.path)?
@@ -159,7 +159,7 @@ fn main() {
         let (w, h) = (1280, 720);
         let r = Renderer::headless(w, h);
         let mesh = r.upload(&data);
-        let px = r.screenshot(camera.view_proj(w as f32 / h as f32), camera.distance, None, &[&mesh]);
+        let px = r.screenshot(camera.view_proj(w as f32 / h as f32), camera.distance, None, &[&mesh], &[]);
         image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).expect("save screenshot");
         return;
     }

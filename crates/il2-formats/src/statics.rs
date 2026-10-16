@@ -15,11 +15,40 @@ pub struct Placed {
     pub yaw: f32,
 }
 
+/// A house or tree from the per-cell lists (`docs/formats/static.md`, section 4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct House {
+    /// Index into `Statics::house_classes`.
+    pub class: u16,
+    /// Starts destroyed.
+    pub dead: bool,
+    /// World metres.
+    pub x: f64,
+    pub y: f64,
+    /// Degrees, counter-clockwise from east.
+    pub yaw: f32,
+}
+
+impl House {
+    /// Decodes one `(code, position)` record of the block at cell `(cx, cy)`.
+    pub fn decode(cx: u16, cy: u16, code: i32, pos: i32) -> House {
+        let scale = 200.0 / 32000.0;
+        House {
+            class: (code & 0x7fff) as u16,
+            dead: code & 0x8000 != 0,
+            x: cx as f64 * 200.0 + (pos as i16) as f64 * scale,
+            y: cy as f64 * 200.0 + ((pos >> 16) as i16) as f64 * scale,
+            yaw: ((code >> 16) as i16) as f32 * 360.0 / 32000.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Statics {
     pub classes: Vec<String>,
     pub objects: Vec<Placed>,
     pub house_classes: Vec<String>,
+    pub houses: Vec<House>,
     /// Polylines of the airdrome layout.
     pub runways: Vec<Vec<[f32; 2]>>,
     pub taxiways: Vec<Vec<[f32; 2]>>,
@@ -83,9 +112,17 @@ impl Statics {
         if nhouse > 0 {
             s.house_classes = (0..nhouse).map(|_| r.utf()).collect::<Result<_, _>>()?;
             for _ in 0..r.count()? {
-                r.i32()?;
-                let n = r.count()?;
-                r.take(n * 8)?;
+                let key = r.i32()?;
+                let (cx, cy) = (key as u16, (key >> 16) as u16);
+                for _ in 0..r.count()? {
+                    let (code, pos) = (r.i32()?, r.i32()?);
+                    let mut h = House::decode(cx, cy, code, pos);
+                    // The runtime maps out-of-range class indices to class 0.
+                    if h.class as usize >= nhouse {
+                        h.class = 0;
+                    }
+                    s.houses.push(h);
+                }
             }
         }
         if r.p < d.len() {
@@ -100,5 +137,23 @@ impl Statics {
     pub fn runway_ends(&self) -> impl Iterator<Item = &Placed> {
         let idx = self.classes.iter().position(|c| c == RUNWAY_CLASS);
         self.objects.iter().filter(move |o| Some(o.class) == idx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::House;
+
+    #[test]
+    fn decodes_house_record() {
+        // class 5, dead, yaw -8000 (= -90 degrees); offsets +16000 / -3200 in cell (10, 20).
+        let code = 5 | 0x8000 | ((-8000i16 as u16 as i32) << 16);
+        let pos = (16000u16 as i32) | ((-3200i16 as u16 as i32) << 16);
+        let h = House::decode(10, 20, code, pos);
+        assert_eq!(h.class, 5);
+        assert!(h.dead);
+        assert_eq!(h.yaw, -90.0);
+        assert_eq!(h.x, 2100.0);
+        assert_eq!(h.y, 3980.0);
     }
 }

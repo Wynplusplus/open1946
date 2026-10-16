@@ -6,19 +6,21 @@ It needs a legally owned copy of the game (e.g. GOG); point `IL2_ROOT` at the in
 No game files, decompiled code or key material are part of this repository. Format knowledge lives in
 `docs/formats/` as prose specifications, and the Rust code is written from those specs.
 
-## Status: milestone 1 (archives + asset viewer)
+## Status: milestones 1–2 done, 3 in progress
 
 | Area | State |
 |------|-------|
 | SFS archives (`il2-sfs`) | All 76 archives, 266,627 files, 0 decode failures |
 | Mount order and lookup (`il2-vfs`) | Matches the game: `.rc` mount list, later mounts win, protected dirs |
 | Section files, binary section files | Text and binary encodings |
-| Meshes `.msh`, hierarchies `.him`, materials `.mat` | 90,525 / 1,555 / 43,464 shipped files parse, 0 failures |
-| IMF images | Types 0 and 1 verified (aircraft skins), type 2 (JPEG) implemented |
-| Maps | Height map decoding; terrain draped with the overview image |
-| Viewer | Aircraft with season skins and alpha test; terrain; orbit camera; headless screenshots |
+| Meshes `.msh`, hierarchies `.him`/`.sim`, materials `.mat` | 90,525 / 1,555 / 43,464 shipped files parse, 0 failures |
+| Images | IMF types 0–2, TGA including colour-mapped variants |
+| Maps | Height map, land-type texturing, water, sky and fog |
+| Map objects | Houses, tree lines, runway and taxiway plates from `*.static` + `static.ini`, instanced; all 102 shipped maps load |
+| Flight (`il2-fm`, `il2-data`) | Flight models and engines decrypted from the install; Vmax within a few % of the `.fmd` figures (`docs/behavior/validation.md`); ground handling; control-surface and gear animation |
+| Game (`openil2`) | Fly any aircraft class over any map or from a mission's start (runway takeoff spots) |
 
-Not yet: blended/decal layers, LOD switching, collision meshes, land textures, sky, objects, gameplay (see `docs/roadmap.md`).
+Not yet: cockpits, weapons, damage, AI, ground units, sound, menus (see `docs/roadmap.md`).
 
 ## Usage
 
@@ -32,6 +34,12 @@ target/release/il2 stat
 target/release/il2 cat com/maddox/il2/objects/air.ini
 target/release/il2 names --out names.txt    # recover archive path names (~75%)
 target/release/il2 parse-all --names names.txt
+
+# Fly (arrows: stick, Z/X: rudder, PageUp/PageDown or 1-9/0/W: throttle, F/V: flaps, G: gear, B: brakes)
+target/release/openil2 --aircraft air.BF_109G6 --map maps/Slovakia/load.ini --at 214500,86500 --agl 300
+target/release/openil2 --mission Missions/Single/SK/Bf-109F-4/Bf-109F-4_1.mis
+target/release/openil2 --test                                   # headless flight-model checks
+target/release/openil2 --at 214500,86500 --agl 150 --screenshot out.png --orbit 170,12,40
 
 # Viewer (drag to orbit, wheel to zoom)
 target/release/il2-viewer "3DO/Plane/Bf-109G-6Early/hier.him"

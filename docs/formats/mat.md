@@ -10,7 +10,7 @@ A section file read by the engine's native reader (case-insensitive keys).
 - `[General]`: `tfDoubleSide`, `tfShouldSort` (needs depth sorting / translucent), `tfDropShadow`, `tfGameTimer`.
 - `[LightParams]`: `Ambient`, `Diffuse`, `Specular`, `SpecularPow`, `Shine`.
 - `[Layer<N>]`, with `N` from 0 and contiguous:
-  - `TextureName <file>`: relative to the material's directory, usually `.tga`.
+  - `TextureName <file>`: relative to the directory of the material file that contains the key (for an inherited key, the base material's directory; confirmed empirically: shipped files only resolve this way), usually `.tga`.
   - `PaletteName`, `Frame`, `VisibleDistanceNear/Far`.
   - `TextureCoordScale u0 v0 su sv`.
   - `ColorScale r g b a`.

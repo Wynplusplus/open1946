@@ -45,6 +45,31 @@ fn vs_main(v: VsIn) -> VsOut {
     return o;
 }
 
+struct InstIn {
+    @location(4) r0: vec4<f32>,
+    @location(5) r1: vec4<f32>,
+    @location(6) r2: vec4<f32>,
+};
+
+// Instanced draws: a per-instance affine transform between the model and node transforms.
+@vertex
+fn vs_inst(v: VsIn, i: InstIn) -> VsOut {
+    var o: VsOut;
+    let inst = mat4x4<f32>(
+        vec4<f32>(i.r0.x, i.r1.x, i.r2.x, 0.0),
+        vec4<f32>(i.r0.y, i.r1.y, i.r2.y, 0.0),
+        vec4<f32>(i.r0.z, i.r1.z, i.r2.z, 0.0),
+        vec4<f32>(i.r0.w, i.r1.w, i.r2.w, 1.0),
+    );
+    let m = instance.model * inst * nodes[v.node];
+    let world = m * vec4<f32>(v.pos, 1.0);
+    o.clip = globals.view_proj * world;
+    o.normal = normalize((m * vec4<f32>(v.normal, 0.0)).xyz);
+    o.uv = v.uv;
+    o.view = world.xyz;
+    return o;
+}
+
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, i.uv);

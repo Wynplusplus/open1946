@@ -2,7 +2,8 @@
 
 Status: **verified** (parses all 1555 shipped files).
 
-A section file (`sectfile.md`) that describes an object as a tree of mesh parts.
+A section file (`sectfile.md`) that describes an object as a tree of mesh parts. Static objects use the same
+syntax with the extension `.sim` (usually a single `[Body]` node, `Mesh Live`).
 
 - `[_ROOT_]`: object-level data.
   - `VisibilitySphere <radius>`,

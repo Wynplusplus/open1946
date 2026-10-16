@@ -16,6 +16,30 @@ pub struct Vertex {
     pub node: u32,
 }
 
+/// Per-instance transform of an instanced draw: the top three rows of an affine matrix.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+pub struct InstanceRaw {
+    pub rows: [[f32; 4]; 3],
+}
+
+impl InstanceRaw {
+    pub fn from_mat4(m: Mat4) -> Self {
+        let r = m.transpose().to_cols_array_2d();
+        Self { rows: [r[0], r[1], r[2]] }
+    }
+}
+
+/// Draws `mesh` batches `batches` whose LOD level is `level`, once per instance in `instances`
+/// (a range of the buffer given to `Renderer::set_instances`).
+#[derive(Clone)]
+pub struct InstancedDraw<'a> {
+    pub mesh: &'a GpuMesh,
+    pub batches: std::ops::Range<usize>,
+    pub level: u8,
+    pub instances: std::ops::Range<u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::select_lod;
@@ -148,8 +172,9 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     depth: wgpu::TextureView,
-    /// Indexed by `BlendMode::index() * 2 + depth_offset`.
+    /// Indexed by `instanced * 6 + BlendMode::index() * 2 + depth_offset`.
     pipelines: Vec<wgpu::RenderPipeline>,
+    instances: wgpu::Buffer,
     terrain_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     terrain_layout: wgpu::BindGroupLayout,
@@ -304,6 +329,19 @@ impl Renderer {
             ..Default::default()
         });
         let mut pipelines = Vec::new();
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Uint32],
+        };
+        let instance_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<InstanceRaw>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![4 => Float32x4, 5 => Float32x4, 6 => Float32x4],
+        };
+        let plain_buffers = [Some(vertex_layout.clone())];
+        let instanced_buffers = [Some(vertex_layout), Some(instance_vertex_layout)];
+        for instanced in [false, true] {
         for mode in BlendMode::ALL {
             for offset in [false, true] {
                 let blend = match mode {
@@ -323,12 +361,8 @@ impl Renderer {
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
                         module: &shader,
-                        entry_point: Some("vs_main"),
-                        buffers: &[Some(wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<Vertex>() as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Uint32],
-                        })],
+                        entry_point: Some(if instanced { "vs_inst" } else { "vs_main" }),
+                        buffers: if instanced { &instanced_buffers } else { &plain_buffers },
                         compilation_options: Default::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
@@ -359,6 +393,13 @@ impl Renderer {
                 }));
             }
         }
+        }
+        let instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("instances"),
+            size: 64 * std::mem::size_of::<InstanceRaw>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let terrain_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("terrain"),
             entries: &[
@@ -482,6 +523,7 @@ impl Renderer {
             config,
             depth,
             pipelines,
+            instances,
             terrain_pipeline,
             sky_pipeline,
             terrain_layout,
@@ -682,6 +724,20 @@ impl Renderer {
         self.queue.write_buffer(&mesh.instance, 0, bytemuck::cast_slice(&m.to_cols_array_2d()));
     }
 
+    /// Replaces the instance transforms that `InstancedDraw::instances` index into.
+    pub fn set_instances(&mut self, data: &[InstanceRaw]) {
+        let bytes: &[u8] = bytemuck::cast_slice(data);
+        if bytes.len() as u64 > self.instances.size() {
+            self.instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("instances"),
+                size: (bytes.len() as u64).next_power_of_two(),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        self.queue.write_buffer(&self.instances, 0, bytes);
+    }
+
     fn draw(
         &self,
         target: &wgpu::TextureView,
@@ -689,6 +745,7 @@ impl Renderer {
         distance: f32,
         terrain: Option<&GpuTerrain>,
         meshes: &[&GpuMesh],
+        instanced: &[InstancedDraw],
     ) -> wgpu::CommandEncoder {
         let light = Vec3::new(-0.4, -0.3, -1.0).normalize();
         let g = Globals {
@@ -752,12 +809,30 @@ impl Renderer {
                         pass.draw_indexed(b.first..b.first + b.count, 0, 0..1);
                     }
                 }
+                pass.set_vertex_buffer(1, self.instances.slice(..));
+                for d in instanced {
+                    if d.instances.is_empty() {
+                        continue;
+                    }
+                    let m = d.mesh;
+                    pass.set_bind_group(1, &m.instance_bg, &[]);
+                    pass.set_vertex_buffer(0, m.vbuf.slice(..));
+                    pass.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    for (b, mat) in &m.batches[d.batches.clone()] {
+                        if (b.blend == BlendMode::Opaque) != opaque_pass || b.lod.is_some_and(|(_, l)| l != d.level) {
+                            continue;
+                        }
+                        pass.set_pipeline(&self.pipelines[6 + b.blend.index() * 2 + b.depth_offset as usize]);
+                        pass.set_bind_group(2, &m.materials[*mat], &[]);
+                        pass.draw_indexed(b.first..b.first + b.count, 0, d.instances.clone());
+                    }
+                }
             }
         }
         enc
     }
 
-    pub fn render(&mut self, view_proj: Mat4, distance: f32, terrain: Option<&GpuTerrain>, meshes: &[&GpuMesh]) {
+    pub fn render(&mut self, view_proj: Mat4, distance: f32, terrain: Option<&GpuTerrain>, meshes: &[&GpuMesh], instanced: &[InstancedDraw]) {
         let Some(surface) = &self.surface else { return };
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -767,7 +842,7 @@ impl Renderer {
             }
         };
         let view = frame.texture.create_view(&Default::default());
-        let enc = self.draw(&view, view_proj, distance, terrain, meshes);
+        let enc = self.draw(&view, view_proj, distance, terrain, meshes, instanced);
         self.queue.submit([enc.finish()]);
         if let Some(w) = &self.window {
             w.pre_present_notify();
@@ -776,7 +851,14 @@ impl Renderer {
     }
 
     /// Renders one frame offscreen and returns tightly packed RGBA8 pixels.
-    pub fn screenshot(&self, view_proj: Mat4, distance: f32, terrain: Option<&GpuTerrain>, meshes: &[&GpuMesh]) -> Vec<u8> {
+    pub fn screenshot(
+        &self,
+        view_proj: Mat4,
+        distance: f32,
+        terrain: Option<&GpuTerrain>,
+        meshes: &[&GpuMesh],
+        instanced: &[InstancedDraw],
+    ) -> Vec<u8> {
         let (w, h) = (self.config.width, self.config.height);
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("screenshot"),
@@ -789,7 +871,7 @@ impl Renderer {
             view_formats: &[],
         });
         let view = tex.create_view(&Default::default());
-        let mut enc = self.draw(&view, view_proj, distance, terrain, meshes);
+        let mut enc = self.draw(&view, view_proj, distance, terrain, meshes, instanced);
         let row = (w * 4).div_ceil(256) * 256;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
