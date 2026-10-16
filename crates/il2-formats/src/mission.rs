@@ -21,8 +21,39 @@ pub struct Wing {
     pub waypoints: Vec<Waypoint>,
 }
 
+/// A placed object from `[NStationary]` or `[Buildings]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Placed {
+    pub name: String,
+    /// Class relative to `com.maddox.il2.objects.` (`[NStationary]`, e.g. `ships.Ship$USSEssexCV9`) or
+    /// to `com.maddox.il2.objects.buildings.` (`[Buildings]`, e.g. `House$Hangar1`).
+    pub class: String,
+    /// `[NStationary]`: army; `[Buildings]`: 1 alive, 0 destroyed.
+    pub flag: i32,
+    pub x: f64,
+    pub y: f64,
+    /// Degrees, **clockwise** from east (the runtime passes it through `Orient.set`).
+    pub yaw: f64,
+}
+
+fn placed(f: &SectFile, sect: &str) -> Vec<Placed> {
+    let Some(s) = f.section_ci(sect) else { return Vec::new() };
+    s.entries
+        .iter()
+        .filter_map(|(name, v)| {
+            let mut t = v.split_whitespace();
+            let class = t.next()?.to_owned();
+            let mut num = || t.next().map_or(0.0, |v| v.parse::<f64>().ok().or_else(|| atof(v).map(f64::from)).unwrap_or(0.0));
+            let (flag, x, y, yaw) = (num() as i32, num(), num(), num());
+            Some(Placed { name: name.clone(), class, flag, x, y, yaw })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub struct Mission {
+    pub stationary: Vec<Placed>,
+    pub buildings: Vec<Placed>,
     /// Relative to `maps/`.
     pub map: String,
     pub time_hours: f64,
@@ -66,6 +97,8 @@ impl Mission {
             })
             .collect();
         Mission {
+            stationary: placed(&f, "NStationary"),
+            buildings: placed(&f, "Buildings"),
             map: get("MAP").unwrap_or_default().to_owned(),
             time_hours: get("TIME").and_then(atof).map_or(12.0, f64::from),
             player_wing: get("player").map(str::to_owned),
@@ -93,5 +126,9 @@ mod tests {
         assert_eq!(w.planes, 2);
         assert_eq!(w.waypoints[0].kind, "TAKEOFF");
         assert_eq!(w.waypoints[1].z, 1500.0);
+        let m = super::Mission::parse(b"[NStationary]\n  0_Static ships.Ship$USSEssexCV9 1 8015.45 4946.58 580.00 0.0 0 2\n[Buildings]\n  0_bld House$Hangar 0 10 20 90\n");
+        assert_eq!(m.stationary[0].class, "ships.Ship$USSEssexCV9");
+        assert_eq!((m.stationary[0].flag, m.stationary[0].x, m.stationary[0].yaw), (1, 8015.45, 580.0));
+        assert_eq!((m.buildings[0].flag, m.buildings[0].y), (0, 20.0));
     }
 }

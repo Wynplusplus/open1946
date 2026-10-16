@@ -94,9 +94,13 @@ pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Re
 
 /// Node transforms for the current control positions (`docs/behavior/animation.md`).
 pub fn pose(a: &AircraftAssets, ct: &il2_fm::Inputs) -> Vec<glam::Mat4> {
+    pose_rig(&a.rig, &a.tracks, ct)
+}
+
+pub fn pose_rig(rig: &il2_render::scene::Rig, tracks: &[il2_data::anim::Track], ct: &il2_fm::Inputs) -> Vec<glam::Mat4> {
     use il2_data::anim::Channel;
-    let mut motion: Vec<Option<il2_render::scene::NodeMotion>> = vec![None; a.rig.names.len()];
-    for t in &a.tracks {
+    let mut motion: Vec<Option<il2_render::scene::NodeMotion>> = vec![None; rig.names.len()];
+    for t in tracks {
         let x = match t.channel {
             Channel::Rudder => ct.rudder,
             Channel::Elevator => ct.elevator,
@@ -105,12 +109,55 @@ pub fn pose(a: &AircraftAssets, ct: &il2_fm::Inputs) -> Vec<glam::Mat4> {
             Channel::Gear => ct.gear,
         } as f32;
         for (name, st) in t.eval(x) {
-            if let Some(i) = a.rig.find(name) {
+            if let Some(i) = rig.find(name) {
                 motion[i] = Some(il2_render::scene::NodeMotion { angles: st.angles, offset: st.offset });
             }
         }
     }
-    a.rig.pose(&motion)
+    rig.pose(&motion)
+}
+
+/// A parked aircraft for static display: model, gear-down node transforms, origin height above the
+/// ground and nose-up pitch in degrees (`docs/formats/mission.md`, "Static aircraft").
+pub struct Parked {
+    pub him: String,
+    pub nodes: Vec<glam::Mat4>,
+    pub height: f32,
+    pub pitch: f32,
+}
+
+pub fn parked_model(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Option<Parked> {
+    let classes = il2_data::Classes::new(vfs, &fms.keys);
+    let info = classes.aircraft(class)?;
+    let him = info.meshes.first()?.clone();
+    let loader = Loader::new(vfs);
+    let rig = loader.hier_rig(&him).ok()?;
+    let nodes = pose_rig(&rig, &classes.animations(class), &il2_fm::Inputs { gear: 1.0, ..Default::default() });
+    let hooks = loader.hier_hooks_posed(&him, &nodes).ok()?;
+    let hook = |n: &str| hooks.iter().find(|(name, _)| name.eq_ignore_ascii_case(n)).map(|(_, p)| *p);
+    let fmd = fms.sect_file(&info.flight_model).ok();
+    // Without a decoded gear animation the hooks stay retracted; use the flight model's figures.
+    let rest = rig.pose(&[]);
+    let gear_moves = nodes.iter().zip(&rest).any(|(a, b)| !a.abs_diff_eq(*b, 1e-4));
+    let from_ini = !gear_moves || fmd.as_ref().and_then(|f| f.section_ci("Gear")?.get_ci("FromIni")).and_then(il2_formats::sectfile::atof).unwrap_or(0.0) != 0.0;
+    let (height, pitch) = match (hook("_ClipLGear"), hook("_ClipRGear"), hook("_ClipCGear")) {
+        (Some(l), Some(r), Some(c)) if !from_ini => {
+            let (mx, mz) = ((l.x + r.x) * 0.5, (l.z + r.z) * 0.5);
+            let (dx, dz) = (mx - c.x, mz - c.z);
+            let mut pitch = -dz.atan2(dx).to_degrees();
+            if dx < 0.0 {
+                pitch += 180.0;
+            }
+            // Distance from the origin to the line through the main and tail wheels.
+            let height = (dx * c.z - dz * c.x).abs() / dx.hypot(dz).max(1e-6);
+            (height, pitch)
+        }
+        _ => {
+            let num = |k: &str| fmd.as_ref().and_then(|f| f.section_ci("Gear")?.get_ci(k)).and_then(il2_formats::sectfile::atof).unwrap_or(-0.5);
+            (num("H"), num("Pitch"))
+        }
+    };
+    Some(Parked { him, nodes, height, pitch })
 }
 
 /// Runway ends of a map (from the `.static` files listed in its `load.ini`).

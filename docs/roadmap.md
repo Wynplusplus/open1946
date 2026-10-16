@@ -10,8 +10,9 @@ Open items carried forward:
 ## M2: world (done except the items below)
 Done: land-type texturing, water, sky gradient and fog, map objects (`*.static` houses, tree lines, plates),
 mission start positions.
-Open: forests (`[WOOD]`) and roads/rails from the `TypeMap` upper bits, bridges, sky cube, sun, mission
-objects (`[NStationary]`, `[Buildings]`, `[Chiefs]`), free camera.
+Done since: forest canopy, roads and rails, bridges, mission `[NStationary]` and `[Buildings]` objects.
+Open: bridge ramps, sky cube, sun, effects (smoke, fires), free camera. Gear animation is not decoded for some
+classes (e.g. La-5FN).
 
 ## M3: flight
 Flight-model tables (`krypto.md`: container `gui/game/buttons`), a generic flight model, joystick input,

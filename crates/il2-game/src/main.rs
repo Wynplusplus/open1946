@@ -1,4 +1,5 @@
 mod forest;
+mod mission_objects;
 mod objects;
 mod roads;
 mod world;
@@ -370,8 +371,8 @@ fn main() {
     let fms = il2_data::FlightModels::open(&vfs).unwrap_or_else(|e| fail(e));
     let mut start = Start::Default;
     let mut fuel = 1.0;
-    if let Some(path) = &args.mission {
-        let m = il2_formats::mission::Mission::parse(&vfs.read(path).unwrap_or_else(|e| fail(e)));
+    let mission = args.mission.as_ref().map(|path| il2_formats::mission::Mission::parse(&vfs.read(path).unwrap_or_else(|e| fail(e))));
+    if let (Some(path), Some(m)) = (&args.mission, &mission) {
         let wing = m.player().unwrap_or_else(|| fail("mission has no player flight"));
         args.map = format!("maps/{}", m.map);
         args.aircraft = wing.class.clone();
@@ -379,7 +380,7 @@ fn main() {
         eprintln!("mission: {} on {}, flight {} ({} x {})", path, m.map, wing.name, wing.planes, wing.class);
         let ends = world::load_runways(&vfs, &args.map);
         if let Some(w0) = wing.waypoints.first() {
-            start = if w0.kind == "TAKEOFF" {
+            start = if w0.kind.starts_with("TAKEOFF") {
                 match world::takeoff_spot(&ends, w0.x, w0.y) {
                     Some((x, y, heading)) => Start::Takeoff { x, y, heading },
                     None => Start::Air { pos: DVec3::new(w0.x, w0.y, 500.0), toward: DVec3::new(w0.x, w0.y + 1.0, 500.0), speed: 100.0 },
@@ -393,6 +394,9 @@ fn main() {
                 }
             };
         }
+    }
+    if args.at.is_some() {
+        start = Start::Default;
     }
     let assets = world::load_aircraft(&vfs, &fms, &args.aircraft).unwrap_or_else(|e| fail(e));
     let fmd_name = il2_data::Classes::new(&vfs, &fms.keys).aircraft(&args.aircraft).map(|c| c.flight_model).unwrap_or_default();
@@ -422,7 +426,18 @@ fn main() {
         t
     };
     let t0 = Instant::now();
-    let mut map_objects = objects::MapObjects::load(&vfs, &args.map, &field).unwrap_or_else(|e| fail(e));
+    let mut map_objects = {
+        let statics_ini = objects::statics_ini(&vfs).unwrap_or_else(|e| fail(e));
+        let mut b = objects::Builder::new(&vfs, &field, &objects::season(&vfs, &args.map));
+        b.add_map(&vfs, &args.map, &statics_ini).unwrap_or_else(|e| fail(e));
+        if let Some(m) = &mission {
+            mission_objects::add_mission(&mut b, &vfs, &fms, m, &statics_ini);
+        }
+        b.finish()
+    };
+    if std::env::var_os("IL2_TRACE").is_some() {
+        eprintln!("skipped classes: {:?}", map_objects.skipped);
+    }
     eprintln!("map objects: {} placed in {:.1} s ({} classes skipped)", map_objects.len(), t0.elapsed().as_secs_f64(), map_objects.skipped.len());
     let mut forest = forest::Forest::load(&vfs, &args.map, &terrain.types);
     let mut roads = roads::Roads::load(&vfs, &args.map, &terrain.types);
