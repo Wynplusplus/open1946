@@ -1,7 +1,6 @@
 //! The pilot's cockpit: mesh, eye point and instruments driven by the cockpit's own code
 //! (`docs/behavior/cockpit.md`).
 
-use crate::weapons::Gun;
 use glam::{DVec3, Mat4, Vec3};
 use il2_data::anim::Instruments;
 use il2_fm::Sim;
@@ -9,6 +8,14 @@ use il2_render::scene::{Loader, NodeMotion, Rig};
 use il2_render::MeshData;
 use il2_vfs::Vfs;
 use std::collections::HashMap;
+
+/// What the cockpit can see of one gun.
+pub struct GunReading<'a> {
+    pub hook: &'a str,
+    pub ammo: i32,
+    pub firing: bool,
+    pub trigger: i32,
+}
 
 pub struct Cockpit {
     /// The mesh with every node, hidden ones included (taken when uploading).
@@ -61,7 +68,7 @@ impl Cockpit {
     }
 
     /// Runs the instruments for `dt` seconds of flight and returns the cockpit's node transforms.
-    pub fn pose(&mut self, sim: &Sim, guns: &[Gun], time_of_day: f64, dt: f64) -> Vec<Mat4> {
+    pub fn pose(&mut self, sim: &Sim, guns: &[GunReading], time_of_day: f64, dt: f64) -> Vec<Mat4> {
         if let Some(prev) = self.prev_vel {
             if dt > 0.0 {
                 self.accel = self.accel * 0.8 + (sim.vel - prev) / dt * 0.2;
@@ -113,7 +120,12 @@ impl Cockpit {
 
 /// What the cockpit code reads from the flight model and the world, by access path, in the
 /// original's units (`docs/behavior/cockpit.md`, "World values").
-fn world_table(s: &Sim, guns: &[Gun], time_of_day: f64, accel: DVec3) -> HashMap<String, f64> {
+fn world_table(
+    s: &Sim,
+    guns: &[GunReading],
+    time_of_day: f64,
+    accel: DVec3,
+) -> HashMap<String, f64> {
     let mut t: HashMap<String, f64> = HashMap::new();
     let mut put = |k: &str, v: f64| {
         t.insert(k.to_owned(), v);
@@ -223,7 +235,8 @@ fn world_table(s: &Sim, guns: &[Gun], time_of_day: f64, accel: DVec3) -> HashMap
         put("isRunning()", e.running() as u8 as f64);
     }
     for g in guns {
-        if let Some(h) = g.hook.as_deref() {
+        {
+            let h = g.hook;
             t.insert(
                 format!("fm.actor.getGunByHookName({h:?}).countBullets()"),
                 g.ammo as f64,

@@ -1,4 +1,7 @@
 //! Checks that control surfaces deflect the physically right way for positive inputs.
+#[path = "../src/cockpit.rs"]
+#[allow(dead_code)]
+mod cockpit;
 #[path = "../src/world.rs"]
 #[allow(dead_code)]
 mod world;

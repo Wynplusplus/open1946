@@ -122,6 +122,17 @@ fn cockpit_camera(
     (world, near, eye)
 }
 
+fn gun_readings(guns: &[weapons::Gun]) -> Vec<cockpit::GunReading<'_>> {
+    guns.iter()
+        .map(|g| cockpit::GunReading {
+            hook: g.hook.as_deref().unwrap_or(""),
+            ammo: g.ammo,
+            firing: g.firing,
+            trigger: g.trigger,
+        })
+        .collect()
+}
+
 fn place(r: &Renderer, terrain: &il2_render::GpuTerrain, plane: &GpuMesh, s: &Sim, eye: DVec3) {
     r.set_transform(&terrain.mesh, Mat4::from_translation((-eye).as_vec3()));
     r.set_transform(
@@ -472,7 +483,10 @@ impl Game {
                 c,
                 DMat4::from_rotation_translation(s.ori, s.pos - eye).as_mat4(),
             );
-            r.set_nodes(c, &cs.pose(s, &self.combat.guns, self.time_of_day, dt));
+            r.set_nodes(
+                c,
+                &cs.pose(s, &gun_readings(&self.combat.guns), self.time_of_day, dt),
+            );
         }
         r.set_nodes(plane, &world::pose(&self.assets, &s.ct));
         // Sound: engines, guns, explosions (heard from the camera).
@@ -1177,9 +1191,12 @@ fn main() {
                 );
                 // Let the needles settle.
                 for _ in 0..60 {
-                    cp.pose(&sim, &combat.guns, time_of_day, TICK);
+                    cp.pose(&sim, &gun_readings(&combat.guns), time_of_day, TICK);
                 }
-                r.set_nodes(&c, &cp.pose(&sim, &combat.guns, time_of_day, TICK));
+                r.set_nodes(
+                    &c,
+                    &cp.pose(&sim, &gun_readings(&combat.guns), time_of_day, TICK),
+                );
                 if std::env::var_os("IL2_TRACE").is_some() {
                     eprintln!("cockpit reads without values: {:?}", cp.missing());
                 }
