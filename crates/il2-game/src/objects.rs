@@ -111,6 +111,67 @@ fn ground_normal(field: &HeightField, x: f64, y: f64) -> DVec3 {
     DVec3::new(-dx, -dy, 2.0 * d).normalize()
 }
 
+struct Segment {
+    mesh: String,
+    pos: DVec3,
+    /// Degrees, counter-clockwise from east.
+    yaw: f64,
+}
+
+/// The segments of a bridge (`docs/formats/static.md`, "Bridges"), live state.
+fn bridge_segments(b: &il2_formats::statics::Bridge, winter: bool, rows: f64) -> Vec<Segment> {
+    let kind = match b.kind {
+        0x80 => "highway",
+        0x20 => "country",
+        0x40 => "rail",
+        _ => return Vec::new(),
+    };
+    let (dx, dy) = (b.end.0 - b.begin.0, b.end.1 - b.begin.1);
+    let (ix, iy) = (dx.signum(), dy.signum());
+    let mid_cells = dx.abs().max(dy.abs()) - 1;
+    if mid_cells < 0 {
+        return Vec::new();
+    }
+    // Direction octant; pixel rows grow southwards.
+    let oct = match (ix, iy) {
+        (1, 1) => 7,
+        (1, -1) => 1,
+        (1, _) => 0,
+        (-1, 1) => 5,
+        (-1, -1) => 3,
+        (-1, _) => 4,
+        (_, 1) => 6,
+        _ => 2,
+    };
+    let last = 1 + 2 * mid_cells;
+    let mut out = Vec::new();
+    for i in 0..=last {
+        let (steps, first_half) = if i == 0 {
+            (0, true)
+        } else if i == last {
+            (1 + mid_cells, false)
+        } else {
+            ((i + 1) >> 1, i & 1 == 0)
+        };
+        let k = b.offset as f64 + if first_half { 0.25 } else { -0.25 };
+        let px = (b.begin.0 + ix * steps) as f64 + 0.5 + ix as f64 * k;
+        let py = (b.begin.1 + iy * steps) as f64 + 0.5 + iy as f64 * k;
+        let mid = i != 0 && i != last;
+        let yaw = oct as f64 * 45.0 + if i == last { 0.0 } else { 180.0 };
+        out.push(Segment {
+            mesh: format!(
+                "3do/bridges/{kind}{}/{}/{}/mono1.sim",
+                if winter { "_W" } else { "" },
+                if oct & 1 == 0 { "short" } else { "long" },
+                if mid { "mid" } else { "end" }
+            ),
+            pos: DVec3::new(px * 200.0, (rows - 1.0 - py) * 200.0, 0.0),
+            yaw,
+        });
+    }
+    out
+}
+
 impl MapObjects {
     pub fn load(vfs: &Vfs, ini_path: &str, field: &HeightField) -> Result<Self, String> {
         let ini = SectFile::parse(&vfs.read(ini_path).map_err(|e| e.to_string())?);
@@ -120,6 +181,8 @@ impl MapObjects {
             .section_ci("WORLDPOS")
             .and_then(|s| s.get_ci("CAMOUFLAGE"))
             .map_or("summer".to_owned(), |c| c.trim_start_matches(['=', ' ']).trim().to_ascii_lowercase());
+        let winter = season == "winter";
+        let rows = field.height as f64;
         let mut loader = Loader::new(vfs);
         loader.season = Some(season);
         let mut mesh = MeshData::default();
@@ -127,6 +190,8 @@ impl MapObjects {
         // Class name -> (index into `classes`, lift, align) or None if it can't be drawn.
         let mut by_name: HashMap<String, Option<(u32, f32, f32, bool)>> = HashMap::new();
         let mut objects = Vec::new();
+        // Bridge segment meshes by path -> class index.
+        let mut by_mesh: HashMap<String, Option<u32>> = HashMap::new();
         for (name, _) in ini.section_ci("static").map(|s| s.entries.as_slice()).unwrap_or_default() {
             let Some(st) = vfs.read(&format!("{dir}{name}")).ok().and_then(|d| Statics::parse(&d).ok()) else { continue };
             let local: Vec<Option<(u32, f32, f32, bool)>> = st
@@ -161,6 +226,26 @@ impl MapObjects {
                     rot = DQuat::from_rotation_arc(DVec3::Z, ground_normal(field, h.x, h.y)) * rot;
                 }
                 objects.push(Object { class, pos: DVec3::new(h.x, h.y, z), rot: rot.as_quat() });
+            }
+            for b in &st.bridges {
+                for seg in bridge_segments(b, winter, rows) {
+                    let class = *by_mesh.entry(seg.mesh.clone()).or_insert_with(|| {
+                        let batches = match loader.append_hier(&mut mesh, &seg.mesh, false) {
+                            Ok(b) if !b.is_empty() => b,
+                            Ok(_) => return None,
+                            Err(e) => {
+                                loader.warnings.push(format!("bridge {}: {e}", seg.mesh));
+                                return None;
+                            }
+                        };
+                        let lods = mesh.batches[batches.start].lod.map(|(g, _)| mesh.lod_distances[g as usize].clone()).unwrap_or_default();
+                        classes.push(Class { batches, lods });
+                        Some((classes.len() - 1) as u32)
+                    });
+                    let Some(class) = class else { continue };
+                    let rot = DQuat::from_rotation_z(seg.yaw.to_radians()).as_quat();
+                    objects.push(Object { class, pos: seg.pos, rot });
+                }
             }
         }
         for w in &loader.warnings {

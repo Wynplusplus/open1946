@@ -43,8 +43,21 @@ impl House {
     }
 }
 
+/// A bridge between two land-type pixels (`docs/formats/static.md`, section 2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bridge {
+    /// Land-type pixel column and row (row 0 at the north edge) of both ends.
+    pub begin: (i32, i32),
+    pub end: (i32, i32),
+    /// The road bit it carries: 0x20 country road, 0x40 railway, 0x80 highway.
+    pub kind: i32,
+    /// Sideways shift of the segments, in pixels (|k| ≤ 0.4).
+    pub offset: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Statics {
+    pub bridges: Vec<Bridge>,
     pub classes: Vec<String>,
     pub objects: Vec<Placed>,
     pub house_classes: Vec<String>,
@@ -95,10 +108,12 @@ impl Statics {
         if r.i32()? != -65535 {
             return Err(Error::Bad("version"));
         }
-        for _ in 0..r.count()? {
-            r.take(24)?; // bridge: 5 ints and a float
-        }
         let mut s = Statics::default();
+        for _ in 0..r.count()? {
+            let (x1, y1, x2, y2, kind) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?, r.i32()?);
+            let offset = r.f32()?;
+            s.bridges.push(Bridge { begin: (x1, y1), end: (x2, y2), kind, offset });
+        }
         let nclasses = r.count()?;
         if nclasses > 0 {
             s.classes = (0..nclasses).map(|_| r.utf()).collect::<Result<_, _>>()?;

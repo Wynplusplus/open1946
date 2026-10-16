@@ -5,7 +5,7 @@ Status: **verified** structure on Slovakia, Moscow and Kuban. All values are big
 A map's `load.ini` lists these under `[static]`.
 
 1. `i32` version = `-65535`.
-2. Bridges: `i32 n`, then `n` records of 5 `i32` and 1 `f32` (24 bytes; meaning TODO).
+2. Bridges: `i32 n`, then `n` records of `i32 x1, y1, x2, y2, kind` and `f32 offset` (see "Bridges").
 3. Placed objects:
    - `i32 nClasses`, then that many class names (Java modified UTF-8: `u16` length + bytes).
    - If `nClasses > 0`: `i32 n`, then `n` records of `i32 classIndex, f32 x, f32 y, f32 yaw`.
@@ -58,3 +58,21 @@ Each class name maps to the `static.ini` section whose name **ends with** the sh
 
 The runtime spawns the objects of a 200 m cell only while that cell is near the camera. Drawing distances come
 from each mesh's LOD table (`msh.md`).
+
+## Bridges
+**Verified** from the runtime's bridge classes. `(x1, y1)` and `(x2, y2)` are land-type pixels (row 0 at the
+north edge, `map.md`); the bridge runs horizontally, vertically or diagonally between them. `kind` is the
+road bit it carries: `0x20` country road, `0x40` railway, `0x80` highway. `|offset| ≤ 0.4` (else 0) shifts
+the segments along the bridge, in pixels.
+
+- With `inc` the unit step from start to end and `n` = pixel distance − 1, there are `2n + 2` segments.
+  Segment `i` sits at pixel `begin + inc·s + ½ + inc·k`, with `s = 0` for the first segment, `n + 1` for the
+  last and `(i + 1) >> 1` otherwise; `k = offset + ¼` for the first segment and even `i`, `offset − ¼`
+  otherwise. Pixel coordinates `(px, py)` map to world `(200·px, 200·(rows − 1 − py))`, at `z = 0` (rivers
+  are at sea level on shipped maps).
+- Yaw (counter-clockwise from east) is `45°·octant`, plus 180° for every segment except the last. The octant
+  is 0 for east, 1 north-east, 2 north, … 7 south-east (`+y` pixel rows point south).
+- Mesh: `3do/bridges/<highway|country|rail>[_W]/<short|long>/<end|mid>/mono<N>.sim`: `_W` on winter maps,
+  `short` for axis-aligned and `long` for diagonal bridges, `end` for the first and last segment, and `N` =
+  1 intact, 2 or 3 damaged.
+- Ramps between the deck and the ground are drawn natively with the map's road material (TODO).

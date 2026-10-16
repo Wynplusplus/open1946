@@ -62,6 +62,10 @@ impl Roads {
         c >= 0 && r >= 0 && (c as usize) < self.cols && (r as usize) < self.rows && self.types[r as usize * self.cols + c as usize] & bit != 0
     }
 
+    fn water(&self, c: i64, r: i64) -> bool {
+        c >= 0 && r >= 0 && (c as usize) < self.cols && (r as usize) < self.rows && self.types[r as usize * self.cols + c as usize] & 31 >= 28
+    }
+
     /// World position of a land-type pixel's centre.
     fn centre(&self, c: i64, r: i64) -> DVec2 {
         DVec2::new((c as f64 + 0.5) * CELL, (self.rows as f64 - 1.5 - r as f64) * CELL)
@@ -101,6 +105,10 @@ impl Roads {
                     // Forward neighbours: E, S, SE, SW (rows grow southwards).
                     for (dc, dr) in [(1, 0), (0, 1), (1, 1), (-1, 1)] {
                         if !self.has(col + dc, row + dr, k.bit) {
+                            continue;
+                        }
+                        // Bridges carry roads over water.
+                        if self.water(col, row) || self.water(col + dc, row + dr) {
                             continue;
                         }
                         // A diagonal next to both orthogonal links would make a triangle.
