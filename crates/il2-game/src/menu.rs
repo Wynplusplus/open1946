@@ -231,6 +231,30 @@ enum Screen {
     Single,
     Quick,
     Career,
+    Tracks,
+}
+
+fn data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("openil2")
+}
+
+/// Recorded flights, newest first.
+fn tracks() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(data_dir().join("tracks"))
+        .map(|r| {
+            r.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "otrk"))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v.reverse();
+    v
 }
 
 /// A static campaign (`Missions/Campaign/<country>/<name>/campaign.ini`): stages from `[list]`,
@@ -306,11 +330,7 @@ struct Career {
 }
 
 fn career_path() -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("openil2/career.ini")
+    data_dir().join("career.ini")
 }
 
 fn load_career() -> Career {
@@ -455,14 +475,25 @@ impl Menu {
         let result = std::env::temp_dir().join("openil2_result.txt");
         let _ = std::fs::remove_file(&result);
         self.pending = Some((result.clone(), career));
-        match Command::new(exe)
-            .arg("--root")
+        // Every flight is recorded; the last 20 tracks are kept.
+        let dir = data_dir().join("tracks");
+        let _ = std::fs::create_dir_all(&dir);
+        for old in tracks().into_iter().skip(19) {
+            let _ = std::fs::remove_file(old);
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let mut cmd = Command::new(exe);
+        cmd.arg("--root")
             .arg(&self.root)
             .arg("--result")
             .arg(&result)
-            .args(args)
-            .spawn()
-        {
+            .args(args);
+        if !args.iter().any(|a| a == "--play") {
+            cmd.arg("--record").arg(dir.join(format!("{stamp}.otrk")));
+        }
+        match cmd.spawn() {
             Ok(c) => {
                 self.child = Some(c);
                 if let Some(w) = &self.window {
@@ -583,6 +614,7 @@ impl Menu {
             Screen::Single => self.s("single.info", "Single Missions"),
             Screen::Quick => self.s("quick.info", "Quick Mission Builder"),
             Screen::Career => self.s("main.PilotCareer", "Pilot Career"),
+            Screen::Tracks => self.s("main.PlayTrack", "Play Track"),
         };
         self.hud.text(
             24.0,
@@ -595,6 +627,7 @@ impl Menu {
             Screen::Single => self.draw_single(w, h),
             Screen::Quick => self.draw_quick(w, h),
             Screen::Career => self.draw_career(w, h),
+            Screen::Tracks => self.draw_tracks(w, h),
         }
         if !self.status.is_empty() {
             let s = self.status.clone();
@@ -607,6 +640,7 @@ impl Menu {
             ("main.SingleMissions", "Single Missions"),
             ("main.PilotCareer", "Pilot Career"),
             ("main.Quick", "Quick Mission Builder"),
+            ("main.PlayTrack", "Play Track"),
             ("main.Quit", "Quit"),
         ];
         let mut y = h * 0.3;
@@ -621,6 +655,11 @@ impl Menu {
                         self.scroll = [0; 3];
                     }
                     2 => self.screen = Screen::Quick,
+                    3 => {
+                        self.screen = Screen::Tracks;
+                        self.sel = [0; 3];
+                        self.scroll = [0; 3];
+                    }
                     _ => std::process::exit(0),
                 }
             }
@@ -748,6 +787,52 @@ impl Menu {
                 % alts.len().max(1);
             let mission = format!("{dir}/{}", alts[pick]);
             self.launch_with(&["--mission".into(), mission], true);
+        }
+    }
+
+    fn draw_tracks(&mut self, w: f32, h: f32) {
+        let rows = ((h - 200.0) / (self.hud.line_height() + 4.0)) as usize;
+        let list = tracks();
+        let names: Vec<String> = list
+            .iter()
+            .map(|p| {
+                let secs: u64 = p
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let opts = std::fs::read(p).ok().and_then(|d| {
+                    // The options right after the header: show the mission or aircraft.
+                    let text = String::from_utf8_lossy(&d[8..d.len().min(600)]).into_owned();
+                    text.split(|c: char| c.is_control())
+                        .filter(|s| s.ends_with(".mis") || s.starts_with("air."))
+                        .last()
+                        .map(str::to_owned)
+                });
+                let ago = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs())
+                    .saturating_sub(secs);
+                format!("{} min ago   {}", ago / 60, opts.unwrap_or_default())
+            })
+            .collect();
+        if let Some(i) = self.list(24.0, 80.0, w - 48.0, rows, &names, self.sel[0], 0) {
+            self.sel[0] = i;
+        }
+        let by = h - 80.0;
+        if self.button(24.0, by, 200.0, &self.s("quick.BAC", "Back")) {
+            self.screen = Screen::Main;
+        }
+        if let Some(p) = list.get(self.sel[0]) {
+            if self.button(
+                w - 224.0,
+                by,
+                200.0,
+                &self.s("main.PlayTrack", "Play Track"),
+            ) {
+                let p = p.to_string_lossy().into_owned();
+                self.launch(&["--play".into(), p]);
+            }
         }
     }
 

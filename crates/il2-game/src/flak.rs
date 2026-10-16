@@ -151,6 +151,7 @@ pub fn step(
                 owner: b.id,
                 // Fused to burst where the target will be, give or take 10 %.
                 fuse: high_explosive.then(|| ty.time_life - tof * (0.9 + 0.2 * rng.uniform())),
+                id: crate::weapons::bullet_id(),
             });
             b.next_shot += b.spec.shot_step.max(0.05);
             if b.chainfire > 0.0 {

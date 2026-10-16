@@ -109,6 +109,15 @@ pub struct Bullet {
     pub owner: usize,
     /// Time fuse: explodes in the air when `life` falls to this (anti-aircraft shells).
     pub fuse: Option<f64>,
+    /// Unique, increasing serial (track recording).
+    pub id: u64,
+}
+
+static NEXT_BULLET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A fresh bullet serial.
+pub fn bullet_id() -> u64 {
+    NEXT_BULLET.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Bullet {
@@ -259,6 +268,7 @@ pub fn fire(
                 tracer: g.count.is_multiple_of(g.spec.trace_freq),
                 owner,
                 fuse: None,
+                id: bullet_id(),
             });
             recoil -= dir_body * (b.mass * b.speed);
             g.count += 1;
@@ -389,6 +399,22 @@ pub fn advance(
         }
         i += 1;
     }
+}
+
+/// Moves bullets for show only (track playback): drag, gravity, gone at the ground or the end of
+/// their life.
+pub fn advance_visual(bullets: &mut Vec<Bullet>, dt: f64, field: &HeightField) {
+    bullets.retain_mut(|b| {
+        b.prev = b.pos;
+        let speed = b.vel.length();
+        b.vel += b.vel * (b.ty().kv * dt * speed);
+        b.vel.z -= 9.8 * dt;
+        b.pos += b.vel * dt;
+        b.life -= dt;
+        b.life > 0.0
+            && b.pos.z > field.height_at(b.pos.x, b.pos.y)
+            && !b.fuse.is_some_and(|f| b.life <= f)
+    });
 }
 
 fn ground_normal(field: &HeightField, x: f64, y: f64) -> DVec3 {

@@ -86,6 +86,7 @@ pub fn fire(
                 tracer: g.count.is_multiple_of(g.spec.trace_freq.max(1)),
                 owner,
                 fuse: None,
+                id: crate::weapons::bullet_id(),
             });
             g.count += 1;
             g.ammo -= 1;

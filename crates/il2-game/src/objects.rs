@@ -84,6 +84,8 @@ pub struct MapObjects {
     /// Classes named by the map that can't be drawn.
     pub skipped: Vec<String>,
     profiles: Vec<Profile>,
+    /// Objects destroyed so far, in order (track recording).
+    pub killed: Vec<usize>,
 }
 
 /// Per-class placement rules from `static.ini`.
@@ -524,6 +526,7 @@ impl<'a> Builder<'a> {
             buckets,
             skipped: self.skipped,
             profiles: self.profiles,
+            killed: Vec::new(),
         }
     }
 }
@@ -624,7 +627,16 @@ impl MapObjects {
         best.map(|(t, i)| (i, a + d * t))
     }
 
-    fn kill(&mut self, i: usize) {
+    /// Destroys object `i` (also for track playback); logged in `killed`.
+    pub fn kill(&mut self, i: usize) {
+        if !self
+            .objects
+            .get(i)
+            .is_some_and(|o| o.alive && o.profile > 0)
+        {
+            return;
+        }
+        self.killed.push(i);
         let o = &mut self.objects[i];
         o.alive = false;
         let p = self.profiles[o.profile as usize - 1];

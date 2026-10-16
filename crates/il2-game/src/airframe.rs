@@ -31,6 +31,8 @@ pub struct Airframe {
     rng: u64,
     /// Damage below a full level, per part (the runtime's `eAbsorber`).
     absorbed: [f64; 44],
+    /// Damage dealt so far: chunk and levels (track recording).
+    pub log: Vec<(String, usize)>,
 }
 
 impl Airframe {
@@ -54,6 +56,7 @@ impl Airframe {
             crashes: Vec::new(),
             rng: 0x2545_F491_4F6C_DD1D,
             absorbed: [0.0; 44],
+            log: Vec::new(),
         }
     }
 
@@ -122,6 +125,9 @@ impl Airframe {
     }
 
     pub fn next_dmg_levels(&mut self, sim: &mut Sim, n: usize, chunk: &str) {
+        if n > 0 {
+            self.log.push((chunk.to_owned(), n));
+        }
         for _ in 0..n.min(4) {
             self.next_dmg_level(sim, chunk);
         }

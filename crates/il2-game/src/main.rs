@@ -19,6 +19,7 @@ mod objects;
 mod particles;
 mod roads;
 mod sky;
+mod track;
 mod traffic;
 mod view;
 mod weapons;
@@ -75,6 +76,15 @@ struct Args {
     /// Render a menu screen to a PNG: `main|single|quick,out.png`.
     #[arg(long, value_delimiter = ',')]
     menu_shot: Option<Vec<String>>,
+    /// Leave the flight after this many seconds (automated runs).
+    #[arg(long)]
+    quit_after: Option<f64>,
+    /// Record the flight to this track file (OpenIL2's own format).
+    #[arg(long)]
+    record: Option<std::path::PathBuf>,
+    /// Play back a track recorded with `--record`.
+    #[arg(long)]
+    play: Option<std::path::PathBuf>,
     /// Write the flight's outcome (success, objectives) to this file when it ends.
     #[arg(long)]
     result: Option<std::path::PathBuf>,
@@ -344,6 +354,44 @@ fn apply_aircraft_hits(
     }
 }
 
+/// The command-line options a recorded track repeats: everything but recording, playback and result
+/// options.
+fn record_options() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip = false;
+    for a in std::env::args().skip(1) {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if ["--record", "--play", "--result", "--root", "--quit-after"].contains(&a.as_str()) {
+            skip = true;
+            continue;
+        }
+        if [
+            "--record=",
+            "--play=",
+            "--result=",
+            "--root=",
+            "--quit-after=",
+        ]
+        .iter()
+        .any(|p| a.starts_with(p))
+        {
+            continue;
+        }
+        out.push(a);
+    }
+    out
+}
+
+struct Playback {
+    track: track::Track,
+    /// The last frame whose events are applied.
+    idx: usize,
+    t: f64,
+}
+
 fn new_airframe(a: &world::AircraftAssets) -> airframe::Airframe {
     airframe::Airframe::new(
         a.rig.names.clone(),
@@ -373,6 +421,8 @@ struct Combat {
     booms: Vec<(DVec3, f64)>,
     /// Explosions of the last step only (bombs, rockets, shells), for ground units.
     tick_booms: Vec<(DVec3, f64)>,
+    /// All explosions since the track recorder last looked.
+    boom_log: Vec<(DVec3, f64)>,
 }
 
 impl Combat {
@@ -386,6 +436,7 @@ impl Combat {
             hits: Vec::new(),
             booms: Vec::new(),
             tick_booms: Vec::new(),
+            boom_log: Vec::new(),
         }
     }
 
@@ -443,6 +494,8 @@ impl Combat {
         let fx = &mut view.effects;
         self.tick_booms.clear();
         self.tick_booms
+            .extend(booms.iter().map(|&(at, power, _)| (at, power)));
+        self.boom_log
             .extend(booms.iter().map(|&(at, power, _)| (at, power)));
         for (b, h) in &self.hits {
             let ty = b.ty();
@@ -506,6 +559,13 @@ struct Game {
     player_army: u8,
     mission: Option<il2_formats::mission::Mission>,
     devicelink: Option<devicelink::DeviceLink>,
+    recorder: Option<track::Recorder>,
+    playback: Option<Playback>,
+    /// Gun data by name, for rounds of played-back tracks.
+    gun_specs: std::collections::HashMap<String, std::sync::Arc<weapons::GunSpec>>,
+    clock: f64,
+    /// Leave after this many seconds (automated runs).
+    quit_after: Option<f64>,
     objectives: objectives::Tracker,
     dl_axes: [Option<f64>; 3],
     dl_fire: [bool; 4],
@@ -680,6 +740,217 @@ impl Game {
         }
     }
 
+    /// Track playback: aircraft and ground units take the recorded states, events are replayed.
+    fn playback_step(&mut self, dt: f64) {
+        let Some(mut pb) = self.playback.take() else {
+            return;
+        };
+        pb.t += dt;
+        let n = pb.track.frames.len();
+        while pb.idx < n && pb.track.frames[pb.idx].t <= pb.t {
+            let f = pb.track.frames[pb.idx].clone();
+            self.replay_events(&f);
+            pb.idx += 1;
+        }
+        if n > 0 {
+            let a = &pb.track.frames[pb.idx.saturating_sub(1).min(n - 1)];
+            let b = &pb.track.frames[pb.idx.min(n - 1)];
+            let k = if b.t > a.t {
+                ((pb.t - a.t) / (b.t - a.t)).clamp(0.0, 1.0) as f32
+            } else {
+                1.0
+            };
+            for s in &a.aircraft {
+                let e = b.aircraft.iter().find(|x| x.id == s.id).unwrap_or(s);
+                let (pos, ori) = track::lerp(s, e, k);
+                let sim = if s.id == 0 {
+                    Some(&mut self.sim)
+                } else {
+                    self.traffic
+                        .as_mut()
+                        .and_then(|t| t.planes.get_mut(s.id as usize - 1))
+                        .map(|p| &mut p.sim)
+                };
+                if let Some(sim) = sim {
+                    sim.pos = pos;
+                    sim.ori = ori;
+                    sim.vel = s.vel.as_dvec3();
+                    let c = s.ct;
+                    sim.ct.aileron = c[0] as f64;
+                    sim.ct.elevator = c[1] as f64;
+                    sim.ct.rudder = c[2] as f64;
+                    sim.ct.flaps = c[3] as f64;
+                    sim.ct.gear = c[4] as f64;
+                    sim.ct.throttle = c[5] as f64;
+                    sim.airbrake = c[6] as f64;
+                    sim.structure.destroyed = s.destroyed;
+                }
+            }
+            if let Some(g) = self.ground.as_mut() {
+                for (u, st) in g
+                    .columns
+                    .iter_mut()
+                    .flat_map(|c| c.units.iter_mut())
+                    .zip(&a.units)
+                {
+                    u.pos = st.pos.as_dvec3();
+                    u.yaw = st.yaw as f64;
+                    u.alive = st.alive;
+                }
+            }
+            if pb.idx >= n && pb.t > pb.track.frames[n - 1].t + 3.0 {
+                self.hud.message("End of track");
+                pb.t = pb.track.frames[n - 1].t - 2.9;
+            }
+        }
+        self.playback = Some(pb);
+        weapons::advance_visual(&mut self.combat.bullets, dt, &self.field);
+        self.view.effects.update(dt);
+        self.airframe.update(&mut self.sim, &self.field, dt);
+        if let Some(t) = self.traffic.as_mut() {
+            for p in &mut t.planes {
+                p.airframe.update(&mut p.sim, &self.field, dt);
+            }
+        }
+    }
+
+    fn replay_events(&mut self, f: &track::Frame) {
+        for (id, chunk, n) in &f.damage {
+            if *id == 0 {
+                self.airframe
+                    .next_dmg_levels(&mut self.sim, *n as usize, chunk);
+            } else if let Some(p) = self
+                .traffic
+                .as_mut()
+                .and_then(|t| t.planes.get_mut(*id as usize - 1))
+            {
+                p.airframe.next_dmg_levels(&mut p.sim, *n as usize, chunk);
+            }
+        }
+        for &k in &f.kills {
+            self.view.objects.kill(k as usize);
+        }
+        for &(at, power) in &f.booms {
+            particles::impact(
+                &mut self.view.effects,
+                at,
+                particles::Impact::Blast {
+                    power: power as f64,
+                },
+                at.z < 0.5,
+                false,
+                &mut self.combat.rng,
+            );
+            self.combat.booms.push((at, power as f64));
+        }
+        for b in &f.bullets {
+            let Some(spec) = self.gun_specs.get(&b.gun) else {
+                continue;
+            };
+            self.combat.bullets.push(weapons::Bullet {
+                pos: b.pos,
+                prev: b.pos,
+                vel: b.vel.as_dvec3(),
+                life: b.life as f64,
+                spec: spec.clone(),
+                kind: (b.kind as usize).min(spec.bullets.len().saturating_sub(1)),
+                tracer: b.tracer,
+                owner: usize::MAX,
+                fuse: b.fuse.map(|v| v as f64),
+                id: 0,
+            });
+        }
+    }
+
+    /// Track recording: a frame every `track::STEP` seconds with the events since the last one.
+    fn record_frame(&mut self) {
+        let Some(rec) = self.recorder.as_mut() else {
+            self.airframe.log.clear();
+            if let Some(t) = self.traffic.as_mut() {
+                t.planes.iter_mut().for_each(|p| p.airframe.log.clear());
+            }
+            self.combat.boom_log.clear();
+            return;
+        };
+        if self.clock < rec.next_t {
+            return;
+        }
+        rec.next_t = self.clock + track::STEP;
+        let state = |id: u32, s: &Sim| track::AircraftState {
+            id,
+            pos: s.pos,
+            ori: s.ori.as_quat(),
+            vel: s.vel.as_vec3(),
+            ct: [
+                s.ct.aileron,
+                s.ct.elevator,
+                s.ct.rudder,
+                s.ct.flaps,
+                s.ct.gear,
+                s.ct.throttle,
+                s.airbrake,
+            ]
+            .map(|v| v as f32),
+            destroyed: s.structure.destroyed,
+        };
+        let mut f = track::Frame {
+            t: self.clock,
+            ..Default::default()
+        };
+        f.aircraft.push(state(0, &self.sim));
+        f.damage.extend(
+            self.airframe
+                .log
+                .drain(..)
+                .map(|(c, n)| (0, c, n.min(255) as u8)),
+        );
+        if let Some(t) = self.traffic.as_mut() {
+            for (i, p) in t.planes.iter_mut().enumerate() {
+                f.aircraft.push(state(1 + i as u32, &p.sim));
+                f.damage.extend(
+                    p.airframe
+                        .log
+                        .drain(..)
+                        .map(|(c, n)| (1 + i as u32, c, n.min(255) as u8)),
+                );
+            }
+        }
+        if let Some(g) = &self.ground {
+            for u in g.columns.iter().flat_map(|c| c.units.iter()) {
+                f.units.push(track::UnitState {
+                    pos: u.pos.as_vec3(),
+                    yaw: u.yaw as f32,
+                    alive: u.alive,
+                });
+            }
+        }
+        f.kills = self.view.objects.killed[rec.last_kill..]
+            .iter()
+            .map(|&k| k as u32)
+            .collect();
+        rec.last_kill = self.view.objects.killed.len();
+        f.booms = self
+            .combat
+            .boom_log
+            .drain(..)
+            .map(|(p, w)| (p, w as f32))
+            .collect();
+        let last = rec.last_bullet;
+        for b in self.combat.bullets.iter().filter(|b| b.id > last) {
+            rec.last_bullet = rec.last_bullet.max(b.id);
+            f.bullets.push(track::BulletSpawn {
+                pos: b.pos,
+                vel: b.vel.as_vec3(),
+                gun: b.spec.name.clone(),
+                kind: b.kind as u8,
+                tracer: b.tracer,
+                life: b.life as f32,
+                fuse: b.fuse.map(|v| v as f32),
+            });
+        }
+        rec.write(&f);
+    }
+
     /// Answers DeviceLink queries and applies what they set (`devicelink.rs`).
     fn device_link(&mut self) {
         let Some(dl) = self.devicelink.as_mut() else {
@@ -749,6 +1020,11 @@ impl Game {
         self.update_inputs(dt);
         self.device_link();
         self.acc += dt;
+        self.clock += dt;
+        if self.playback.is_some() {
+            self.acc = 0.0;
+            self.playback_step(dt);
+        }
         let field = &self.field;
         let ground = |x: f64, y: f64| field.height_at(x, y);
         let k = |c| self.keys.contains(&c);
@@ -855,6 +1131,8 @@ impl Game {
             }
             self.acc -= TICK;
         }
+        self.record_frame();
+        let field = &self.field;
         let (Some(r), Some(terrain), Some(plane)) =
             (self.renderer.as_mut(), &self.terrain, &self.plane)
         else {
@@ -1132,7 +1410,12 @@ impl ApplicationHandler for Game {
                     }
                 }
             }
-            WindowEvent::RedrawRequested => self.frame(),
+            WindowEvent::RedrawRequested => {
+                self.frame();
+                if self.quit_after.is_some_and(|q| self.clock >= q) {
+                    el.exit();
+                }
+            }
             WindowEvent::MouseInput {
                 state,
                 button: winit::event::MouseButton::Left,
@@ -1353,6 +1636,23 @@ fn main() {
     if args.survey {
         survey(&vfs, &fms);
         return;
+    }
+    // A track: set the flight up from the options it was recorded with.
+    let mut playback_track = None;
+    if let Some(p) = args.play.clone() {
+        let t = track::read(&p).unwrap_or_else(|e| fail(format!("{}: {e}", p.display())));
+        let root = args.root.clone();
+        args = Args::parse_from(
+            std::iter::once("openil2".to_owned()).chain(t.options.iter().cloned()),
+        );
+        args.root = root;
+        eprintln!(
+            "playing {} ({} frames, {:.0} s)",
+            p.display(),
+            t.frames.len(),
+            t.frames.last().map_or(0.0, |f| f.t)
+        );
+        playback_track = Some(t);
     }
     if let Some(bt) = &args.bomb_test {
         print!(
@@ -1864,6 +2164,30 @@ fn main() {
         player_army,
         mission: mission.clone(),
         devicelink: devicelink::DeviceLink::open(&args.root, args.devicelink),
+        recorder: args.record.as_ref().and_then(|p| {
+            let options = record_options();
+            track::Recorder::create(p, &options)
+                .map_err(|e| eprintln!("record {}: {e}", p.display()))
+                .ok()
+        }),
+        playback: playback_track.take().map(|track| Playback {
+            track,
+            idx: 0,
+            t: 0.0,
+        }),
+        gun_specs: {
+            let mut m = std::collections::HashMap::new();
+            for g in guns
+                .iter()
+                .map(|g| g.spec.clone())
+                .chain(ai_specs.iter().cloned())
+            {
+                m.insert(g.name.clone(), g);
+            }
+            m
+        },
+        clock: 0.0,
+        quit_after: args.quit_after,
         objectives: objectives::Tracker::new(
             mission
                 .as_ref()
@@ -1922,6 +2246,34 @@ fn main() {
     };
     let el = EventLoop::new().expect("event loop");
     el.run_app(&mut game).expect("run");
+    if let Some(r) = game.recorder.as_mut() {
+        r.flush();
+    }
+    if std::env::var_os("IL2_TRACE").is_some() {
+        eprintln!(
+            "end at {:.1} s: player {:.1?}, traffic {:?}",
+            game.clock,
+            game.sim.pos,
+            game.traffic.as_ref().map(|t| t
+                .planes
+                .iter()
+                .map(|p| (
+                    p.sim.pos.x.round(),
+                    p.sim.pos.y.round(),
+                    p.sim.structure.destroyed
+                ))
+                .collect::<Vec<_>>())
+        );
+        if let Some(pb) = &game.playback {
+            if let Some(f) = pb.track.frames.iter().rev().find(|f| f.t <= pb.t) {
+                eprintln!(
+                    "track frame {:.2} s: player {:.1?}",
+                    f.t,
+                    f.aircraft.first().map(|a| a.pos)
+                );
+            }
+        }
+    }
     if let Some(path) = &args.result {
         let met = game.objectives.judge(
             game.traffic.as_ref(),
