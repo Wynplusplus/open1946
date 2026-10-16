@@ -7,6 +7,7 @@ mod effects;
 mod flak;
 mod forest;
 mod ground;
+mod gunners;
 mod hitbox;
 mod hud;
 mod joystick;
@@ -689,6 +690,27 @@ impl Game {
                     &mut self.combat.rng,
                     &mut self.combat.bullets,
                 );
+                // The player's own gunners.
+                let enemies: Vec<(DVec3, DVec3)> = flying
+                    .iter()
+                    .filter(|c| c.2 != self.player_army)
+                    .map(|c| (c.0, c.1))
+                    .collect();
+                if !self.sim.structure.destroyed {
+                    gunners::fire(
+                        &mut self.combat.guns,
+                        self.assets.turret_arcs.as_deref(),
+                        self.sim.pos,
+                        self.sim.ori,
+                        self.sim.vel,
+                        &enemies,
+                        2,
+                        TICK,
+                        &mut self.combat.rng,
+                        0,
+                        &mut self.combat.bullets,
+                    );
+                }
             }
             airframe_step(
                 &mut self.airframe,
@@ -1499,6 +1521,26 @@ fn main() {
                     &mut combat.rng,
                     &mut combat.bullets,
                 );
+                let enemies: Vec<(DVec3, DVec3)> = flying
+                    .iter()
+                    .filter(|c| c.2 != player_army)
+                    .map(|c| (c.0, c.1))
+                    .collect();
+                if !sim.structure.destroyed {
+                    gunners::fire(
+                        &mut combat.guns,
+                        assets.turret_arcs.as_deref(),
+                        sim.pos,
+                        sim.ori,
+                        sim.vel,
+                        &enemies,
+                        2,
+                        TICK,
+                        &mut combat.rng,
+                        0,
+                        &mut combat.bullets,
+                    );
+                }
             }
             airframe_step(&mut af, &mut sim, &field, &mut combat, &mut view);
             if let Some(g) = columns.as_mut() {

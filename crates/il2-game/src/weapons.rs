@@ -91,9 +91,9 @@ pub struct Gun {
     pub frame: Mat4,
     pub trigger: i32,
     pub ammo: i32,
-    next_shot: f64,
-    index: usize,
-    count: u32,
+    pub(crate) next_shot: f64,
+    pub(crate) index: usize,
+    pub(crate) count: u32,
 }
 
 #[derive(Clone, Debug)]

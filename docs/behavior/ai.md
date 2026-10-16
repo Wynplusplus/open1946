@@ -120,3 +120,15 @@ station is echelon right, 40 m back and 40 m out per place in the flight. The pi
 the waypoint autopilot's laws at a point 300 m ahead of his station, at the station's height.
 The throttle is `i + 0.05·e` with `e = 0.02·(distance ahead to the station) + (leader speed −
 speed)`, and the integral `i` grows by `0.02·e·dt`.
+
+## Gunners
+Guns in trigger groups 10 and up are turrets (group `10 + n` is turret `n`). Each aircraft class
+says where its turrets can aim in `turretAngles(turret, float[] {yaw, pitch, roll})`, which
+clamps the angles and returns whether they were within reach. OpenIL2 evaluates this method from
+the installed classes on a 10° grid at load (yaw −180…180°, pitch −90…90°, in the turret's
+frame). It takes the gun hook's frame as the turret's.
+
+OpenIL2's gunner (own design): each step every turret gun picks the nearest enemy aircraft within
+500/600/700/800 m (rookie to ace) whose lead point lies inside its arc. The lead point is
+`target + relative velocity × time of flight`, raised by the drop. The gun fires at its own rate
+with a gaussian scatter of 2/1.4/1/0.7°. The player's aircraft has AI gunners of veteran skill.

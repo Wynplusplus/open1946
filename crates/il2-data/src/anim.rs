@@ -1358,6 +1358,59 @@ pub fn evaluate(classes: &[ClassFile], name: &str, desc: &str) -> Result<Value, 
     }
 }
 
+/// An argument for `call_bool`.
+pub enum Arg {
+    Int(i32),
+    Floats(Vec<f32>),
+}
+
+/// Runs instance method `name desc` of `classes[0]` with `args` and returns its boolean result
+/// (lenient: unknown calls answer their defaults).
+pub fn call_bool(
+    classes: &[ClassFile],
+    name: &str,
+    desc: &str,
+    args: &[Arg],
+) -> Result<bool, String> {
+    let mut m = Machine {
+        chain: classes,
+        arrays: vec![vec![0.0; 3], vec![0.0; 3]],
+        oarrays: Vec::new(),
+        objects: Vec::new(),
+        out: BTreeMap::new(),
+        budget: 100_000,
+        statics: HashMap::new(),
+        fields: HashMap::new(),
+        clinit_done: HashSet::new(),
+        lenient: true,
+        record: &[],
+        recorded: Vec::new(),
+        world: None,
+        interps: Vec::new(),
+        missing: HashSet::new(),
+        pc: 0,
+        soft_error: None,
+    };
+    let (cf, meth) = m
+        .resolve(None, name, desc)
+        .ok_or_else(|| format!("no method {name}{desc}"))?;
+    let mut full = vec![V::This];
+    for a in args {
+        full.push(match a {
+            Arg::Int(i) => V::I(*i),
+            Arg::Floats(f) => {
+                m.arrays.push(f.clone());
+                V::Arr(m.arrays.len() - 1)
+            }
+        });
+    }
+    match m.call(cf, meth, full, 0) {
+        Ok(Some(V::I(i))) => Ok(i != 0),
+        Ok(_) => Err("no boolean result".into()),
+        Err(_) => Err(last_abort()),
+    }
+}
+
 /// Runs the static initializer of `classes[0]` leniently and returns the recorded calls to the
 /// static methods named in `record`.
 pub fn record_clinit(

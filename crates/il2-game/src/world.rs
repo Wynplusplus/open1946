@@ -33,6 +33,8 @@ pub struct AircraftAssets {
     pub toughness: [f64; 44],
     /// The class implements `TypeFighter`.
     pub fighter: bool,
+    /// Turret arcs (`gunners::Arc`) per turret, when the class defines them.
+    pub turret_arcs: Option<Vec<crate::gunners::Arc>>,
 }
 
 /// Loads the height field of a map's `load.ini`.
@@ -203,6 +205,7 @@ pub fn load_aircraft_with(
         boxes: Vec::new(),
         toughness: [0.01; 44],
         fighter: false,
+        turret_arcs: None,
     };
     let down = pose(
         &assets_for_pose,
@@ -354,6 +357,22 @@ pub fn load_aircraft_with(
         boxes,
         toughness,
         fighter: classes.interfaces(class).iter().any(|i| i == "TypeFighter"),
+        turret_arcs: {
+            let turrets = classes
+                .aircraft_weapons(class)
+                .map(|w| {
+                    w.triggers
+                        .iter()
+                        .filter(|&&t| t >= 10)
+                        .map(|&t| (t - 9) as usize)
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            (turrets > 0)
+                .then(|| classes.turret_limits(class, turrets))
+                .flatten()
+        },
     })
 }
 

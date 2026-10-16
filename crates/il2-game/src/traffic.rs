@@ -402,6 +402,25 @@ impl Traffic {
             };
             p.sim.tick(&inputs, &ground);
             if alive {
+                let enemies: Vec<(DVec3, DVec3)> = contacts
+                    .iter()
+                    .filter(|c| c.0 != 1 + n && c.3 != p.army)
+                    .map(|c| (c.1, c.2))
+                    .collect();
+                let arcs = self.classes[p.class].assets.turret_arcs.as_deref();
+                crate::gunners::fire(
+                    &mut p.guns,
+                    arcs,
+                    p.sim.pos,
+                    p.sim.ori,
+                    p.sim.vel,
+                    &enemies,
+                    p.pilot.skill,
+                    dt,
+                    rng,
+                    1 + n,
+                    bullets,
+                );
                 let t = [fire, fire, false, false];
                 let recoil = weapons::fire(
                     &mut p.guns,

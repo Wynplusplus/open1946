@@ -293,6 +293,42 @@ impl<'a> Classes<'a> {
         )
     }
 
+    /// Where each turret can aim (`turretAngles`), sampled on a 10° grid: for turret `t`,
+    /// `out[t][(pitch + 90)/10][(yaw + 180)/10]` with yaw −180..180 and pitch −90..90 degrees in the
+    /// turret's frame (yaw positive to the left). `None` when the class has no such method.
+    pub fn turret_limits(&self, class: &str, turrets: usize) -> Option<Vec<Vec<Vec<bool>>>> {
+        let full = if class.starts_with("com.") {
+            class.to_owned()
+        } else {
+            format!("com.maddox.il2.objects.{class}")
+        };
+        let pool = self.pool(&full);
+        let mut out = Vec::new();
+        for t in 0..turrets {
+            let mut grid = Vec::new();
+            for p in 0..19 {
+                let mut row = Vec::new();
+                for y in 0..37 {
+                    let (yaw, pitch) = (-180.0 + 10.0 * y as f32, -90.0 + 10.0 * p as f32);
+                    let ok = anim::call_bool(
+                        &pool,
+                        "turretAngles",
+                        "(I[F)Z",
+                        &[
+                            anim::Arg::Int(t as i32),
+                            anim::Arg::Floats(vec![yaw, pitch, 0.0]),
+                        ],
+                    )
+                    .ok()?;
+                    row.push(ok);
+                }
+                grid.push(row);
+            }
+            out.push(grid);
+        }
+        Some(out)
+    }
+
     /// The string constants of a class (e.g. model paths named in its code).
     pub fn class_strings(&self, class: &str) -> Vec<String> {
         let full = if class.starts_with("com.") {
