@@ -44,6 +44,19 @@ impl Target {
         }
     }
 
+    /// The visible chunk closest to a world point (where a nearby blast does its damage).
+    pub fn nearest_node(&self, at: DVec3) -> Option<usize> {
+        let p = self.inv.transform_point3(at).as_vec3();
+        self.chunks
+            .iter()
+            .map(|(node, inv, lo, hi)| {
+                let q = inv.transform_point3(p);
+                (*node, (q.clamp(*lo, *hi) - q).length_squared())
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(n, _)| n)
+    }
+
     /// The first chunk the segment `a`→`b` (world) passes through: node and fraction along it.
     pub fn hit(&self, a: DVec3, b: DVec3) -> Option<(usize, f64)> {
         // Quick reject against the bounding sphere.

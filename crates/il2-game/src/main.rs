@@ -4,6 +4,7 @@ mod audio;
 mod cockpit;
 mod damage;
 mod effects;
+mod flak;
 mod forest;
 mod ground;
 mod hitbox;
@@ -198,6 +199,44 @@ fn build_targets(
     out
 }
 
+/// Blasts near aircraft (bombs, rockets, shells, flak bursts): the TNT reaching the aircraft
+/// (`damage::received_power_realistic`), half of it, strikes the chunk nearest the burst.
+fn aircraft_blasts(
+    combat: &Combat,
+    targets: &[hitbox::Target],
+    sim: &mut Sim,
+    af: &mut airframe::Airframe,
+    assets: &world::AircraftAssets,
+    mut traffic: Option<&mut traffic::Traffic>,
+) {
+    for &(at, power) in &combat.tick_booms {
+        for t in targets {
+            if t.id >= ground::ID_BASE {
+                continue;
+            }
+            let d = (t.pos - at).length();
+            if d > t.radius + 60.0 {
+                continue;
+            }
+            let got = 0.5 * damage::received_power_realistic(power, d, t.radius);
+            let Some(node) = t.nearest_node(at) else {
+                continue;
+            };
+            if std::env::var_os("IL2_TRACE").is_some() {
+                eprintln!(
+                    "blast of {power:.2} kg at {d:.0} m from aircraft {}: {got:.4} kg",
+                    t.id
+                );
+            }
+            if t.id == 0 {
+                af.shot(sim, node, got, &assets.toughness);
+            } else if let Some(tr) = traffic.as_deref_mut() {
+                tr.shot(t.id - 1, node, got);
+            }
+        }
+    }
+}
+
 /// Gunfire and blasts on ground units; destroyed ones burst into flames.
 fn ground_hits(combat: &mut Combat, ground: &mut ground::Ground, view: &mut view::WorldView) {
     let mut killed = Vec::new();
@@ -369,7 +408,8 @@ impl Combat {
                 let at = match h {
                     weapons::Hit::Ground(p)
                     | weapons::Hit::Object(_, p, _)
-                    | weapons::Hit::Aircraft(_, _, p) => *p,
+                    | weapons::Hit::Aircraft(_, _, p)
+                    | weapons::Hit::Air(p) => *p,
                 };
                 self.tick_booms.push((at, ty.power + 0.03 * ty.mass));
             }
@@ -390,6 +430,7 @@ impl Combat {
             let (at, object) = match h {
                 weapons::Hit::Ground(p) => (*p, false),
                 weapons::Hit::Object(_, p, _) | weapons::Hit::Aircraft(_, _, p) => (*p, true),
+                weapons::Hit::Air(p) => (*p, true),
             };
             let what = if ty.power > 0.0 && ty.power_radius > 0.0 {
                 particles::Impact::Blast { power: ty.power }
@@ -419,6 +460,8 @@ struct Game {
     airframe: airframe::Airframe,
     traffic: Option<traffic::Traffic>,
     ground: Option<ground::Ground>,
+    flak: Vec<flak::Battery>,
+    player_army: u8,
     assets: world::AircraftAssets,
     field: HeightField,
     terrain_data: Option<il2_render::TerrainData>,
@@ -622,6 +665,31 @@ impl Game {
                 &self.assets,
                 self.traffic.as_mut(),
             );
+            aircraft_blasts(
+                &self.combat,
+                &targets,
+                &mut self.sim,
+                &mut self.airframe,
+                &self.assets,
+                self.traffic.as_mut(),
+            );
+            {
+                let mut flying = self
+                    .traffic
+                    .as_ref()
+                    .map(|t| t.contacts())
+                    .unwrap_or_default();
+                if !self.sim.structure.destroyed {
+                    flying.push((self.sim.pos, self.sim.vel, self.player_army));
+                }
+                flak::step(
+                    &mut self.flak,
+                    &flying,
+                    TICK,
+                    &mut self.combat.rng,
+                    &mut self.combat.bullets,
+                );
+            }
             airframe_step(
                 &mut self.airframe,
                 &mut self.sim,
@@ -1190,6 +1258,18 @@ fn main() {
         .map(|c| c.flight_model)
         .unwrap_or_default();
     let field = world::load_heights(&vfs, &args.map).unwrap_or_else(|e| fail(e));
+    let mut batteries = mission
+        .as_ref()
+        .filter(|_| !args.no_ai)
+        .map(|m| flak::batteries(&vfs, &fms, m, &field))
+        .unwrap_or_default();
+    let player_army = {
+        let armies = traffic::armies(&vfs);
+        mission
+            .as_ref()
+            .and_then(|m| m.player_wing.as_deref())
+            .map_or(2, |w| traffic::wing_army(&armies, w))
+    };
     let mut columns = mission
         .as_ref()
         .filter(|m| !args.no_ai && !m.chiefs.is_empty())
@@ -1340,7 +1420,8 @@ fn main() {
         let pos = sim.pos + fwd * 150.0;
         traffic = traffic::Traffic::single(&vfs, &fms, class, pos, pos + fwd, sim.vel.length());
     }
-    let ai_specs = traffic.as_ref().map(|t| t.gun_specs()).unwrap_or_default();
+    let mut ai_specs = traffic.as_ref().map(|t| t.gun_specs()).unwrap_or_default();
+    ai_specs.extend(batteries.iter().map(|b| b.spec()));
     let tracers = effects::Tracers::load(
         &vfs,
         guns.iter()
@@ -1398,6 +1479,27 @@ fn main() {
             let targets = build_targets(&sim, &assets, &af, traffic.as_ref(), columns.as_ref());
             combat.step(&mut sim, &triggers, &field, &mut view, &targets);
             apply_aircraft_hits(&combat, &mut sim, &mut af, &assets, traffic.as_mut());
+            aircraft_blasts(
+                &combat,
+                &targets,
+                &mut sim,
+                &mut af,
+                &assets,
+                traffic.as_mut(),
+            );
+            {
+                let mut flying = traffic.as_ref().map(|t| t.contacts()).unwrap_or_default();
+                if !sim.structure.destroyed {
+                    flying.push((sim.pos, sim.vel, player_army));
+                }
+                flak::step(
+                    &mut batteries,
+                    &flying,
+                    TICK,
+                    &mut combat.rng,
+                    &mut combat.bullets,
+                );
+            }
             airframe_step(&mut af, &mut sim, &field, &mut combat, &mut view);
             if let Some(g) = columns.as_mut() {
                 ground_hits(&mut combat, g, &mut view);
@@ -1547,6 +1649,8 @@ fn main() {
         airframe,
         traffic,
         ground: columns,
+        flak: batteries,
+        player_army,
         inputs: Inputs {
             throttle: throttle0,
             gear: gear0,

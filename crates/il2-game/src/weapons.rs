@@ -107,6 +107,8 @@ pub struct Bullet {
     pub tracer: bool,
     /// Index of the firing aircraft (to skip self-hits).
     pub owner: usize,
+    /// Time fuse: explodes in the air when `life` falls to this (anti-aircraft shells).
+    pub fuse: Option<f64>,
 }
 
 impl Bullet {
@@ -256,6 +258,7 @@ pub fn fire(
                 kind: g.index,
                 tracer: g.count.is_multiple_of(g.spec.trace_freq),
                 owner,
+                fuse: None,
             });
             recoil -= dir_body * (b.mass * b.speed);
             g.count += 1;
@@ -273,6 +276,8 @@ pub enum Hit {
     Object(usize, DVec3, bool),
     /// An aircraft (owner id, see `hitbox::Target::id`), the chunk node hit and the point.
     Aircraft(usize, usize, DVec3),
+    /// A time-fused shell burst in the air.
+    Air(DVec3),
 }
 
 impl BulletType {
@@ -309,6 +314,12 @@ pub fn advance(
         b.vel.z -= 9.8 * dt;
         b.pos += b.vel * dt;
         b.life -= dt;
+        if b.fuse.is_some_and(|f| b.life <= f) {
+            let at = b.pos;
+            let b = bullets.swap_remove(i);
+            hits.push((b, Hit::Air(at)));
+            continue;
+        }
         if let Some((id, node, at)) = crate::hitbox::first_hit(targets, b.prev, b.pos, b.owner) {
             let b = bullets.swap_remove(i);
             hits.push((b, Hit::Aircraft(id, node, at)));

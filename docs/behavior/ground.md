@@ -31,3 +31,19 @@ yet. OpenIL2's columns:
 - Blasts: TNT received (the realistic bomb-sight falloff, `damage.md`, radius 3 m) above
   `40·PanzerBodyTop` kg (at least 0.08 kg) destroys a vehicle; ships need 30 kg.
 - Wrecks stay, sunk a little and tilted. The rest of the column drives on.
+
+## Anti-aircraft fire (OpenIL2's own design)
+Stationary artillery of `[NStationary]` (`vehicles.artillery.Artillery$…`) whose `technics.ini`
+entry has a `Gun` and `GunMaxPitch` of 45° or more is anti-aircraft. The army is the object's army
+field. A battery engages the nearest enemy aircraft within `AttackMaxDistance`, below
+`AttackMaxHeight` above the gun and more than 20 m above it.
+
+- **Aim**: at the target's position after the round's time of flight (two refinements), raised
+  for the drop, with a gaussian scatter of three times the gun's dispersion (at least 0.3°).
+- **Rate**: bursts of `ChainfireTime` seconds at the gun's rate (single rounds without it), then a
+  pause of `DelayAfterShoot` seconds.
+- **Fuses**: high-explosive rounds burst after 90–110 % of the predicted time of flight.
+
+A burst, and any other explosion, damages aircraft nearby. Half the TNT reaching the aircraft
+(`damage.md`, the realistic falloff with the aircraft's radius) strikes its chunk nearest the burst
+with the generic chunk damage.

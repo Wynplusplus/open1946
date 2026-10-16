@@ -274,6 +274,15 @@ impl Traffic {
         out
     }
 
+    /// Position, velocity and army of every AI aircraft still flying.
+    pub fn contacts(&self) -> Vec<(DVec3, DVec3, u8)> {
+        self.planes
+            .iter()
+            .filter(|p| !p.sim.structure.destroyed)
+            .map(|p| (p.sim.pos, p.sim.vel, p.army))
+            .collect()
+    }
+
     /// Hit targets for the AI aircraft (ids 1 + index).
     pub fn targets(&self, out: &mut Vec<crate::hitbox::Target>) {
         for (n, p) in self.planes.iter().enumerate() {
