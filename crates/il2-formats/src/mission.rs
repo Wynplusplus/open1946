@@ -27,6 +27,27 @@ pub struct Wing {
     pub skills: Vec<u8>,
 }
 
+/// A mission objective (`[Target]`): `type importance timed minutes pct·10+flag x y radius _ name`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Objective {
+    /// 0 destroy, 1 destroy ground, 2 destroy bridge, 3 inspect, 4/5 escort, 6 defend ground,
+    /// 7 defend bridge.
+    pub kind: u8,
+    /// 0 primary, 1 secondary, 2 secret.
+    pub importance: u8,
+    /// Time limit in minutes, when there is one.
+    pub timeout: Option<u32>,
+    /// Required share, percent.
+    pub percent: u32,
+    /// Inspect: the player has to land there.
+    pub land: bool,
+    pub x: f64,
+    pub y: f64,
+    pub radius: f64,
+    /// The wing, column or bridge it is about.
+    pub object: Option<String>,
+}
+
 /// A point of a ground or naval column's route (`[<name>_Road]`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoadPoint {
@@ -109,6 +130,7 @@ pub struct Mission {
     pub player_num: u32,
     pub wings: Vec<Wing>,
     pub chiefs: Vec<Chief>,
+    pub objectives: Vec<Objective>,
 }
 
 impl Mission {
@@ -186,6 +208,7 @@ impl Mission {
             player_num: get("playerNum").and_then(atof).map_or(0, |v| v as u32),
             wings,
             chiefs: chiefs(&f),
+            objectives: objectives(&f),
         }
     }
 
@@ -193,6 +216,34 @@ impl Mission {
         let p = self.player_wing.as_deref()?;
         self.wings.iter().find(|w| w.name == p)
     }
+}
+
+fn objectives(f: &SectFile) -> Vec<Objective> {
+    let Some(sect) = f.section_ci("Target") else {
+        return Vec::new();
+    };
+    sect.entries
+        .iter()
+        .filter_map(|(k, v)| {
+            let toks: Vec<&str> = std::iter::once(k.as_str())
+                .chain(v.split_whitespace())
+                .collect();
+            let n = |i: usize, d: f64| toks.get(i).and_then(|t| atof(t)).map_or(d, f64::from);
+            let kind = n(0, 0.0).clamp(0.0, 7.0) as u8;
+            let flags = n(4, 0.0) as i64;
+            Some(Objective {
+                kind,
+                importance: n(1, 0.0).clamp(0.0, 2.0) as u8,
+                timeout: (n(2, 0.0) as i64 == 1).then(|| n(3, 0.0).clamp(0.0, 720.0) as u32),
+                percent: (flags / 10).clamp(0, 100) as u32,
+                land: flags & 1 == 1,
+                x: n(5, 0.0),
+                y: n(6, 0.0),
+                radius: n(7, 1000.0).clamp(2.0, 3000.0),
+                object: toks.get(9).map(|s| s.to_string()),
+            })
+        })
+        .collect()
 }
 
 fn chiefs(f: &SectFile) -> Vec<Chief> {

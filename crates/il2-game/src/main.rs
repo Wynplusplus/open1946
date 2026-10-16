@@ -14,6 +14,7 @@ mod hud;
 mod joystick;
 mod menu;
 mod mission_objects;
+mod objectives;
 mod objects;
 mod particles;
 mod roads;
@@ -74,6 +75,9 @@ struct Args {
     /// Render a menu screen to a PNG: `main|single|quick,out.png`.
     #[arg(long, value_delimiter = ',')]
     menu_shot: Option<Vec<String>>,
+    /// Write the flight's outcome (success, objectives) to this file when it ends.
+    #[arg(long)]
+    result: Option<std::path::PathBuf>,
     /// Serve DeviceLink on this UDP port (else `[DeviceLink] port` in the install's `conf.ini`).
     #[arg(long)]
     devicelink: Option<u16>,
@@ -502,6 +506,7 @@ struct Game {
     player_army: u8,
     mission: Option<il2_formats::mission::Mission>,
     devicelink: Option<devicelink::DeviceLink>,
+    objectives: objectives::Tracker,
     dl_axes: [Option<f64>; 3],
     dl_fire: [bool; 4],
     plane_name: String,
@@ -825,6 +830,7 @@ impl Game {
                 &mut self.combat,
                 &mut self.view,
             );
+            self.objectives.update(&self.sim, TICK);
             if let Some(g) = self.ground.as_mut() {
                 ground_hits(&mut self.combat, g, &mut self.view);
                 g.step(field, TICK);
@@ -1634,6 +1640,13 @@ fn main() {
         for c in args.damage.iter().flatten() {
             af.collision(&mut sim, c);
         }
+        let mut tracker = objectives::Tracker::new(
+            mission
+                .as_ref()
+                .map(|m| m.objectives.clone())
+                .unwrap_or_default(),
+            &view.objects,
+        );
         let mut max_g = (0.0f64, 0.0f64);
         for _ in 0..(args.seconds / TICK) as usize {
             sim.tick(&inputs, &ground);
@@ -1699,6 +1712,7 @@ fn main() {
                     &|n| names.get(n).copied(),
                 );
             }
+            tracker.update(&sim, TICK);
             max_g = (max_g.0.max(sim.overload), max_g.1.min(sim.overload));
         }
         eprintln!(
@@ -1707,6 +1721,13 @@ fn main() {
         );
         for m in af.messages.drain(..) {
             eprintln!("{m}");
+        }
+        if let Some(path) = &args.result {
+            let met = tracker.judge(traffic.as_ref(), columns.as_ref(), &view.objects);
+            let _ = std::fs::write(
+                path,
+                objectives::report(&tracker, &met, sim.structure.destroyed),
+            );
         }
         if let (Some(t), true) = (traffic.as_ref(), std::env::var_os("IL2_TRACE").is_some()) {
             eprint!("{}", t.report(&field));
@@ -1843,6 +1864,13 @@ fn main() {
         player_army,
         mission: mission.clone(),
         devicelink: devicelink::DeviceLink::open(&args.root, args.devicelink),
+        objectives: objectives::Tracker::new(
+            mission
+                .as_ref()
+                .map(|m| m.objectives.clone())
+                .unwrap_or_default(),
+            &view.objects,
+        ),
         dl_axes: [None; 3],
         dl_fire: [false; 4],
         plane_name: args.aircraft.clone(),
@@ -1894,6 +1922,17 @@ fn main() {
     };
     let el = EventLoop::new().expect("event loop");
     el.run_app(&mut game).expect("run");
+    if let Some(path) = &args.result {
+        let met = game.objectives.judge(
+            game.traffic.as_ref(),
+            game.ground.as_ref(),
+            &game.view.objects,
+        );
+        let report = objectives::report(&game.objectives, &met, game.sim.structure.destroyed);
+        if let Err(e) = std::fs::write(path, report) {
+            eprintln!("result {}: {e}", path.display());
+        }
+    }
 }
 
 fn bomb_test(

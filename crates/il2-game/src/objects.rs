@@ -549,6 +549,33 @@ pub fn statics_ini(vfs: &Vfs) -> Result<SectFile, String> {
 }
 
 impl MapObjects {
+    /// Destructible objects within `r` of (x, y): (still standing, all).
+    pub fn count_in(&self, x: f64, y: f64, r: f64) -> (usize, usize) {
+        let (mut alive, mut all) = (0, 0);
+        let (x0, x1) = (
+            ((x - r) / TILE).floor() as i32,
+            ((x + r) / TILE).floor() as i32,
+        );
+        let (y0, y1) = (
+            ((y - r) / TILE).floor() as i32,
+            ((y + r) / TILE).floor() as i32,
+        );
+        for ty in y0..=y1 {
+            for tx in x0..=x1 {
+                let Some(range) = self.tiles.get(&(tx, ty)) else {
+                    continue;
+                };
+                for o in &self.objects[range.clone()] {
+                    if o.profile == 0 || (o.pos.x - x).hypot(o.pos.y - y) > r {
+                        continue;
+                    }
+                    all += 1;
+                    alive += o.alive as usize;
+                }
+            }
+        }
+        (alive, all)
+    }
     /// The map's own objects only.
     #[cfg(test)]
     pub fn load(vfs: &Vfs, ini_path: &str, field: &HeightField) -> Result<Self, String> {

@@ -64,6 +64,8 @@ struct Group {
     name: String,
     items: Vec<Group>,
     missions: Vec<MissionEntry>,
+    /// Campaigns: the stages, each with its alternative missions.
+    stages: Vec<Vec<String>>,
 }
 
 fn sorted_dirs(p: &Path) -> Vec<PathBuf> {
@@ -123,6 +125,7 @@ fn single_missions(root: &Path, lang: &Option<String>) -> Vec<Group> {
                     name: name_of(&pdir),
                     items: Vec::new(),
                     missions,
+                    stages: Vec::new(),
                 });
             }
         }
@@ -131,6 +134,7 @@ fn single_missions(root: &Path, lang: &Option<String>) -> Vec<Group> {
                 name: name_of(&c),
                 items: planes,
                 missions: Vec::new(),
+                stages: Vec::new(),
             });
         }
     }
@@ -226,6 +230,119 @@ enum Screen {
     Main,
     Single,
     Quick,
+    Career,
+}
+
+/// A static campaign (`Missions/Campaign/<country>/<name>/campaign.ini`): stages from `[list]`,
+/// each line listing alternatives.
+struct Campaign {
+    dir: String,
+    name: String,
+    description: String,
+    stages: Vec<Vec<String>>,
+}
+
+fn campaigns(root: &Path, lang: &Option<String>) -> Vec<Group> {
+    let base = root.join("Missions/Campaign");
+    let mut out = Vec::new();
+    for c in sorted_dirs(&base) {
+        let mut items = Vec::new();
+        for d in sorted_dirs(&c) {
+            let Ok(ini) = std::fs::read(d.join("campaign.ini")) else {
+                continue;
+            };
+            let text: String = ini.iter().map(|&b| b as char).collect();
+            let mut in_list = false;
+            let mut stages = Vec::new();
+            for line in text.lines() {
+                let l = line.trim();
+                if l.starts_with('[') {
+                    in_list = l.eq_ignore_ascii_case("[list]");
+                    continue;
+                }
+                if in_list && !l.is_empty() {
+                    stages.push(l.split_whitespace().map(str::to_owned).collect::<Vec<_>>());
+                }
+            }
+            if stages.is_empty() {
+                continue;
+            }
+            let info = properties_file(&d.join("info"), lang);
+            let rel = d
+                .strip_prefix(root)
+                .unwrap_or(&d)
+                .to_string_lossy()
+                .into_owned();
+            items.push(Group {
+                name: info.get("Name").cloned().unwrap_or_else(|| name_of(&d)),
+                items: Vec::new(),
+                missions: vec![MissionEntry {
+                    path: rel,
+                    name: String::new(),
+                    briefing: info.get("Description").cloned().unwrap_or_default(),
+                }],
+                stages,
+            });
+        }
+        if !items.is_empty() {
+            out.push(Group {
+                name: name_of(&c),
+                items,
+                missions: Vec::new(),
+                stages: Vec::new(),
+            });
+        }
+    }
+    out
+}
+
+/// The pilot's progress: campaign directory (install-relative) and the next stage.
+#[derive(Default)]
+struct Career {
+    campaign: String,
+    stage: usize,
+    flown: u32,
+    won: u32,
+}
+
+fn career_path() -> PathBuf {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("openil2/career.ini")
+}
+
+fn load_career() -> Career {
+    let mut c = Career::default();
+    let Ok(text) = std::fs::read_to_string(career_path()) else {
+        return c;
+    };
+    for line in text.lines() {
+        let (k, v) = line.split_once(' ').unwrap_or((line, ""));
+        match k {
+            "campaign" => c.campaign = v.to_owned(),
+            "stage" => c.stage = v.parse().unwrap_or(0),
+            "flown" => c.flown = v.parse().unwrap_or(0),
+            "won" => c.won = v.parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+    c
+}
+
+fn save_career(c: &Career) {
+    let p = career_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(
+        p,
+        format!(
+            "campaign {}\nstage {}\nflown {}\nwon {}\n",
+            c.campaign, c.stage, c.flown, c.won
+        ),
+    );
 }
 
 /// QMB choices.
@@ -265,6 +382,10 @@ pub struct Menu {
     wheel: f32,
     child: Option<Child>,
     status: String,
+    campaigns: Vec<Group>,
+    career: Career,
+    /// The result file of the running flight, and whether it is a career mission.
+    pending: Option<(PathBuf, bool)>,
 }
 
 impl Menu {
@@ -272,6 +393,7 @@ impl Menu {
         let lang = language();
         let gui = properties_vfs(&vfs, "i18n/gui", &lang);
         let single = single_missions(&root, &lang);
+        let root_for_campaigns = root.clone();
         let planes = planes(&vfs, &lang);
         let templates = templates(&root);
         let mut maps: Vec<String> = templates.iter().map(|t| t.map.clone()).collect();
@@ -310,6 +432,9 @@ impl Menu {
             wheel: 0.0,
             child: None,
             status: String::new(),
+            campaigns: campaigns(&root_for_campaigns, &lang),
+            career: load_career(),
+            pending: None,
         }
     }
 
@@ -322,10 +447,19 @@ impl Menu {
 
     /// Starts a flight with these arguments as a child process; the menu hides until it ends.
     fn launch(&mut self, args: &[String]) {
+        self.launch_with(args, false);
+    }
+
+    fn launch_with(&mut self, args: &[String], career: bool) {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("openil2"));
+        let result = std::env::temp_dir().join("openil2_result.txt");
+        let _ = std::fs::remove_file(&result);
+        self.pending = Some((result.clone(), career));
         match Command::new(exe)
             .arg("--root")
             .arg(&self.root)
+            .arg("--result")
+            .arg(&result)
             .args(args)
             .spawn()
         {
@@ -448,6 +582,7 @@ impl Menu {
             Screen::Main => self.s("main.info", "Main Menu"),
             Screen::Single => self.s("single.info", "Single Missions"),
             Screen::Quick => self.s("quick.info", "Quick Mission Builder"),
+            Screen::Career => self.s("main.PilotCareer", "Pilot Career"),
         };
         self.hud.text(
             24.0,
@@ -459,6 +594,7 @@ impl Menu {
             Screen::Main => self.draw_main(w, h),
             Screen::Single => self.draw_single(w, h),
             Screen::Quick => self.draw_quick(w, h),
+            Screen::Career => self.draw_career(w, h),
         }
         if !self.status.is_empty() {
             let s = self.status.clone();
@@ -469,6 +605,7 @@ impl Menu {
     fn draw_main(&mut self, _w: f32, h: f32) {
         let items = [
             ("main.SingleMissions", "Single Missions"),
+            ("main.PilotCareer", "Pilot Career"),
             ("main.Quick", "Quick Mission Builder"),
             ("main.Quit", "Quit"),
         ];
@@ -478,7 +615,12 @@ impl Menu {
             if self.button(80.0, y, 360.0, &label) {
                 match i {
                     0 => self.screen = Screen::Single,
-                    1 => self.screen = Screen::Quick,
+                    1 => {
+                        self.screen = Screen::Career;
+                        self.sel = [0; 3];
+                        self.scroll = [0; 3];
+                    }
+                    2 => self.screen = Screen::Quick,
                     _ => std::process::exit(0),
                 }
             }
@@ -530,6 +672,82 @@ impl Menu {
         }
         if self.button(w - 224.0, by, 200.0, &self.s("quick.FLY", "Fly")) {
             self.launch(&["--mission".into(), path]);
+        }
+    }
+
+    fn draw_career(&mut self, w: f32, h: f32) {
+        let rows = ((h - 200.0) / (self.hud.line_height() + 4.0)) as usize;
+        let countries: Vec<String> = self.campaigns.iter().map(|g| g.name.clone()).collect();
+        if let Some(i) = self.list(24.0, 80.0, 120.0, rows, &countries, self.sel[0], 0) {
+            self.sel = [i, 0, 0];
+            self.scroll[1] = 0;
+        }
+        let Some(c) = self.campaigns.get(self.sel[0]) else {
+            return;
+        };
+        let names: Vec<String> = c.items.iter().map(|g| g.name.clone()).collect();
+        if let Some(i) = self.list(156.0, 80.0, 360.0, rows, &names, self.sel[1], 1) {
+            self.sel[1] = i;
+        }
+        let Some(camp) = self.campaigns[self.sel[0]].items.get(self.sel[1]) else {
+            return;
+        };
+        let (dir, about, stages) = (
+            camp.missions[0].path.clone(),
+            camp.missions[0].briefing.clone(),
+            camp.stages.clone(),
+        );
+        let ours = self.career.campaign == dir;
+        let stage = if ours { self.career.stage } else { 0 };
+        let bx = 532.0;
+        let mut y = 84.0;
+        let progress = if stage >= stages.len() {
+            "Campaign complete".to_owned()
+        } else if ours {
+            format!(
+                "Mission {} of {}   (flown {}, successful {})",
+                stage + 1,
+                stages.len(),
+                self.career.flown,
+                self.career.won
+            )
+        } else {
+            format!("{} missions", stages.len())
+        };
+        self.hud.text(bx, y, &progress, [0.95, 0.8, 0.45, 1.0]);
+        y += self.hud.line_height() * 1.5;
+        for l in self
+            .wrap(&about, (w - bx - 24.0).max(200.0))
+            .iter()
+            .take(rows)
+        {
+            self.hud.text(bx, y, l, [0.9, 0.9, 0.82, 1.0]);
+            y += self.hud.line_height();
+        }
+        let by = h - 80.0;
+        if self.button(24.0, by, 200.0, &self.s("quick.BAC", "Back")) {
+            self.screen = Screen::Main;
+        }
+        let label = if ours && stage > 0 {
+            "Continue"
+        } else {
+            "Start"
+        };
+        if stage < stages.len() && self.button(w - 224.0, by, 200.0, label) {
+            if !ours {
+                self.career = Career {
+                    campaign: dir.clone(),
+                    ..Default::default()
+                };
+                save_career(&self.career);
+            }
+            let alts = &stages[stage];
+            let pick = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()) as usize)
+                % alts.len().max(1);
+            let mission = format!("{dir}/{}", alts[pick]);
+            self.launch_with(&["--mission".into(), mission], true);
         }
     }
 
@@ -799,6 +1017,7 @@ impl ApplicationHandler for Menu {
                     self.status = format!("the flight ended with {status}");
                 }
                 self.child = None;
+                self.finish_flight();
                 if let Some(w) = &self.window {
                     w.set_visible(true);
                     w.request_redraw();
@@ -872,6 +1091,30 @@ impl ApplicationHandler for Menu {
 }
 
 impl Menu {
+    /// Reads the finished flight's result: shows it, and moves a career on after a success.
+    fn finish_flight(&mut self) {
+        let Some((path, career)) = self.pending.take() else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let success = text.lines().any(|l| l == "result success");
+        self.status = if success {
+            self.s("single.Complete", "Mission Complete")
+        } else {
+            self.s("single.Failed", "Mission Failed")
+        };
+        if career {
+            self.career.flown += 1;
+            if success {
+                self.career.won += 1;
+                self.career.stage += 1;
+            }
+            save_career(&self.career);
+        }
+    }
+
     fn request(&self) {
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -910,6 +1153,7 @@ pub fn screenshot(root: PathBuf, screen: &str, out: &Path) {
     menu.screen = match screen {
         "single" => Screen::Single,
         "quick" => Screen::Quick,
+        "career" => Screen::Career,
         _ => Screen::Main,
     };
     let (w, h) = (1280, 720);
