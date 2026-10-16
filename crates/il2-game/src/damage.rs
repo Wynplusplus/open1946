@@ -129,7 +129,8 @@ mod tests {
 
     #[test]
     fn heavier_hits_kill_more_often() {
-        let wood = HouseDamage::new("WoodMiddle", 0.18).unwrap();
+        // A thin wooden shed: rifle rounds do nothing, a 37 mm round often kills.
+        let wood = HouseDamage::new("WoodSmall", 0.03).unwrap();
         assert_eq!(wood.kill_probability(1000.0, 1), 0.0);
         let p20 = wood.kill_probability(0.5 * 0.115 * 800.0 * 800.0, 1);
         let p37 = wood.kill_probability(0.5 * 0.73 * 900.0 * 900.0, 1);
