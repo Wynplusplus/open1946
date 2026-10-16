@@ -29,8 +29,16 @@ Moved on to M5, which brings something to shoot at: bullet and blast hits on air
 detailed damage bones `xx…` and the generic chunk damage), smoke and fire from damaged engines and wrecks,
 bridge ramps.
 
-## M5: simulation
-AI pilots and gunners, hits on aircraft, ground and naval units, Quick Mission Builder, menus and UI (`i18n`).
+## M5: simulation (done)
+AI flights from missions on the simplified AI flight model: takeoff, waypoint autopilot, formation,
+air combat with gunnery, evasion, level bombing, landing (`ai.md`). Also gunners in turret arcs from
+the classes' code, bullet and blast hits on aircraft, anti-aircraft guns, and moving ground and naval
+columns from `[Chiefs]` (`ground.md`). Menus with single missions and briefings, and a Quick Mission
+Builder on the install's templates (`menus.md`).
+Interim designs to be replaced by ports of the runtime: air combat and ground-attack maneuvers
+(`Maneuver`), formations (`AirGroup`), `ChiefGround` road movement with bridges and collisions,
+armed ground units and ships, mission objectives and results.
+Not yet: carrier operations, water landings, the original GUI screens.
 
 ## M6: everything else
-Campaigns (DGen/NGen), track recording (`.ntrk`), multiplayer, DeviceLink.
+DeviceLink, track recording and playback, campaigns (static campaigns, DGen/NGen), multiplayer.

@@ -6,7 +6,7 @@ It needs a legally owned copy of the game (e.g. GOG); point `IL2_ROOT` at the in
 No game files, decompiled code or key material are part of this repository. Format knowledge lives in
 `docs/formats/` as prose specifications, and the Rust code is written from those specs.
 
-## Status: milestones 1–4 done, 5 in progress
+## Status: milestones 1–5 done, 6 in progress
 
 | Area | State |
 |------|-------|
