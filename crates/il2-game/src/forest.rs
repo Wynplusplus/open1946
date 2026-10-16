@@ -77,7 +77,7 @@ impl Forest {
     /// Wood indicator blended between cell centres, like the terrain's land-type blending.
     fn density(&self, x: f64, y: f64) -> f64 {
         let fx = x / CELL - 0.5;
-        let fy = (self.rows as f64 - 1.0) - y / CELL + 0.5;
+        let fy = (self.rows as f64 - 1.0) - y / CELL - 0.5;
         let (c0, r0) = (fx.floor(), fy.floor());
         let (tx, ty) = (fx - c0, fy - r0);
         let at = |c: f64, r: f64| {

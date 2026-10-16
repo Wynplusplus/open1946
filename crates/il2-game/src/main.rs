@@ -1,5 +1,6 @@
 mod forest;
 mod objects;
+mod roads;
 mod world;
 
 use clap::Parser;
@@ -85,6 +86,8 @@ struct Game {
     instances: Vec<InstanceRaw>,
     forest: Option<forest::Forest>,
     forest_gpu: Option<GpuMesh>,
+    roads: Option<roads::Roads>,
+    roads_gpu: Option<GpuMesh>,
     keys: HashSet<KeyCode>,
     #[cfg(feature = "gamepad")]
     gilrs: Option<Gilrs>,
@@ -168,7 +171,16 @@ impl Game {
                 self.forest_gpu = Some(r.upload(&d));
             }
         }
+        if let Some(f) = self.roads.as_mut() {
+            if let Some(d) = f.update(field, eye) {
+                self.roads_gpu = Some(r.upload(&d));
+            }
+        }
         let mut meshes = vec![plane];
+        if let (Some(f), Some(g)) = (&self.roads, &self.roads_gpu) {
+            r.set_transform(g, Mat4::from_translation((f.origin - eye).as_vec3()));
+            meshes.push(g);
+        }
         if let (Some(f), Some(g)) = (&self.forest, &self.forest_gpu) {
             r.set_transform(g, Mat4::from_translation((f.origin - eye).as_vec3()));
             meshes.push(g);
@@ -413,6 +425,7 @@ fn main() {
     let mut map_objects = objects::MapObjects::load(&vfs, &args.map, &field).unwrap_or_else(|e| fail(e));
     eprintln!("map objects: {} placed in {:.1} s ({} classes skipped)", map_objects.len(), t0.elapsed().as_secs_f64(), map_objects.skipped.len());
     let mut forest = forest::Forest::load(&vfs, &args.map, &terrain.types);
+    let mut roads = roads::Roads::load(&vfs, &args.map, &terrain.types);
     let mut assets = assets;
     let plane_mesh = std::mem::take(&mut assets.mesh);
     let (h, pitch) = assets.parked;
@@ -493,6 +506,11 @@ fn main() {
         );
         r.set_instances(&instances);
         let mut meshes = vec![&plane];
+        let roads_gpu = roads.as_mut().and_then(|f| f.update(&field, eye)).map(|d| r.upload(&d));
+        if let (Some(f), Some(g)) = (&roads, &roads_gpu) {
+            r.set_transform(g, Mat4::from_translation((f.origin - eye).as_vec3()));
+            meshes.push(g);
+        }
         let forest_gpu = forest.as_mut().and_then(|f| f.update(&field, eye)).map(|d| r.upload(&d));
         if let (Some(f), Some(g)) = (&forest, &forest_gpu) {
             r.set_transform(g, Mat4::from_translation((f.origin - eye).as_vec3()));
@@ -517,6 +535,8 @@ fn main() {
         instances: Vec::new(),
         forest,
         forest_gpu: None,
+        roads,
+        roads_gpu: None,
         keys: HashSet::new(),
         #[cfg(feature = "gamepad")]
         gilrs: Gilrs::new().ok(),

@@ -65,9 +65,10 @@ fn field(col: i32, row: i32, xy: vec2<f32>) -> vec4<f32> {
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let cell = info.grid.x;
-    // Cell coordinates with row 0 at the north edge; blend between the 4 nearest cell centres.
+    // Land-type pixel (c, r) covers x in [c, c+1) and (rows - 1) - y in [r, r+1), in cells
+    // (docs/formats/map.md); blend between the 4 nearest pixel centres.
     let fx = i.world_xy.x / cell - 0.5;
-    let fy = (info.grid.z - 1.0) - i.world_xy.y / cell + 0.5;
+    let fy = (info.grid.z - 1.0) - i.world_xy.y / cell - 0.5;
     let c0 = floor(fx);
     let r0 = floor(fy);
     let t = vec2<f32>(fx - c0, fy - r0);
