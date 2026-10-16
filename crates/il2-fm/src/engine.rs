@@ -49,6 +49,20 @@ pub struct EngineParams {
     pub w_wep: f64,
     /// `AfterburnerType`: emergency boost system (0 none).
     pub afterburner: i32,
+    /// Temperature model (`TESPEED`, `TWATERMAXRPM`, `TOILINMAXRPM`, `TOILOUTMAXRPM`, `MAXRPMTIME`,
+    /// `TWATERMAX`, `TOILMAX`, `TWATERMIN`, `TOILMIN`), °C and seconds.
+    pub t_speed: f64,
+    pub t_water_max_rpm: f64,
+    pub t_oil_in_max_rpm: f64,
+    pub t_oil_out_max_rpm: f64,
+    pub time_overheat: f64,
+    pub t_water_crit: f64,
+    pub t_oil_crit: f64,
+    pub t_water_min: f64,
+    pub t_oil_min: f64,
+    /// `Autonomous 0`: needs ground equipment (near an airfield, on the ground) to start.
+    pub autonomous: bool,
+    pub radiator_mode: RadiatorMode,
     /// `WEPBoostFactor`: torque factor with boost engaged (1).
     pub wep_boost: f64,
     /// Boost ATA over normal ATA at the boost point of the ATA curve.
@@ -200,6 +214,17 @@ impl EngineParams {
             jet_m_max,
             fuel_curve,
             afterburner,
+            t_speed: num("TESPEED", 0.0),
+            t_water_max_rpm: num("TWATERMAXRPM", 0.0),
+            t_oil_in_max_rpm: num("TOILINMAXRPM", 0.0),
+            t_oil_out_max_rpm: num("TOILOUTMAXRPM", 0.0),
+            time_overheat: num("MAXRPMTIME", 0.0),
+            t_water_crit: num("TWATERMAX", 0.0),
+            t_oil_crit: num("TOILMAX", 0.0),
+            t_water_min: num("TWATERMIN", 0.0),
+            t_oil_min: num("TOILMIN", 0.0),
+            autonomous: num("Autonomous", 1.0) != 0.0,
+            radiator_mode: RadiatorMode::Governor,
             wep_boost: num("WEPBoostFactor", 1.0),
             wep_compressor,
             gov_max_wep: if raw("PropAnglerAfterburnerParam").is_some() { gov_param("PropAnglerAfterburnerParam") } else { gov_param("PropAnglerMaxParam") },
@@ -329,6 +354,54 @@ pub struct EngineState {
     /// Fuel use, kg/s, from the main tank and from the `Nitro` tank.
     pub fuel_rate: f64,
     pub nitro_rate: f64,
+    /// 0 off, 1–5 starting, 6 running, 7 dead, 8 seized (`docs/behavior/engine.md`, "Engine management").
+    pub stage: u8,
+    stage_time: f64,
+    stage_len: f64,
+    /// Has run before (a warm restart may fail).
+    ran: bool,
+    friction: f64,
+    pub t_oil_in: f64,
+    pub t_oil_out: f64,
+    pub t_water: f64,
+    /// Radiator flap, 0 closed .. 1 open; automatic unless the pilot sets it.
+    pub radiator: f64,
+    pub radiator_manual: Option<f64>,
+    /// Engine condition 0..1 (multiplies torque).
+    pub readyness: f64,
+    pub cylinders_out: f64,
+    /// Oil system damage 0..1 (raises the oil temperature target by up to 35 %).
+    pub oil_damage: f64,
+    rng: u64,
+    /// Malfunctions that happened, for messages (`overheat`, `cylinder`, `oil`, `fire`, …).
+    pub events: Vec<&'static str>,
+}
+
+/// How the automatic radiator works; the runtime picks it by aircraft class.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RadiatorMode {
+    /// By propeller governor type.
+    #[default]
+    Governor,
+    /// No radiator control (Gladiator, Fokker D.XXI).
+    Closed,
+    /// Opens with oil temperature, else closes with speed (P-51, P-38, Yak-3/9 late, P-63).
+    OilThermostat,
+    /// Follows coolant temperature (Spitfire VIII and IX).
+    WaterThermostat,
+}
+
+/// Engine conditions the management needs each step.
+pub struct EngineEnv {
+    pub dt: f64,
+    pub speed: f64,
+    pub altitude: f64,
+    /// On the ground within 1200 m of an airfield (for non-autonomous starts).
+    pub at_airfield: bool,
+    /// The aircraft's `VmaxH` reference, m/s (radiator schedules).
+    pub vmax_h: f64,
+    /// Difficulty option "engine overheat": malfunctions from excess temperature.
+    pub overheat: bool,
 }
 
 impl EngineState {
@@ -351,6 +424,261 @@ impl EngineState {
             manifold: 1.0,
             fuel_rate: 0.0,
             nitro_rate: 0.0,
+            stage: 6,
+            stage_time: 0.0,
+            stage_len: 0.0,
+            ran: true,
+            friction: 0.0,
+            t_oil_in: 0.5 * (p.t_oil_min + p.t_oil_in_max_rpm),
+            t_oil_out: 0.5 * (p.t_oil_min + p.t_oil_out_max_rpm),
+            t_water: 0.5 * (p.t_water_min + p.t_water_max_rpm),
+            radiator: 0.0,
+            radiator_manual: None,
+            readyness: 1.0,
+            cylinders_out: 0.0,
+            oil_damage: 0.0,
+            rng: 0x9E37_79B9_7F4A_7C15 ^ (p.horse_powers.to_bits() ^ p.thrust_max.to_bits()),
+            events: Vec::new(),
+        }
+    }
+
+    fn rand(&mut self) -> f64 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        (self.rng >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn rand_range(&mut self, a: f64, b: f64) -> f64 {
+        a + (b - a) * self.rand()
+    }
+
+    /// A cold, stopped engine (at ambient temperature `ambient` °C).
+    pub fn cold(p: &EngineParams, ambient: f64) -> Self {
+        let mut s = Self::new(p, 0.0);
+        s.stage = 0;
+        s.ran = false;
+        s.t_oil_in = ambient;
+        s.t_oil_out = ambient;
+        s.t_water = ambient;
+        s
+    }
+
+    pub fn running(&self) -> bool {
+        self.stage == 6
+    }
+
+    /// Starts a stopped engine, or stops a running one.
+    pub fn toggle(&mut self, p: &EngineParams, env: &EngineEnv) {
+        match self.stage {
+            0 => {
+                if !p.autonomous && !env.at_airfield && p.piston {
+                    return;
+                }
+                // Rockets and pulse jets light at once.
+                self.stage = if matches!(p.kind, EngineKind::Rocket | EngineKind::RocketBoost | EngineKind::Pvrd) { 5 } else { 1 };
+                self.stage_time = 0.0;
+                self.stage_len = 0.0;
+            }
+            1..=6 => self.stage = 0,
+            _ => {}
+        }
+    }
+
+    fn set_stage(&mut self, s: u8) {
+        self.stage = s;
+        self.stage_time = 0.0;
+        self.stage_len = 0.0;
+    }
+
+    /// Start-up sequence and the shaft speed it imposes; `None` once running or stopped.
+    fn start_sequence(&mut self, p: &EngineParams, dt: f64) -> Option<f64> {
+        if !(1..=5).contains(&self.stage) {
+            return None;
+        }
+        let first = self.stage_len == 0.0;
+        let cold = (p.t_oil_out_max_rpm - self.t_oil_out) / (p.t_oil_out_max_rpm - 20.0).max(1.0);
+        if first {
+            self.stage_len = match self.stage {
+                1 => 0.5 * self.rand_range(1.0, 2.0),
+                2 if self.ran => {
+                    let l = 0.1 + cold * 7.9 * self.rand_range(2.0, 4.2);
+                    if l > 9.0 { self.rand_range(7.8, 9.6) } else { l }
+                }
+                2 => 4.0 * self.rand_range(1.0, 2.0),
+                3 => 0.05 * self.rand_range(1.0, 2.0),
+                _ => 0.5 * self.rand_range(1.0, 2.0),
+            };
+            if self.stage == 2 && self.ran && self.rand() < 0.5 {
+                self.set_stage(0);
+                return None;
+            }
+            if self.stage == 3 && self.rand() < 0.12 && cold < 0.75 {
+                self.set_stage(0);
+                return None;
+            }
+            if self.stage == 5 && self.ran && p.piston && self.rand() < 0.1 {
+                self.set_stage(0);
+                return None;
+            }
+            if self.stage == 5 {
+                self.ran = true;
+            }
+        }
+        let f = (self.stage_time / self.stage_len).min(1.0);
+        let w = 0.1047 * match self.stage {
+            1 => 20.0 * f,
+            2 => 20.0 + 15.0 * f,
+            3 => 60.0 + 60.0 * f,
+            4 => 120.0,
+            _ => 120.0 + 120.0 * f,
+        };
+        self.stage_time += dt;
+        if self.stage_time > self.stage_len {
+            let next = self.stage + 1;
+            self.set_stage(next);
+        }
+        Some(w)
+    }
+
+    /// Temperatures, radiator, overheat damage; call once per step after the forces.
+    pub fn manage(&mut self, p: &EngineParams, throttle: f64, wep: bool, env: &EngineEnv) {
+        if !p.piston && p.kind != EngineKind::Jet {
+            return;
+        }
+        let dt = env.dt;
+        let kmh = env.speed.max(0.0) * 3.6;
+        let ambient = atmosphere::temperature(env.altitude) - 273.15;
+        let rho = atmosphere::density(env.altitude);
+        // Radiator (automatic schedules by governor type).
+        let by_speed = (1.0 - env.speed / env.vmax_h.max(1.0)).max(0.0);
+        self.radiator = match (self.radiator_manual, p.radiator_mode) {
+            (Some(r), _) => r.clamp(0.0, 1.0),
+            (None, RadiatorMode::Closed) => 0.0,
+            (None, RadiatorMode::OilThermostat) => {
+                if self.t_oil_out > p.t_oil_out_max_rpm {
+                    (self.radiator + 0.1 * dt).min(1.0)
+                } else {
+                    by_speed
+                }
+            }
+            (None, RadiatorMode::WaterThermostat) => ((self.t_water - p.t_water_crit + 20.0) / 20.0).clamp(0.0, 1.0),
+            (None, RadiatorMode::Governor) => {
+                let power = if self.running() { throttle.min(1.1) * self.readyness } else { 0.0 };
+                match p.governor {
+                    1 | 2 => {
+                        if self.radiator > 1.0 - power {
+                            (self.radiator - 0.15 * dt).max(0.0)
+                        } else {
+                            self.radiator + 0.15 * dt
+                        }
+                    }
+                    5 | 6 => (1.0 - env.speed / env.vmax_h.max(1.0)).max(0.0),
+                    7 | 8 => {
+                        if self.t_oil_out > p.t_oil_out_max_rpm {
+                            (self.radiator + 0.1 * dt).min(1.0)
+                        } else {
+                            (1.0 - env.speed / env.vmax_h.max(1.0)).max(0.0)
+                        }
+                    }
+                    _ => 1.0 - power,
+                }
+                .clamp(0.0, 1.0)
+            }
+        };
+        let r = self.radiator;
+        let mut t = throttle;
+        if p.boost_factor > 1.0 {
+            t = (t + (t - 1.0).max(0.0) * (p.boost_factor - 1.1) * 10.0) / p.boost_factor;
+        }
+        if !wep && p.wep_boost > 1.0 && !matches!(p.afterburner, 1 | 4 | 9) {
+            t /= p.wep_boost;
+        }
+        let x = self.w / p.w_wep.max(1e-6);
+        let speed_cool = 0.8 + 60.0 / (50.0 + kmh);
+        if self.running() {
+            let target = ambient
+                + p.t_oil_out_max_rpm * (1.0 - 0.15 * r) * (0.65 + 0.45 / rho) * (1.0 + 0.35 * self.oil_damage) * 1.2 * x * x * (0.7 + 0.3 * t) * speed_cool;
+            self.t_oil_out += (target - self.t_oil_out) * dt * p.t_speed;
+            let oil_in = self.t_oil_out * 0.8;
+            self.t_oil_in += (oil_in - self.t_oil_in) * dt * 0.5;
+            let k7 = if p.kind == EngineKind::Jet { 0.35 + 0.1 / rho } else { 0.45 / rho };
+            let target = ambient + p.t_water_max_rpm * (1.0 - 0.15 * r) * (0.65 + k7) * (0.6 + 0.4 * x) * (0.1 + 1.1 * t) * speed_cool;
+            self.t_water += (target - self.t_water) * dt * p.t_speed;
+        } else {
+            let k = dt * p.t_speed * (0.2 + 0.2 * r);
+            self.t_oil_out += (ambient - self.t_oil_out) * k;
+            self.t_oil_in += (self.t_oil_out - self.t_oil_in) * dt * 0.5;
+            self.t_water += (ambient - self.t_water) * k;
+        }
+        // Overheat: random malfunctions growing with the cube of the excess.
+        if env.overheat && p.time_overheat > 0.0 && self.stage < 7 {
+            for (temp, crit, water) in [(self.t_water, p.t_water_crit, true), (self.t_oil_out, p.t_oil_crit, false)] {
+                if crit <= 0.0 || temp <= crit {
+                    continue;
+                }
+                let e = temp / crit - 1.0;
+                let risk = e * e * e * dt * 1000.0;
+                if risk > self.rand() * p.time_overheat && self.stage < 7 {
+                    self.malfunction(p, water);
+                }
+            }
+        }
+    }
+
+    fn knock_out(&mut self, p: &EngineParams, n: f64) {
+        self.cylinders_out = (self.cylinders_out + n).min(p.cylinders);
+        let ratio = 1.0 - self.cylinders_out / p.cylinders.max(1.0);
+        if ratio < 0.12 {
+            self.set_stage(7);
+            self.events.push("dead");
+        } else if ratio < self.readyness {
+            self.readyness = ratio;
+        }
+    }
+
+    fn malfunction(&mut self, p: &EngineParams, water: bool) {
+        self.events.push("overheat");
+        if !p.piston {
+            if self.rand() < 0.2 {
+                self.events.push("smoke");
+                self.readyness *= 0.9;
+            } else {
+                let n = (self.rand() * 4.0).floor();
+                self.knock_out(p, n);
+            }
+            return;
+        }
+        let roll = (self.rand() * 100.0) as u32;
+        // Water overheat: mostly cylinders; oil overheat: mostly oil and bearings.
+        let (cyl, oil, bearing, fire, charger, dead) = if water { (50, 65, 94, 95, 97, 98) } else { (10, 60, 94, 95, 96, 97) };
+        if roll < cyl {
+            self.knock_out(p, 1.0);
+            self.events.push("cylinder");
+        } else if roll < oil {
+            self.events.push("oil");
+            self.oil_damage = (self.oil_damage + 0.5).min(1.0);
+        } else if roll < bearing {
+            if water {
+                self.knock_out(p, 1.0);
+                self.events.push("smoke");
+            } else {
+                self.readyness *= 0.95;
+                self.events.push("bearing");
+            }
+        } else if roll < fire {
+            self.knock_out(p, 1.0);
+            self.events.push("fire");
+        } else if roll < charger {
+            self.events.push("supercharger");
+            self.readyness *= 0.7;
+        } else if roll < dead {
+            self.set_stage(7);
+            self.events.push("dead");
+        } else {
+            self.set_stage(8);
+            self.w = 0.0;
+            self.events.push("seized");
         }
     }
 
@@ -372,6 +700,28 @@ impl EngineState {
     pub fn step_any(&mut self, p: &EngineParams, throttle: f64, wep: bool, v: f64, speed: f64, h: f64, dt: f64, fuel_left: bool) {
         self.fuel_rate = 0.0;
         self.nitro_rate = 0.0;
+        if fuel_left && self.stage == 6 && throttle <= 0.0 && p.piston {
+            // Throttle closed: the engine idles (it does not stop).
+        }
+        if let Some(w) = self.start_sequence(p, dt) {
+            self.w = w;
+            self.thrust = 0.0;
+            self.torque = 0.0;
+            self.prop_torque = 0.0;
+            return;
+        }
+        if self.stage == 8 {
+            self.w = 0.0;
+            self.thrust = 0.0;
+            self.torque = 0.0;
+            return;
+        }
+        let running = self.stage == 6;
+        if !fuel_left && running {
+            self.set_stage(0);
+            self.events.push("no fuel");
+        }
+        let fuel_left = fuel_left && self.stage == 6;
         match p.kind {
             EngineKind::Piston | EngineKind::PistonHelo => {
                 let v = if p.kind == EngineKind::PistonHelo { v.abs() } else { v };
@@ -608,7 +958,17 @@ impl EngineState {
         };
         let boost = if wep { boost * p.wep_boost } else { boost };
         let torque_curve = (torque_curve * boost).max(-0.8 * self.w / p.w_max * p.m_max);
-        let m = torque_curve * c;
+        let running = self.stage == 6;
+        let mut m = if running { torque_curve * c * self.readyness } else { 0.0 };
+        if !running {
+            // Friction of a stopped engine (dt-scaled like the runtime).
+            self.friction = (self.friction + 0.1 * dt).min(1.0);
+            let x = self.w / p.w_max;
+            let inertia = p.prop_i + p.engine_i;
+            m += (-self.friction * (6.0 + 3.8 * x) * inertia / dt).max(-0.99 * self.w * inertia / dt);
+        } else {
+            self.friction = 0.0;
+        }
 
         // 6. Rotation.
         let mut aw = (m - q) / (p.prop_i + p.engine_i);
@@ -619,8 +979,8 @@ impl EngineState {
         self.w = (self.w + aw * dt).clamp(0.0, 2.0 * p.w_max_allowed);
 
         // Fuel: specific use at the power produced (torque × compressor), per hour.
-        let hp_out = m * self.w * 0.00105;
-        if throttle > 0.0 {
+        let hp_out = torque_curve * c * self.w * 0.00105;
+        if running {
             let x = hp_out / p.horse_powers;
             let hp_for = hp_out.max(p.horse_powers * 0.05);
             self.fuel_rate = Self::specific_fuel(p, x) / 3600.0 * (0.8 + 0.2 * self.w / p.w_wep) * hp_for;

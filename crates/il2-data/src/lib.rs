@@ -68,6 +68,12 @@ impl<'a> Classes<'a> {
         out
     }
 
+    /// Short names of the class and its superclasses, most derived first (`BF_109G6`, `BF_109`, …).
+    pub fn lineage(&self, class: &str) -> Vec<String> {
+        let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };
+        self.chain(&full).iter().map(|c| c.this_class.rsplit('/').next().unwrap_or("").to_owned()).collect()
+    }
+
     /// For each channel, whether its animation was imported, else why not (diagnostics).
     pub fn animation_report(&self, class: &str) -> Vec<(anim::Channel, Result<(), String>)> {
         let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };

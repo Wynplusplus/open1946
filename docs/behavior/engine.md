@@ -2,8 +2,8 @@
 
 Status: **specified from the runtime's engine model** for running piston engines (`Type Inline/Radial`).
 Also specified: jets, rockets, rocket boosters, pulse jets, tow strings and fuel use (sections below).
-Emergency boost is specified too ("Emergency boost"). Not yet covered: start-up and shut-down stages,
-mixture, magnetos, failures, temperatures, negative-g carburettor cut, engine roughness.
+Emergency boost and engine management (start-up, temperatures, radiator, overheat) are specified below.
+Not yet covered: mixture, magnetos, negative-g carburettor cut, engine roughness, combat damage.
 
 ## Data (`FlightModels/<family>.emd`)
 A submodel `[Name]` is read **on top of** `[Generic]` in the same file: any key the submodel does not give
@@ -190,3 +190,67 @@ is engaged.
 
 *OpenIL2 status:* the supercharger stage conditions for types 7 and 8 are not modelled (the factors always
 apply).
+
+## Engine management
+**Stages.** 0 off, 1–5 starting, 6 running, 7 dead, 8 seized. During stages 1–5 the engine gives no force
+and the shaft speed is imposed (RPM): stage 1 `20·f` (0.5–1 s), stage 2 `20 + 15f` (4–8 s cranking), stage
+3 `60 + 60f` (0.05–0.1 s), stage 4 120 (0.5–1 s), stage 5 `120 + 120f` (0.5–1 s), where `f` is the fraction
+of the stage elapsed and the durations are uniformly random. Rockets and pulse jets jump to stage 5. Engines
+with `Autonomous 0` (jets) can start only on the ground within 1200 m of an airfield. Restarting an engine
+that has run before:
+- stage 2 lasts `0.1 + c·7.9·U(2, 4.2)` s (beyond 9 s: `U(7.8, 9.6)`), with
+  `c = (TOILOUTMAXRPM − T_oil)/(TOILOUTMAXRPM − 20)`;
+- stage 2 fails with probability 0.5, and stage 3 with 0.12 when `c < 0.75`;
+- stage 5 fails with 0.1 for piston engines.
+
+**Stopped engine.** Engine torque is 0. A friction coefficient grows by 0.1/s up to 1, giving the torque
+`−fric·(6 + 3.8ω/ωMax)·(propI + EngineI)/dt`, but no more than `−0.99ω(propI + EngineI)/dt`.
+Running out of fuel stops the engine.
+
+**Temperatures** (°C). Let:
+- `T₀` = ambient temperature, `ρ` = air density;
+- `x = ω/ωWEP`, `t` = throttle;
+- `r` = radiator opening;
+- `s = 0.8 + 60/(50 + V_kmh)`.
+
+The throttle term `t` is reduced for boost engines:
+- with `BoostFactor > 1`: `t = (t + max(t − 1, 0)·(BoostFactor − 1.1)·10)/BoostFactor`;
+- when emergency boost is off and `WEPBoostFactor > 1` (not types 1, 4, 9): `t /= WEPBoostFactor`.
+
+While running, each value approaches its target at rate `TESPEED` per second (oil in at 0.5/s):
+- oil out: `T₀ + TOILOUTMAXRPM·(1 − 0.15r)·(0.65 + 0.45/ρ)·(1 + 0.35·oilDamage)·1.2·x²·(0.7 + 0.3t)·s`;
+- oil in: towards `0.8·oil out`;
+- water: `T₀ + TWATERMAXRPM·(1 − 0.15r)·(0.65 + k)·(0.6 + 0.4x)·(0.1 + 1.1t)·s·(1.1 − 0.1·mixture)`, with
+  `k = 0.45/ρ`, or `0.35 + 0.1/ρ` for jets.
+
+When stopped, oil and water approach `T₀` at `TESPEED·(0.2 + 0.2r)`. Engines spawned running start at
+the mid-points of `TOILMIN…TOILOUTMAXRPM` and `TWATERMIN…TWATERMAXRPM`.
+
+**Automatic radiator** (unless the pilot sets it). By aircraft class:
+- Gladiator and Fokker D.XXI: closed.
+- P-51, P-38, Yak-3 / 3P / 9M / 9U / 9UT, P-63C: opens at 0.1/s while oil out exceeds `TOILOUTMAXRPM`,
+  else `1 − V/VmaxH`.
+- Spitfire VIII and IX: `(water − TWATERMAX + 20)/20`.
+- Otherwise by governor type:
+  - 1 and 2: track `1 − power` at 0.15/s;
+  - 5 and 6: `1 − V/VmaxH`;
+  - 7: as the P-51 rule;
+  - 8: the oil rule for inline engines (with a 10 °C band), else as 1/2;
+  - the rest: `1 − power`.
+
+Radiator drag: `0.003·r` added to the wing drag coefficient.
+
+**Overheat** (difficulty option). For water above `TWATERMAX` and oil above `TOILMAX`: with
+`e = T/T_crit − 1`, a malfunction happens in a step when `1000·e³·dt > U(0, 1)·MAXRPMTIME`. For piston
+engines it is drawn from 0–99:
+- water: < 50 a cylinder lost, < 65 oil hit, < 94 a cylinder with smoke, < 95 fire, < 97 supercharger
+  lost, < 98 engine dies, else seizes;
+- oil: < 10 cylinder, < 60 oil hit, < 94 bearing (readiness × 0.95), < 95 fire, < 96 supercharger, < 97
+  dies, else seizes.
+
+Other types: 20 % smoke, else 0–3 cylinders' worth of power. Losing cylinders lowers readiness to the
+operable fraction; below 12 % the engine dies. Readiness multiplies engine torque.
+
+*OpenIL2 status:*
+- An oil hit raises `oilDamage` by 0.5 (the runtime's oil-leak state is part of the damage model).
+- Fire and supercharger loss reduce readiness instead of the damage-model effects.

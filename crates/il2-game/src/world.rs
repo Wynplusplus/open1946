@@ -88,7 +88,19 @@ pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Re
     let mut fm = Aircraft::load(&fmd, |fam| fms.sect_file(&format!("FlightModels/{fam}.emd")).ok(), gear).map_err(|e| e.to_string())?;
     // The runtime picks these rocket burn rates by aircraft class (docs/behavior/engine.md).
     let short = class.rsplit('.').next().unwrap_or(class);
+    let lineage = classes.lineage(class);
+    let is = |names: &[&str]| lineage.iter().any(|c| names.contains(&c.as_str()));
+    let radiator = if is(&["GLADIATOR", "DXXI_DK", "DXXI_DU", "DXXI_SARJA3_EARLY", "DXXI_SARJA3_LATE", "DXXI_SARJA3_SARVANTO"]) {
+        il2_fm::engine::RadiatorMode::Closed
+    } else if is(&["P_51", "P_38", "YAK_3", "YAK_3P", "YAK_9M", "YAK_9U", "YAK_9UT", "P_63C"]) {
+        il2_fm::engine::RadiatorMode::OilThermostat
+    } else if is(&["SPITFIRE9", "SPITFIRE8", "SPITFIRE8CLP"]) {
+        il2_fm::engine::RadiatorMode::WaterThermostat
+    } else {
+        il2_fm::engine::RadiatorMode::Governor
+    };
     for e in &mut fm.engines {
+        e.radiator_mode = radiator;
         e.rocket_burn = match short {
             "BI_1" | "BI_6" => 1.8,
             "MXY_7" => 0.5,

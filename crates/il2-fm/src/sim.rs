@@ -2,7 +2,7 @@
 
 use crate::aircraft::{Aircraft, ContactKind};
 use crate::atmosphere::{self, G};
-use crate::engine::{EngineKind, EngineState};
+use crate::engine::{EngineEnv, EngineKind, EngineState};
 use crate::polar::Polar;
 use glam::{DQuat, DVec3};
 
@@ -76,6 +76,8 @@ pub struct Sim {
     pub trim: [f64; 3],
     /// Dive brake position.
     pub airbrake: f64,
+    /// Difficulty: engines suffer from overheating.
+    pub engine_overheat: bool,
     /// Body-x airspeed of the last step, for the controls' speed limits.
     last_vx: f64,
     /// Elevator before the high-speed neutral shift.
@@ -101,6 +103,29 @@ fn deg(r: f64) -> f64 {
 }
 
 impl Sim {
+    /// Starts stopped engines or stops running ones (`at_airfield`: for engines that need ground support).
+    pub fn toggle_engines(&mut self, at_airfield: bool) {
+        let env = EngineEnv { dt: TICK, speed: self.vel.length(), altitude: self.pos.z, at_airfield, vmax_h: self.ac.vmax_h, overheat: false };
+        for (p, st) in self.ac.engines.iter().zip(&mut self.engines) {
+            st.toggle(p, &env);
+        }
+    }
+
+    /// Sets the radiator flaps (0..1), or `None` for automatic.
+    pub fn set_radiator(&mut self, r: Option<f64>) {
+        for st in &mut self.engines {
+            st.radiator_manual = r;
+        }
+    }
+
+    /// Engines cold and stopped (a cold start on the ground).
+    pub fn set_engines_cold(&mut self) {
+        let ambient = atmosphere::temperature(self.pos.z) - 273.15;
+        for (p, st) in self.ac.engines.iter().zip(&mut self.engines) {
+            *st = EngineState::cold(p, ambient);
+        }
+    }
+
     /// Moves a trim lever by `steps` notches (0.00625 each) if the aircraft has that trim.
     pub fn trim(&mut self, axis: usize, steps: f64) {
         if self.ac.controls.trim[axis] {
@@ -141,6 +166,7 @@ impl Sim {
             trim_target: ac_trim,
             trim: ac_trim,
             airbrake: 0.0,
+            engine_overheat: true,
             last_vx: speed,
             ev: 0.0,
             ct: Inputs { gear: 1.0, ..Default::default() },
@@ -247,6 +273,8 @@ impl Sim {
             };
             let wep = p.wep_active(t, self.ct.wep, self.nitro > 0.0);
             st.step_any(p, t, wep, vflow.x, v, self.pos.z, dt, fuel_left);
+            let env = EngineEnv { dt, speed: v, altitude: self.pos.z, at_airfield: false, vmax_h: ac.vmax_h, overheat: self.engine_overheat };
+            st.manage(p, t, wep, &env);
             thrust += st.thrust;
             torque += st.torque;
             burn += st.fuel_rate * dt;
@@ -263,6 +291,8 @@ impl Sim {
         let power_out = throttle.min(1.0);
         let prop_sign = ac.engines.first().map_or(1.0, |e| e.direction);
         let single_prop = ac.engines.len() == 1;
+
+        let radiator = if self.engines.is_empty() { 0.0 } else { self.engines.iter().map(|e| e.radiator).sum::<f64>() / self.engines.len() as f64 };
 
         // Wing halves.
         let delta = ac.wing_v * aos.to_radians().sin() + ac.sens_roll * (1.0 - 0.1 * flap) * 14.0 * self.ct.aileron;
@@ -281,7 +311,8 @@ impl Sim {
             let (fcx, fcy) = self.fusel.coeffs(aos);
             // Gear (0.035 when down, none for fixed gear) and dive brake drag.
             let gear_cx = if ac.controls.retractable { 0.035 * self.ct.gear } else { 0.0 };
-            let cw = DVec3::new(-qn * (cx + ail_drag + gear_cx + ac.airbrake_cx * self.airbrake) - qn * fcx, -qn * fcy, qn * cy * kq);
+            let radiator_cx = 0.003 * radiator;
+            let cw = DVec3::new(-qn * (cx + ail_drag + gear_cx + radiator_cx + ac.airbrake_cx * self.airbrake) - qn * fcx, -qn * fcy, qn * cy * kq);
             (cw, a_geo, qn)
         };
         let (mut cwl, al, ql) = half(1.0);

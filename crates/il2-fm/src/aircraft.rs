@@ -124,6 +124,8 @@ pub struct Aircraft {
     pub engines: Vec<EngineParams>,
     pub gear: Vec<GearPoint>,
     pub controls: Controls,
+    /// `[Params] VmaxH`, m/s.
+    pub vmax_h: f64,
 }
 
 fn num(f: &SectFile, s: &'static str, k: &'static str) -> Result<f64, Error> {
@@ -176,6 +178,7 @@ impl Aircraft {
             engines: Vec::new(),
             gear: Vec::new(),
             controls: Controls::default(),
+            vmax_h: 150.0,
         }
     }
 
@@ -303,6 +306,7 @@ impl Aircraft {
             engines,
             gear,
             controls: Controls::load(fmd),
+            vmax_h: num_or(fmd, "Params", "VmaxH", 540.0) / 3.6,
         })
     }
 

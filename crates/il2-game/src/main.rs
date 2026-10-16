@@ -240,12 +240,18 @@ impl Game {
         }
         r.render(vp, 22.0, Some(terrain), &meshes, &draws);
 
+        for (i, e) in self.sim.engines.iter_mut().enumerate() {
+            for ev in e.events.drain(..) {
+                eprintln!("engine {}: {ev}", i + 1);
+            }
+        }
+        let s = &self.sim;
         self.title_timer -= dt;
         if self.title_timer <= 0.0 {
             self.title_timer = 0.25;
             let agl = s.pos.z - field.height_at(s.pos.x, s.pos.y);
             r.window.as_ref().unwrap().set_title(&format!(
-                "OpenIL2 | IAS {:4.0} km/h | ALT {:5.0} m (AGL {:5.0}) | THR {:3.0}%{} | FLAPS {:3.0}% | GEAR {} | AoA {:5.1} | FUEL {:4.0} kg | TRIM {:+.3}{}{}",
+                "OpenIL2 | IAS {:4.0} km/h | ALT {:5.0} m (AGL {:5.0}) | THR {:3.0}%{} | FLAPS {:3.0}% | GEAR {} | AoA {:5.1} | FUEL {:4.0} kg | TRIM {:+.3} | {}{}{}",
                 s.ias * 3.6,
                 s.pos.z,
                 agl,
@@ -256,6 +262,12 @@ impl Game {
                 s.aoa,
                 s.fuel,
                 s.trim[1],
+                s.engines.first().map_or(String::new(), |e| format!(
+                    "ENG {} {:4.0} rpm OIL {:3.0} WATER {:3.0} RAD {}",
+                    match e.stage { 0 => "OFF", 1..=5 => "START", 6 => "ON", 7 => "DEAD", _ => "SEIZED" },
+                    e.rpm(), e.t_oil_out, e.t_water,
+                    e.radiator_manual.map_or("AUTO".to_owned(), |r| format!("{:.0}%", r * 100.0))
+                )),
                 if s.airbrake > 0.5 { " | AIRBRAKE" } else { "" },
                 if s.on_ground { " | GROUND" } else { "" }
             ));
@@ -303,6 +315,20 @@ impl ApplicationHandler for Game {
                             KeyCode::BracketRight => self.sim.trim(0, 1.0),
                             KeyCode::Semicolon => self.sim.trim(2, -1.0),
                             KeyCode::Quote => self.sim.trim(2, 1.0),
+                            KeyCode::KeyI => {
+                                let s = &self.sim;
+                                let at_airfield = s.on_ground && s.vel.length() < 1.0;
+                                self.sim.toggle_engines(at_airfield);
+                            }
+                            KeyCode::KeyR => {
+                                // Radiator: automatic, then 1/3, 2/3, fully open, then automatic again.
+                                let next = match self.sim.engines.first().and_then(|e| e.radiator_manual) {
+                                    None => Some(1.0 / 3.0),
+                                    Some(r) if r < 0.9 => Some((r + 1.0 / 3.0).min(1.0)),
+                                    Some(_) => None,
+                                };
+                                self.sim.set_radiator(next);
+                            }
                             KeyCode::KeyN => self.inputs.airbrake = if self.inputs.airbrake > 0.5 { 0.0 } else { 1.0 },
                             KeyCode::KeyG => self.inputs.gear = if self.inputs.gear > 0.5 { 0.0 } else { 1.0 },
                             KeyCode::Digit0 => self.inputs.throttle = 1.0,
@@ -355,6 +381,9 @@ impl ApplicationHandler for Game {
 /// stabilised speed, for comparison with the flight model's own Vmax figures.
 fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
     let ground = |_: f64, _: f64| 0.0;
+    // Like the reference figures: healthy engine, radiator closed.
+    sim.engine_overheat = false;
+    sim.set_radiator(Some(0.0));
     sim.pos.z = alt;
     let mut inputs = Inputs { throttle: 1.1, wep: true, ..Default::default() };
     let mut last = Vec::new();
@@ -508,6 +537,7 @@ fn main() {
         let (pitch, z, v) = parked_test(world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0));
         println!("parked on flat ground: pitch {pitch:.2} deg, origin {z:.3} m above ground, drift {v:.3} m/s (reference: Pitch {}, H {})",
             fmd.get("Gear", "Pitch").unwrap_or("?"), fmd.get("Gear", "H").unwrap_or("?"));
+        println!("{}", engine_test(world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0)));
         return;
     }
 
@@ -675,6 +705,43 @@ fn main() {
     };
     let el = EventLoop::new().expect("event loop");
     el.run_app(&mut game).expect("run");
+}
+
+/// Cold start on the ground, then temperatures after 5 minutes of full power at 300 km/h and after
+/// 5 minutes at 150 km/h with the radiator closed.
+fn engine_test(mut sim: Sim) -> String {
+    let flat = |_: f64, _: f64| 0.0;
+    sim.set_engines_cold();
+    sim.toggle_engines(true);
+    let mut inputs = Inputs { throttle: 0.3, gear: 1.0, brakes: 1.0, ..Default::default() };
+    let mut t = 0.0;
+    while t < 30.0 && !sim.engines.iter().all(|e| e.running()) {
+        sim.tick(&inputs, &flat);
+        t += TICK;
+    }
+    let started = sim.engines.iter().all(|e| e.running());
+    let e = &sim.engines[0];
+    let mut out = format!("cold start: {} after {t:.1} s, {:.0} rpm, oil {:.0} C", if started { "running" } else { "NOT running" }, e.rpm(), e.t_oil_out);
+    let hold = |sim: &mut Sim, inputs: &Inputs, speed: f64, secs: f64| {
+        for _ in 0..(secs / TICK) as usize {
+            let fwd = sim.ori * DVec3::X;
+            sim.vel = fwd * speed;
+            sim.pos.z = 1000.0;
+            sim.tick(inputs, &flat);
+        }
+    };
+    if started {
+        inputs = Inputs { throttle: 1.0, ..Default::default() };
+        sim.ori = glam::DQuat::IDENTITY;
+        hold(&mut sim, &inputs, 300.0 / 3.6, 300.0);
+        let e = &sim.engines[0];
+        out += &format!("; 5 min full power at 300 km/h: oil {:.0} C, water {:.0} C, radiator {:.2}", e.t_oil_out, e.t_water, e.radiator);
+        sim.set_radiator(Some(0.0));
+        hold(&mut sim, &inputs, 150.0 / 3.6, 300.0);
+        let e = &sim.engines[0];
+        out += &format!("; 5 min at 150 km/h, radiator closed: oil {:.0} C, water {:.0} C, events {:?}", e.t_oil_out, e.t_water, e.events);
+    }
+    out
 }
 
 /// Level-speed check of every aircraft in `air.ini` against its flight model's `Vmax`/`VmaxH`.
