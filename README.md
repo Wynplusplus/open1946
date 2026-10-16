@@ -6,7 +6,7 @@ It needs a legally owned copy of the game (e.g. GOG); point `IL2_ROOT` at the in
 No game files, decompiled code or key material are part of this repository. Format knowledge lives in
 `docs/formats/` as prose specifications, and the Rust code is written from those specs.
 
-## Status: milestones 1–3 done, 4 in progress
+## Status: milestones 1–4 done, 5 in progress
 
 | Area | State |
 |------|-------|
@@ -20,11 +20,12 @@ No game files, decompiled code or key material are part of this repository. Form
 | Mission objects | Stationary vehicles, guns, ships, parked aircraft, balloons, buildings; all 1,284 shipped missions resolve |
 | Flight (`il2-fm`, `il2-data`) | All 404 aircraft fly: piston engines with boost, jets, rockets, gliders; median speed error 0 % low / −1.6 % high against the `.fmd` figures (`docs/behavior/validation.md`); engine start-up, temperatures, radiators; trim, flaps, dive brakes; the runtime's gear model; joystick |
 | Game (`openil2`) | Fly any aircraft class over any map or from a mission's start (runway takeoff spots) |
-
+| Cockpits | All 241 player cockpits, with every instrument driven by the cockpit's own code from the install; head look |
+| Aircraft damage | Damage levels, parts torn off as tumbling wreckage, flight-model losses, G limits, flutter and ground strikes |
 | Weapons | Loadouts and gun, bomb and rocket data from the install; ballistics, tracers, house destruction |
 | Effects and sound | Particle effects from `.eff` files for impacts and explosions; engine, gun and explosion sounds from the game's presets (ALSA) |
 
-Not yet: cockpits, aircraft damage, AI, ground units, menus (see `docs/roadmap.md`).
+Not yet: AI, moving ground units, menus, campaigns, multiplayer (see `docs/roadmap.md`).
 
 ## Usage
 
@@ -42,12 +43,14 @@ target/release/il2 parse-all --names names.txt
 # Fly (arrows: stick, Z/X: rudder, PageUp/PageDown or 1-9/0/W: throttle, F/V: flaps, G: gear, B: brakes,
 #      I: start/stop engines, R: radiator (auto / 33 / 67 / 100 %), W: emergency boost, ,/.: elevator trim, [/]: aileron trim, ;/': rudder trim, N: dive brake, L: tail wheel lock, O: prop pitch auto/manual, Q/E: prop lever,
 #      Space: guns, Enter: cannons, U: rockets, K: bombs,
-#      F1: chase view, F2: free orbit view with mouse drag and wheel)
+#      F1: cockpit (mouse drag looks around), F2: free orbit view with mouse drag and wheel, F3: chase view)
 target/release/openil2 --aircraft air.BF_109G6 --map maps/Slovakia/load.ini --at 214500,86500 --agl 300
 target/release/openil2 --mission Missions/Single/SK/Bf-109F-4/Bf-109F-4_1.mis
 target/release/openil2 --test                                   # headless flight-model checks
 target/release/openil2 --at 214500,86500 --time 19.5              # dusk; --time overrides the mission's
 target/release/openil2 --at 214500,86500 --agl 150 --screenshot out.png --orbit 170,12,40
+target/release/openil2 --screenshot out.png --cockpit=-30,-10        # from the cockpit, head turned
+target/release/openil2 --screenshot out.png --damage WingLMid_D0 --seconds 0.5 --orbit 150,30,16
 
 # Joystick (Linux /dev/input/js*): picked up automatically; default axes X/Y = stick, 2 = throttle,
 # 3 = twist rudder, button 2 = wheel brakes. Remap with e.g. --joy-map aileron=0,elevator=1,rudder=5,throttle=-2

@@ -22,11 +22,15 @@ wave drag, controls (`controls.md`), engine management, landing gear (`gear.md`)
 All 404 aircraft fly (`validation.md`). Not modelled yet: mixture and magnetos, negative-g cut-out, water
 landings and carrier decks (with M5), structural failure (with damage, M4).
 
-## M4: aircraft depth
-Cockpits, HUD, weapons and ballistics, damage model (hidden `_D1.._D3` nodes, `Separable` parts), sound.
+## M4: aircraft depth (done)
+Cockpits with every instrument (`cockpit.md`), HUD, weapons and ballistics (`weapons.md`), house and aircraft
+damage (`damage.md`), particle effects (`effects.md`), sound (`sound.md`).
+Moved on to M5, which brings something to shoot at: bullet and blast hits on aircraft (the per-class
+detailed damage bones `xx…` and the generic chunk damage), smoke and fire from damaged engines and wrecks,
+bridge ramps.
 
 ## M5: simulation
-AI pilots and gunners, ground and naval units, Quick Mission Builder, menus and UI (`i18n`).
+AI pilots and gunners, hits on aircraft, ground and naval units, Quick Mission Builder, menus and UI (`i18n`).
 
 ## M6: everything else
 Campaigns (DGen/NGen), track recording (`.ntrk`), multiplayer, DeviceLink.
