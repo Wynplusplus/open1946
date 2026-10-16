@@ -263,9 +263,9 @@ impl Game {
                 s.fuel,
                 s.trim[1],
                 s.engines.first().map_or(String::new(), |e| format!(
-                    "ENG {} {:4.0} rpm OIL {:3.0} WATER {:3.0} RAD {}",
+                    "ENG {} {:4.0} rpm PROP {} OIL {:3.0} WATER {:3.0} RAD {}",
                     match e.stage { 0 => "OFF", 1..=5 => "START", 6 => "ON", 7 => "DEAD", _ => "SEIZED" },
-                    e.rpm(), e.t_oil_out, e.t_water,
+                    e.rpm(), e.prop_manual.map_or("AUTO".to_owned(), |l| format!("{:.0}%", l * 100.0)), e.t_oil_out, e.t_water,
                     e.radiator_manual.map_or("AUTO".to_owned(), |r| format!("{:.0}%", r * 100.0))
                 )),
                 if s.airbrake > 0.5 { " | AIRBRAKE" } else { "" },
@@ -328,6 +328,15 @@ impl ApplicationHandler for Game {
                                     Some(_) => None,
                                 };
                                 self.sim.set_radiator(next);
+                            }
+                            KeyCode::KeyO => {
+                                let auto = self.sim.engines.first().is_none_or(|e| e.prop_manual.is_none());
+                                self.sim.set_prop(if auto { Some(1.0) } else { None });
+                            }
+                            KeyCode::KeyQ | KeyCode::KeyE => {
+                                let cur = self.sim.engines.first().and_then(|e| e.prop_manual).unwrap_or(1.0);
+                                let d = if code == KeyCode::KeyQ { -0.05 } else { 0.05 };
+                                self.sim.set_prop(Some((cur + d).clamp(0.0, 1.0)));
                             }
                             KeyCode::KeyL => self.inputs.tail_lock = !self.inputs.tail_lock,
                             KeyCode::KeyN => self.inputs.airbrake = if self.inputs.airbrake > 0.5 { 0.0 } else { 1.0 },

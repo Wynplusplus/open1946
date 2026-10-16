@@ -109,6 +109,13 @@ impl Sim {
         }
     }
 
+    /// Sets the propeller lever (0..1), or `None` for automatic.
+    pub fn set_prop(&mut self, l: Option<f64>) {
+        for st in &mut self.engines {
+            st.prop_manual = l;
+        }
+    }
+
     /// Sets the radiator flaps (0..1), or `None` for automatic.
     pub fn set_radiator(&mut self, r: Option<f64>) {
         for st in &mut self.engines {

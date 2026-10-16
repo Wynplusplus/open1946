@@ -263,7 +263,8 @@ impl Aircraft {
                 break;
             };
             let e = emd(fam).ok_or_else(|| Error::Bad(format!("engine family {fam} not found")))?;
-            let p = EngineParams::load(&e, sub).ok_or_else(|| Error::Bad(format!("engine {fam}/{sub} not found")))?;
+            let mut p = EngineParams::load(&e, sub).ok_or_else(|| Error::Bad(format!("engine {fam}/{sub} not found")))?;
+            p.v_schedule = (num_or(fmd, "Params", "Vmin", 160.0) / 3.6, num_or(fmd, "Params", "Vmax", 500.0) / 3.6);
             engines.push(p);
         }
 

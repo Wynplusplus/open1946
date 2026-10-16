@@ -63,6 +63,8 @@ pub struct EngineParams {
     /// `Autonomous 0`: needs ground equipment (near an airfield, on the ground) to start.
     pub autonomous: bool,
     pub radiator_mode: RadiatorMode,
+    /// `[Params] Vmin`, `Vmax` (m/s), for the speed-scheduled governor type 5.
+    pub v_schedule: (f64, f64),
     /// `WEPBoostFactor`: torque factor with boost engaged (1).
     pub wep_boost: f64,
     /// Boost ATA over normal ATA at the boost point of the ATA curve.
@@ -225,6 +227,7 @@ impl EngineParams {
             t_oil_min: num("TOILMIN", 0.0),
             autonomous: num("Autonomous", 1.0) != 0.0,
             radiator_mode: RadiatorMode::Governor,
+            v_schedule: (50.0, 150.0),
             wep_boost: num("WEPBoostFactor", 1.0),
             wep_compressor,
             gov_max_wep: if raw("PropAnglerAfterburnerParam").is_some() { gov_param("PropAnglerAfterburnerParam") } else { gov_param("PropAnglerMaxParam") },
@@ -367,6 +370,8 @@ pub struct EngineState {
     /// Radiator flap, 0 closed .. 1 open; automatic unless the pilot sets it.
     pub radiator: f64,
     pub radiator_manual: Option<f64>,
+    /// Propeller lever 0..1 (fine .. coarse, or RPM setting); `None` is automatic.
+    pub prop_manual: Option<f64>,
     /// Engine condition 0..1 (multiplies torque).
     pub readyness: f64,
     pub cylinders_out: f64,
@@ -434,6 +439,7 @@ impl EngineState {
             t_water: 0.5 * (p.t_water_min + p.t_water_max_rpm),
             radiator: 0.0,
             radiator_manual: None,
+            prop_manual: None,
             readyness: 1.0,
             cylinders_out: 0.0,
             oil_damage: 0.0,
@@ -843,7 +849,8 @@ impl EngineState {
         // 3. Governor.
         let threshold = match p.governor {
             1 | 2 | 7 | 8 => {
-                let lever = if p.boost_factor > 1.0 { 0.75 + 0.227272 * throttle } else { 0.75 + 0.25 * throttle };
+                let auto = if p.boost_factor > 1.0 { 0.75 + 0.227272 * throttle } else { 0.75 + 0.25 * throttle };
+                let lever = self.prop_manual.unwrap_or(auto).clamp(0.0, 1.0);
                 let top = if wep { p.gov_max_wep } else { p.gov_max };
                 let wt = p.gov_min + (top - p.gov_min) * lever;
                 let rate = p.governor_speed * dt;
@@ -863,6 +870,45 @@ impl EngineState {
             0 => {
                 self.phi_target = 0.0;
                 p.max_ata_rpm * (0.55 + 0.45 * t)
+            }
+            // Variable pitch: automatic keeps the blades at their best angle of attack.
+            3 | 4 => {
+                self.phi_target = match self.prop_manual {
+                    None => phi_w + p.prop_aoa0,
+                    Some(l) => p.phi_max - l.clamp(0.0, 1.0) * (p.phi_max - p.phi_min),
+                };
+                0.5 + (p.max_ata_rpm - 0.5) * t
+            }
+            // Pitch scheduled by airspeed (governor parameters are angles).
+            5 => {
+                let (vmin, vmax) = p.v_schedule;
+                let lever = match self.prop_manual {
+                    None => -((speed - vmin) / (vmax - vmin).max(1.0)).clamp(0.0, 1.0),
+                    Some(l) => -l.clamp(0.0, 1.0),
+                };
+                self.phi_target = p.gov_max - lever * (p.gov_max - p.gov_min);
+                self.phi = self.phi_target;
+                0.5 + (p.max_ata_rpm - 0.5) * t
+            }
+            // Constant speed with the target RPM following the throttle.
+            6 => {
+                let wt = match self.prop_manual {
+                    None => 25.0 + (p.w_max - 25.0) * (0.25 + 0.75 * t),
+                    Some(l) => 25.0 + (p.w_max - 25.0) * l.clamp(0.0, 1.0),
+                };
+                let rate = p.governor_speed * dt;
+                if self.w < wt {
+                    self.phi_target -= (0.01 * (wt - self.w) - 0.012 * self.aw).min(1.0) * rate;
+                } else {
+                    self.phi_target += (0.01 * (self.w - wt) + 0.012 * self.aw).min(1.0) * rate;
+                }
+                if self.phi_target < phi_w - 0.12 {
+                    self.phi_target = phi_w - 0.12;
+                    if self.phi < self.phi_target {
+                        self.phi += 0.2 * dt;
+                    }
+                }
+                0.5 + (p.max_ata_rpm - 0.5) * t
             }
             _ => p.max_ata_rpm * (0.55 + 0.45 * t),
         };

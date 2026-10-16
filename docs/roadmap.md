@@ -16,10 +16,11 @@ Not shipped: the `[CUBE]` sky textures named in `load.ini` are not in the instal
 Moved on: bridge ramps (M4, with damage), smoke/fire effects (M4, with the effects system). Gear animation
 is not decoded for some classes (e.g. La-5FN): M3.
 
-## M3: flight
-Flight-model tables (`krypto.md`: container `gui/game/buttons`), a generic flight model, joystick input,
-aircraft systems. Per-aircraft behavior that lives in Java code is documented in `docs/behavior/` and
-reimplemented as data or Rust.
+## M3: flight (done)
+Flight model, engines of every type (piston, jet, rocket, booster, pulse jet, tow), emergency boost, fuel,
+wave drag, controls (`controls.md`), engine management, landing gear (`gear.md`), joystick, part animation.
+All 404 aircraft fly (`validation.md`). Not modelled yet: mixture and magnetos, negative-g cut-out, water
+landings and carrier decks (with M5), structural failure (with damage, M4).
 
 ## M4: aircraft depth
 Cockpits, HUD, weapons and ballistics, damage model (hidden `_D1.._D3` nodes, `Separable` parts), sound.

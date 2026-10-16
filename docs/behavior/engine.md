@@ -254,3 +254,17 @@ operable fraction; below 12 % the engine dies. Readiness multiplies engine torqu
 *OpenIL2 status:*
 - An oil hit raises `oilDamage` by 0.5 (the runtime's oil-leak state is part of the damage model).
 - Fire and supercharger loss reduce readiness instead of the damage-model effects.
+
+## Propeller governors 3–6 and the propeller lever
+`PropAnglerType`:
+- **1 and 2:** governed RPM `MinParam + (Max − Min)·lever`; the automatic lever is `0.75 + 0.25·throttle`
+  (`0.227272` with boost).
+- **3 and 4** (variable pitch): automatic `φ_target = φ_w + PropAoA0` (blades at their design angle of
+  attack); manual `φ_target = PropPhiMax − lever·(PropPhiMax − PropPhiMin)`.
+- **5** (pitch by airspeed): lever = `−cvt(V, Vmin, Vmax, 0, 1)` when automatic, else `−lever`;
+  `φ = MaxParam − lever·(MaxParam − MinParam)` (angles), set at once.
+- **6:** a governor like type 1 aiming at `25 + (ωMax − 25)·(0.25 + 0.75·throttle)` rad/s (manual: `lever`
+  instead of the throttle term).
+- For 3–6 the manifold threshold is `0.5 + (CompressorMaxATARPM − 0.5)·throttle`.
+
+`Vmin` and `Vmax` are `[Params]` values in km/h.
