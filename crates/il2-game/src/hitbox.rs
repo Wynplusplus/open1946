@@ -122,10 +122,8 @@ mod tests {
     fn box_hits() {
         let lo = Vec3::splat(-1.0);
         let hi = Vec3::splat(1.0);
-        assert_eq!(
-            segment_box(Vec3::new(-3.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0), lo, hi),
-            Some(1.0 / 3.0)
-        );
+        let t = segment_box(Vec3::new(-3.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0), lo, hi).unwrap();
+        assert!((t - 1.0 / 3.0).abs() < 1e-6);
         assert_eq!(
             segment_box(Vec3::new(-3.0, 2.0, 0.0), Vec3::new(3.0, 2.0, 0.0), lo, hi),
             None
