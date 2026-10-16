@@ -80,7 +80,7 @@ pub fn add_mission(b: &mut Builder, vfs: &Vfs, fms: &il2_data::FlightModels, m: 
     for h in &m.buildings {
         let full = format!("com.maddox.il2.objects.buildings.{}", h.class);
         match b.house_class(statics_ini, &full, h.flag != 0, true) {
-            Some((c, stand)) => b.place(c, h.x, h.y, -h.yaw, stand),
+            Some((c, stand, profile)) => b.place_destructible(c, h.x, h.y, -h.yaw, stand, profile),
             // A destroyed house without a `MeshDead` is not drawn by the runtime either.
             None if h.flag == 0 && b.house_class(statics_ini, &full, true, true).is_some() => {}
             None => skipped.push(full),

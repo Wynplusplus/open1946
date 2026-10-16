@@ -1,3 +1,4 @@
+mod damage;
 mod effects;
 mod forest;
 mod joystick;
@@ -65,6 +66,9 @@ struct Args {
     /// Screenshot: orbit camera "yaw,pitch,distance" (degrees relative to the aircraft heading, metres).
     #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
     orbit: Option<Vec<f64>>,
+    /// Start pitched nose-down by this many degrees (without a mission).
+    #[arg(long)]
+    dive: Option<f64>,
     /// Screenshot: hold the triggers (all guns) during the simulated seconds.
     #[arg(long)]
     fire: bool,
@@ -103,14 +107,24 @@ impl Combat {
         Combat { guns, bullets: Vec::new(), rng: weapons::Rng::new(0x5EED), hits: Vec::new() }
     }
 
-    fn step(&mut self, sim: &mut Sim, triggers: &[bool; 4], field: &HeightField) {
+    fn step(&mut self, sim: &mut Sim, triggers: &[bool; 4], field: &HeightField, objects: &mut objects::MapObjects) {
         let recoil = weapons::fire(&mut self.guns, triggers, sim.pos, sim.ori, sim.vel, TICK, &mut self.rng, 0, &mut self.bullets);
         if recoil != DVec3::ZERO {
             // Gun recoil acts on the aircraft.
             sim.vel += sim.ori * recoil / sim.mass();
         }
         self.hits.clear();
-        weapons::advance(&mut self.bullets, TICK, field, &mut self.hits);
+        weapons::advance(&mut self.bullets, TICK, field, objects, &mut self.rng, &mut self.hits);
+        for (b, h) in &self.hits {
+            match h {
+                weapons::Hit::Object(_, _, true) => eprintln!("{} destroyed a building", b.spec.name),
+                weapons::Hit::Object(_, _, false) if std::env::var_os("IL2_TRACE").is_some() => eprintln!("hit object"),
+                weapons::Hit::Ground(p) if std::env::var_os("IL2_TRACE").is_some() => {
+                    eprintln!("hit ground at {:.0?} nearest object {:?}", p, objects.nearest(*p))
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -228,7 +242,7 @@ impl Game {
         let triggers = [self.keys.contains(&KeyCode::Space), self.keys.contains(&KeyCode::Space) || self.keys.contains(&KeyCode::Enter), false, false];
         while self.acc >= TICK {
             self.sim.tick(&self.inputs, &ground);
-            self.combat.step(&mut self.sim, &triggers, field);
+            self.combat.step(&mut self.sim, &triggers, field, &mut self.view.objects);
             self.acc -= TICK;
         }
         let (Some(r), Some(terrain), Some(plane)) = (self.renderer.as_mut(), &self.terrain, &self.plane) else { return };
@@ -617,6 +631,10 @@ fn main() {
             if let Some([x, y]) = args.at.as_deref().and_then(|a| <[f64; 2]>::try_from(a).ok()) {
                 sim.pos = DVec3::new(x, y, field.height_at(x, y) + args.agl);
             }
+            if let Some(d) = args.dive {
+                sim.ori *= glam::DQuat::from_rotation_y(d.to_radians());
+                sim.vel = sim.ori * DVec3::new(sim.vel.length(), 0.0, 0.0);
+            }
             sim
         }
     };
@@ -647,7 +665,7 @@ fn main() {
         let triggers = [args.fire, args.fire, false, false];
         for _ in 0..(args.seconds / TICK) as usize {
             sim.tick(&inputs, &ground);
-            combat.step(&mut sim, &triggers, &field);
+            combat.step(&mut sim, &triggers, &field, &mut view.objects);
         }
         let (w, h) = (1280, 720);
         let mut r = Renderer::headless(w, h);

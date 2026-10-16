@@ -239,10 +239,33 @@ pub fn fire(
 /// What a bullet hit this step.
 pub enum Hit {
     Ground(DVec3),
+    /// A map object (index) at a point; whether it was destroyed.
+    Object(usize, DVec3, bool),
 }
 
-/// Moves bullets one step (drag and gravity) and removes those that expired or hit the ground.
-pub fn advance(bullets: &mut Vec<Bullet>, dt: f64, field: &HeightField, hits: &mut Vec<(Bullet, Hit)>) {
+impl BulletType {
+    /// The runtime's shot type for a hit: 1 shaped charge, 0 high explosive, 3 with filler, 2 plain.
+    pub fn shot_type(&self) -> i32 {
+        if self.power_radius > 0.0 {
+            0
+        } else if self.power > 0.0 {
+            3
+        } else {
+            2
+        }
+    }
+}
+
+/// Moves bullets one step (drag and gravity), resolves hits on map objects and the ground, and
+/// removes spent rounds.
+pub fn advance(
+    bullets: &mut Vec<Bullet>,
+    dt: f64,
+    field: &HeightField,
+    objects: &mut crate::objects::MapObjects,
+    rng: &mut Rng,
+    hits: &mut Vec<(Bullet, Hit)>,
+) {
     let mut i = 0;
     while i < bullets.len() {
         let b = &mut bullets[i];
@@ -253,6 +276,17 @@ pub fn advance(bullets: &mut Vec<Bullet>, dt: f64, field: &HeightField, hits: &m
         b.vel.z -= 9.8 * dt;
         b.pos += b.vel * dt;
         b.life -= dt;
+        if let Some((obj, at)) = objects.hit(b.prev, b.pos) {
+            let ty = b.ty().clone();
+            let speed = b.vel.length();
+            let mut killed = objects.shot(obj, 0.5 * ty.mass * speed * speed, ty.shot_type(), speed, rng);
+            if ty.power > 0.0 && ty.power_radius > 0.0 {
+                killed |= objects.explode(at, ty.power + 0.03 * ty.mass, ty.power_radius, rng) > 0;
+            }
+            let b = bullets.swap_remove(i);
+            hits.push((b, Hit::Object(obj, at, killed)));
+            continue;
+        }
         let ground = field.height_at(b.pos.x, b.pos.y);
         if b.pos.z <= ground {
             // Point of impact along the segment.
@@ -260,6 +294,31 @@ pub fn advance(bullets: &mut Vec<Bullet>, dt: f64, field: &HeightField, hits: &m
             let (h0, h1) = (b.prev.z - g0, b.pos.z - ground);
             let t = if (h0 - h1).abs() > 1e-6 { (h0 / (h0 - h1)).clamp(0.0, 1.0) } else { 1.0 };
             let at = b.prev.lerp(b.pos, t);
+            let ty = b.ty().clone();
+            // Tracer rounds without a blast may ricochet off a glancing hit.
+            if ty.trace_mesh.is_some() && ty.power_radius == 0.0 {
+                let n = ground_normal(field, at.x, at.y);
+                let speed = b.vel.length();
+                let dir = b.vel / speed.max(1e-9);
+                let c = n.dot(dir);
+                if c >= -0.25 && rng.uniform() - 0.666 >= -c {
+                    let mut v = b.vel - n * (1.1 * n.dot(b.vel));
+                    let side = dir.cross(n);
+                    let r1 = rng.uniform() * 2.4 - 1.2;
+                    v += side * (r1 * r1 * r1 * speed);
+                    let r2 = rng.uniform() * 1.2;
+                    v += n * (r2 * r2 * r2 * speed);
+                    let v = v.normalize_or(n);
+                    let keep = dir.dot(v);
+                    b.vel = v * (keep * keep * speed);
+                    b.pos = at + n * 0.05;
+                    i += 1;
+                    continue;
+                }
+            }
+            if ty.power > 0.0 && ty.power_radius > 0.0 {
+                objects.explode(at, ty.power + 0.03 * ty.mass, ty.power_radius, rng);
+            }
             let b = bullets.swap_remove(i);
             hits.push((b, Hit::Ground(at)));
             continue;
@@ -270,4 +329,9 @@ pub fn advance(bullets: &mut Vec<Bullet>, dt: f64, field: &HeightField, hits: &m
         }
         i += 1;
     }
+}
+
+fn ground_normal(field: &HeightField, x: f64, y: f64) -> DVec3 {
+    let e = 1.0;
+    DVec3::new(field.height_at(x - e, y) - field.height_at(x + e, y), field.height_at(x, y - e) - field.height_at(x, y + e), 2.0 * e).normalize()
 }
