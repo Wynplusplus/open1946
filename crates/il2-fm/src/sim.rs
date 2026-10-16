@@ -19,7 +19,31 @@ pub struct Inputs {
     pub gear: f64,
     /// Emergency boost (WEP) switch, for boost systems not engaged by the throttle alone.
     pub wep: bool,
+    /// Dive brake lever, 0..1.
+    pub airbrake: f64,
 }
+
+/// The runtime's control filter: exponential approach with time constant `tau`, plus a linear
+/// approach at `rate` per second.
+fn filter(dt: f64, target: f64, cur: f64, tau: f64, rate: f64) -> f64 {
+    let mut x = target + (cur - target) * (-dt / tau).exp();
+    if x < target {
+        x = (x + rate * dt).min(target);
+    } else if x > target {
+        x = (x - rate * dt).max(target);
+    }
+    x
+}
+
+/// Stick input to surface position with trim (`docs/behavior/controls.md`).
+fn trimmed(input: f64, trim: f64, limit: f64) -> f64 {
+    let x = input.clamp(-1.0, 1.0).clamp(-limit, limit);
+    let k = if trim * x > 0.0 { -1.0 } else { 1.0 };
+    (1.0 + k * trim.abs()) * x + trim
+}
+
+/// Flap lever positions.
+pub const FLAP_STEPS: [f64; 4] = [0.0, 0.2, 0.33, 1.0];
 
 /// Ground height query in world coordinates.
 pub trait Ground {
@@ -47,6 +71,15 @@ pub struct Sim {
     pub w: DVec3,
     pub fuel: f64,
     pub nitro: f64,
+    /// Trim lever targets (aileron, elevator, rudder) and the trim actually applied.
+    pub trim_target: [f64; 3],
+    pub trim: [f64; 3],
+    /// Dive brake position.
+    pub airbrake: f64,
+    /// Body-x airspeed of the last step, for the controls' speed limits.
+    last_vx: f64,
+    /// Elevator before the high-speed neutral shift.
+    ev: f64,
     pub engines: Vec<EngineState>,
     /// Control surface positions (lagged inputs).
     pub ct: Inputs,
@@ -63,20 +96,38 @@ pub struct Sim {
     pub thrust: f64,
 }
 
-/// First-order approach of `x` to `target` at `rate` per second.
-fn approach(x: f64, target: f64, rate: f64, dt: f64) -> f64 {
-    x + (target - x).clamp(-rate * dt, rate * dt)
-}
-
 fn deg(r: f64) -> f64 {
     r.to_degrees()
 }
 
 impl Sim {
+    /// Moves a trim lever by `steps` notches (0.00625 each) if the aircraft has that trim.
+    pub fn trim(&mut self, axis: usize, steps: f64) {
+        if self.ac.controls.trim[axis] {
+            self.trim_target[axis] = (self.trim_target[axis] + 0.00625 * steps).clamp(-0.5, 0.5);
+        }
+    }
+
+    /// Next flap lever position up or down from `cur` (`FLAP_STEPS`, or up/down only).
+    pub fn flap_step(&self, cur: f64, down: bool) -> f64 {
+        if !self.ac.controls.flaps {
+            return 0.0;
+        }
+        if !self.ac.controls.flap_steps {
+            return if down { 1.0 } else { 0.0 };
+        }
+        if down {
+            FLAP_STEPS.iter().copied().find(|&s| s > cur + 1e-6).unwrap_or(1.0)
+        } else {
+            FLAP_STEPS.iter().rev().copied().find(|&s| s < cur - 1e-6).unwrap_or(0.0)
+        }
+    }
+
     pub fn new(ac: Aircraft, pos: DVec3, ori: DQuat, speed: f64) -> Self {
         let wing = ac.wing_polar();
         let fuel = ac.fuel_max;
         let nitro = ac.nitro_max;
+        let ac_trim = ac.controls.default_trim;
         let engines = ac.engines.iter().map(|p| EngineState::new(p, p.w_nom)).collect();
         Sim {
             engines,
@@ -87,6 +138,11 @@ impl Sim {
             w: DVec3::ZERO,
             fuel,
             nitro,
+            trim_target: ac_trim,
+            trim: ac_trim,
+            airbrake: 0.0,
+            last_vx: speed,
+            ev: 0.0,
             ct: Inputs { gear: 1.0, ..Default::default() },
             wing,
             fusel: Polar::fixed(0.02, 0.2, 17.0, 0.0),
@@ -123,17 +179,37 @@ impl Sim {
             self.step(dt * 0.5, input, ground);
             return;
         }
-        // OpenIL2 simplification: surfaces follow the stick with a fixed rate.
-        self.ct.aileron = approach(self.ct.aileron, input.aileron, 4.0, dt);
-        self.ct.elevator = approach(self.ct.elevator, input.elevator, 4.0, dt);
-        self.ct.rudder = approach(self.ct.rudder, input.rudder, 4.0, dt);
+        // Controls (docs/behavior/controls.md).
+        let c = &self.ac.controls;
+        let vx = self.last_vx;
+        let lim = |thr: f64, p: i32, floor: f64| if vx > thr { (thr.powi(p) / vx.powi(p)).max(floor) } else { 1.0 };
+        let (ail_lim, rud_lim, elev_lim) = (lim(c.thresholds[0], 3, 0.2), lim(c.thresholds[1], 2, 0.2), lim(c.thresholds[2], 2, 0.4));
+        for i in 0..3 {
+            self.trim[i] = filter(dt, self.trim_target[i], self.trim[i], 999.9, 0.25);
+        }
+        let ail = trimmed(input.aileron, self.trim[0], ail_lim);
+        self.ct.aileron = filter(dt, ail, self.ct.aileron, 0.2 * (1.0 + 0.3 * input.aileron.abs()), 0.025);
+        let ev = trimmed(input.elevator, self.trim[1], elev_lim);
+        // The elevator surface lags in `ev`; at high speed the trimmed neutral moves up.
+        self.ev = filter(dt, ev, self.ev, 0.3 * (1.0 + 0.3 * input.elevator.abs()), 0.022);
+        self.ct.elevator = (self.ev - 0.25 * (1.0 - elev_lim)).clamp(-1.0, 1.0);
+        let rud = trimmed(input.rudder, self.trim[2], rud_lim);
+        self.ct.rudder = filter(dt, rud, self.ct.rudder, 0.35 * (1.0 + 0.3 * input.rudder.abs()), 0.025);
         let max_throttle = self.ac.engines.iter().map(|e| e.max_throttle()).fold(1.0, f64::max);
-        self.ct.throttle = approach(self.ct.throttle, input.throttle.min(max_throttle), 1.0, dt);
-        self.ct.flaps = approach(self.ct.flaps, input.flaps, 0.2, dt);
-        self.ct.brakes = input.brakes;
+        // The player's throttle acts directly.
+        self.ct.throttle = input.throttle.clamp(0.0, max_throttle);
+        let flaps_target = if c.flaps { input.flaps.clamp(0.0, 1.0) } else { 0.0 };
+        let kmh = vx * 3.6;
+        let cvt = |lo: f64, hi: f64| lo + (hi - lo) * ((kmh - 150.0) / 130.0).clamp(0.0, 1.0);
+        let flap_rate = if self.ct.flaps > flaps_target { cvt(0.15, 0.25) } else { cvt(0.15, 0.02) };
+        self.ct.flaps = filter(dt, flaps_target, self.ct.flaps, 999.0, flap_rate);
+        self.ct.brakes = if input.brakes > self.ct.brakes { (self.ct.brakes + 0.3 * dt).min(input.brakes) } else { input.brakes };
         self.ct.wep = input.wep;
-        // OpenIL2 simplification: gear travels in about 6 s.
-        self.ct.gear = approach(self.ct.gear, input.gear, 1.0 / 6.0, dt);
+        self.ct.gear = if c.retractable { filter(dt, input.gear.clamp(0.0, 1.0), self.ct.gear, 999.9, 0.2) } else { 1.0 };
+        if c.airbrake {
+            self.airbrake = filter(dt, input.airbrake.clamp(0.0, 1.0), self.airbrake, 999.9, 0.5);
+        }
+        self.ct.airbrake = self.airbrake;
         self.wing.set_flaps(self.ct.flaps);
 
         let ac = &self.ac;
@@ -141,6 +217,7 @@ impl Sim {
         let gravity = mass * G;
         let inv = self.ori.inverse();
         let vflow = inv * self.vel; // no wind yet
+        self.last_vx = vflow.x;
         let v2 = vflow.length_squared();
         let v = v2.sqrt();
         let rho = atmosphere::density(self.pos.z);
@@ -202,7 +279,9 @@ impl Sim {
             }
             let (cx, cy) = self.wing.coeffs_mach(a, full_mach, ac.mach.as_ref());
             let (fcx, fcy) = self.fusel.coeffs(aos);
-            let cw = DVec3::new(-qn * (cx + ail_drag + ac.airbrake_cx * 0.0) - qn * fcx, -qn * fcy, qn * cy * kq);
+            // Gear (0.035 when down, none for fixed gear) and dive brake drag.
+            let gear_cx = if ac.controls.retractable { 0.035 * self.ct.gear } else { 0.0 };
+            let cw = DVec3::new(-qn * (cx + ail_drag + gear_cx + ac.airbrake_cx * self.airbrake) - qn * fcx, -qn * fcy, qn * cy * kq);
             (cw, a_geo, qn)
         };
         let (mut cwl, al, ql) = half(1.0);

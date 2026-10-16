@@ -29,6 +29,63 @@ pub struct GearPoint {
     pub kind: ContactKind,
 }
 
+/// Which controls an aircraft has, from `[Controls]` (`docs/behavior/controls.md`).
+#[derive(Clone, Debug)]
+pub struct Controls {
+    /// Aileron, elevator, rudder trim available.
+    pub trim: [bool; 3],
+    /// `DefaultAileronTrim`, `DefaultElevatorTrim`, `DefaultRudderTrim`.
+    pub default_trim: [f64; 3],
+    pub flaps: bool,
+    /// `CFlapPos 3`: combat, take-off and landing positions; otherwise only up and down.
+    pub flap_steps: bool,
+    pub airbrake: bool,
+    /// Retractable undercarriage (`CUndercarriage`); fixed gear otherwise.
+    pub retractable: bool,
+    pub diff_brakes: bool,
+    pub tailwheel_lock: bool,
+    /// Speeds (m/s) above which aileron, rudder and elevator travel is limited.
+    pub thresholds: [f64; 3],
+}
+
+impl Default for Controls {
+    fn default() -> Self {
+        Controls {
+            trim: [false, true, false],
+            default_trim: [0.0; 3],
+            flaps: true,
+            flap_steps: true,
+            airbrake: false,
+            retractable: true,
+            diff_brakes: true,
+            tailwheel_lock: false,
+            thresholds: [100.0, 100.0, 112.0],
+        }
+    }
+}
+
+impl Controls {
+    pub fn load(fmd: &SectFile) -> Self {
+        let get = |k: &str, d: f64| fmd.section_ci("Controls").and_then(|s| s.get_ci(k)).and_then(il2_formats::sectfile::atof).map_or(d, f64::from);
+        let flag = |k: &str, d: bool| get(k, if d { 1.0 } else { 0.0 }) == 1.0;
+        Controls {
+            trim: [flag("CAileronTrim", true), flag("CElevatorTrim", true), flag("CRudderTrim", true)],
+            default_trim: [get("DefaultAileronTrim", 0.0), get("DefaultElevatorTrim", 0.0), get("DefaultRudderTrim", 0.0)],
+            flaps: flag("CFlap", false),
+            flap_steps: get("CFlapPos", 3.0) >= 3.0,
+            airbrake: flag("CDiveBrake", false),
+            retractable: flag("CUndercarriage", false),
+            diff_brakes: flag("CDifferentialBrakes", false),
+            tailwheel_lock: flag("CLockTailwheel", false),
+            thresholds: [
+                0.27778 * get("CAileronThreshold", 360.0),
+                0.27778 * get("CRudderThreshold", 360.0),
+                0.27778 * get("CElevatorThreshold", 403.2),
+            ],
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Aircraft {
     pub length: f64,
@@ -66,6 +123,7 @@ pub struct Aircraft {
     pub mach: Option<crate::polar::MachTable>,
     pub engines: Vec<EngineParams>,
     pub gear: Vec<GearPoint>,
+    pub controls: Controls,
 }
 
 fn num(f: &SectFile, s: &'static str, k: &'static str) -> Result<f64, Error> {
@@ -117,6 +175,7 @@ impl Aircraft {
             mach: None,
             engines: Vec::new(),
             gear: Vec::new(),
+            controls: Controls::default(),
         }
     }
 
@@ -243,6 +302,7 @@ impl Aircraft {
             wing,
             engines,
             gear,
+            controls: Controls::load(fmd),
         })
     }
 

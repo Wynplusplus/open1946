@@ -220,7 +220,7 @@ impl Game {
             self.title_timer = 0.25;
             let agl = s.pos.z - field.height_at(s.pos.x, s.pos.y);
             r.window.as_ref().unwrap().set_title(&format!(
-                "OpenIL2 | IAS {:4.0} km/h | ALT {:5.0} m (AGL {:5.0}) | THR {:3.0}%{} | FLAPS {:3.0}% | GEAR {} | AoA {:5.1} | FUEL {:4.0} kg{}",
+                "OpenIL2 | IAS {:4.0} km/h | ALT {:5.0} m (AGL {:5.0}) | THR {:3.0}%{} | FLAPS {:3.0}% | GEAR {} | AoA {:5.1} | FUEL {:4.0} kg | TRIM {:+.3}{}{}",
                 s.ias * 3.6,
                 s.pos.z,
                 agl,
@@ -230,6 +230,8 @@ impl Game {
                 if s.ct.gear > 0.98 { "DOWN" } else if s.ct.gear < 0.02 { "UP" } else { "MOVING" },
                 s.aoa,
                 s.fuel,
+                s.trim[1],
+                if s.airbrake > 0.5 { " | AIRBRAKE" } else { "" },
                 if s.on_ground { " | GROUND" } else { "" }
             ));
         }
@@ -268,8 +270,15 @@ impl ApplicationHandler for Game {
                             KeyCode::Escape => el.exit(),
                             KeyCode::F1 => self.orbit = None,
                             KeyCode::F2 => self.orbit = Some(self.orbit.unwrap_or((std::f64::consts::PI, 0.25, 25.0))),
-                            KeyCode::KeyF => self.inputs.flaps = (self.inputs.flaps + 1.0 / 3.0).min(1.0),
-                            KeyCode::KeyV => self.inputs.flaps = (self.inputs.flaps - 1.0 / 3.0).max(0.0),
+                            KeyCode::KeyF => self.inputs.flaps = self.sim.flap_step(self.inputs.flaps, true),
+                            KeyCode::KeyV => self.inputs.flaps = self.sim.flap_step(self.inputs.flaps, false),
+                            KeyCode::Comma => self.sim.trim(1, -1.0),
+                            KeyCode::Period => self.sim.trim(1, 1.0),
+                            KeyCode::BracketLeft => self.sim.trim(0, -1.0),
+                            KeyCode::BracketRight => self.sim.trim(0, 1.0),
+                            KeyCode::Semicolon => self.sim.trim(2, -1.0),
+                            KeyCode::Quote => self.sim.trim(2, 1.0),
+                            KeyCode::KeyN => self.inputs.airbrake = if self.inputs.airbrake > 0.5 { 0.0 } else { 1.0 },
                             KeyCode::KeyG => self.inputs.gear = if self.inputs.gear > 0.5 { 0.0 } else { 1.0 },
                             KeyCode::Digit0 => self.inputs.throttle = 1.0,
                             // Boost: throttle to 110 % where allowed, and the WEP switch.

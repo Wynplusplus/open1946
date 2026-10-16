@@ -114,7 +114,8 @@ terms (see Engine).
 - Local flow `Vn = W × P + Vflow`, then `Vn.x += 0.07·addVflow`.
 - Aileron incidence `δ = WING_V·sin(AOS) + SensRoll·ailerInfluence·(1 − 0.1f)·14·aileron`. It is `+δ` on the left half and `−δ` on the right.
 - Half α = `±δ − atan2(Vn.z ± 0.07·addVside·propSign, Vn.x)`.
-- Aileron drag adds `0.015·(±δ)` to Cx, multiplied by 0.18 when negative.
+- Aileron drag adds `0.015·(±δ)` to Cx, multiplied by 0.18 when negative. Gear, radiator and dive-brake drag
+  are added too (`controls.md`, "Drag terms").
 - Force coefficients per unit area: `Cw.x = −q(Vn)(Cx_M + aileron drag + gear and radiator terms)` and `Cw.z = q(Vn)·Cy·Kq`.
   The fuselage adds `Cw.y = −q·Cy_fus(AOS)` and subtracts `q·Cx_fus(AOS)` from `Cw.x`.
 
@@ -132,7 +133,7 @@ terms (see Engine).
 **Ground effect.** Below `0.4·Length` above ground, wing lift and drag are multiplied by `1 + 0.2·(1 − h/(0.4L))`.
 
 **Horizontal tail.**
-- Local flow `Vn = W × (−Stabilizer arm, 0, 0) + Vflow`, plus slipstream for propeller aircraft: `Vn.x += s·r·addVflow`,
+- Local flow `Vn = W × (−Keel arm, 0, 0) + Vflow` (the runtime uses the fin arm for the horizontal tail's flow, too), plus slipstream for propeller aircraft: `Vn.x += s·r·addVflow`,
   with `r = 1/(1 + 0.04·Rudder arm)²` and `s = max(0, 1 − 1.5·|Vn.yz|/max(0.2, Vn.x + r·addVflow))`.
 - Elevator input `e` gives a deflection of `28e` when positive and `20e` when negative.
 - Tail α = `−atan2(Vn.z ∓ 0.36·side, Vn.x) − 2 − 0.002·V − SensPitch·deflection`, where `side` is the slipstream side term
