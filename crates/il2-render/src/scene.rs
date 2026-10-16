@@ -27,6 +27,7 @@ struct MatInfo {
     alpha_cutoff: f32,
     blend: BlendMode,
     depth_offset: bool,
+    unlit: bool,
 }
 
 /// Decodes IMF (by magic) or a standard image format (by extension, TGA by default).
@@ -130,6 +131,7 @@ impl<'a> Loader<'a> {
                         BlendMode::Opaque
                     },
                     depth_offset: l.depth_offset,
+                    unlit: mat.ambient == 0.0 && mat.diffuse == 0.0,
                 })
             })
         };
@@ -165,6 +167,7 @@ impl<'a> Loader<'a> {
                     alpha_cutoff: 0.0,
                     blend: BlendMode::Opaque,
                     depth_offset: false,
+                    unlit: false,
                 });
                 let first = out.indices.len() as u32;
                 for f in &lod.faces[g.start_face as usize..(g.start_face + g.face_count) as usize] {
@@ -177,6 +180,7 @@ impl<'a> Loader<'a> {
                     alpha_cutoff: info.alpha_cutoff,
                     blend: info.blend,
                     depth_offset: info.depth_offset,
+                    unlit: info.unlit,
                     lod: Some((group, level as u8)),
                 });
             }
@@ -279,6 +283,33 @@ impl<'a> Loader<'a> {
         Ok(first..out.batches.len())
     }
 
+    /// Appends a unit billboard quad (spanning y and z in −1..1, facing +x) in material `mat_path`;
+    /// returns its batch index, or `None` when the material can't be read.
+    pub fn append_quad(&mut self, out: &mut MeshData, mat_path: &str) -> Option<usize> {
+        let info = self.material(mat_path)?;
+        let base = out.vertices.len() as u32;
+        let node = out.node_init.len().max(out.node_count) as u32;
+        out.node_init.resize(node as usize, Mat4::IDENTITY);
+        out.node_init.push(Mat4::IDENTITY);
+        out.node_count = out.node_init.len();
+        for (y, z, u, v) in [(-1.0, -1.0, 0.0, 1.0), (1.0, -1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.0), (-1.0, 1.0, 0.0, 0.0)] {
+            out.vertices.push(Vertex { pos: [0.0, y, z], normal: [1.0, 0.0, 0.0], uv: [u, v], node });
+        }
+        let first = out.indices.len() as u32;
+        out.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        out.batches.push(Batch {
+            first,
+            count: 6,
+            texture: info.texture,
+            alpha_cutoff: info.alpha_cutoff,
+            blend: if info.blend == BlendMode::Opaque { BlendMode::Alpha } else { info.blend },
+            depth_offset: false,
+            unlit: info.unlit,
+            lod: None,
+        });
+        Some(out.batches.len() - 1)
+    }
+
     pub fn take_images(&mut self) -> Vec<Image> {
         std::mem::take(&mut self.images)
     }
@@ -336,6 +367,7 @@ impl Loader<'_> {
                 alpha_cutoff: 0.0,
                 blend: BlendMode::Opaque,
                 depth_offset: false,
+                unlit: false,
                 lod: None,
             }],
             ..Default::default()

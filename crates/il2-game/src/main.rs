@@ -4,6 +4,7 @@ mod forest;
 mod joystick;
 mod mission_objects;
 mod objects;
+mod particles;
 mod roads;
 mod sky;
 mod view;
@@ -72,6 +73,11 @@ struct Args {
     /// Start pitched nose-down by this many degrees (without a mission).
     #[arg(long)]
     dive: Option<f64>,
+    /// Screenshot: camera position "x,y,z" (world metres), looking at `--target`.
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+    eye: Option<Vec<f64>>,
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+    target: Option<Vec<f64>>,
     /// Screenshot: hold the triggers (all guns) during the simulated seconds.
     #[arg(long)]
     fire: bool,
@@ -112,28 +118,40 @@ impl Combat {
         Combat { guns, stores, projectiles: Vec::new(), bullets: Vec::new(), rng: weapons::Rng::new(0x5EED), hits: Vec::new() }
     }
 
-    fn step(&mut self, sim: &mut Sim, triggers: &[bool; 4], field: &HeightField, objects: &mut objects::MapObjects) {
+    fn step(&mut self, sim: &mut Sim, triggers: &[bool; 4], field: &HeightField, view: &mut view::WorldView) {
+        let objects = &mut view.objects;
         let recoil = weapons::fire(&mut self.guns, triggers, sim.pos, sim.ori, sim.vel, TICK, &mut self.rng, 0, &mut self.bullets);
         if recoil != DVec3::ZERO {
             // Gun recoil acts on the aircraft.
             sim.vel += sim.ori * recoil / sim.mass();
         }
         weapons::release(&mut self.stores, triggers, sim.pos, sim.ori, sim.vel, TICK, &mut self.rng, &mut self.projectiles);
-        for (at, power, killed) in weapons::fly(&mut self.projectiles, TICK, field, objects, &mut self.rng) {
+        let booms = weapons::fly(&mut self.projectiles, TICK, field, objects, &mut self.rng);
+        for &(at, power, killed) in &booms {
             eprintln!("explosion of {power:.1} kg TNT at {:.0?}: {killed} objects destroyed", at);
         }
         self.hits.clear();
         weapons::advance(&mut self.bullets, TICK, field, objects, &mut self.rng, &mut self.hits);
+        let fx = &mut view.effects;
+        for &(at, power, _) in &booms {
+            particles::impact(fx, at, particles::Impact::Blast { power }, at.z < 0.5, false, &mut self.rng);
+        }
         for (b, h) in &self.hits {
+            let ty = b.ty();
+            let (at, object) = match h {
+                weapons::Hit::Ground(p) => (*p, false),
+                weapons::Hit::Object(_, p, _) => (*p, true),
+            };
+            let what = if ty.power > 0.0 && ty.power_radius > 0.0 { particles::Impact::Blast { power: ty.power } } else { particles::Impact::Shot { mass: ty.mass } };
+            particles::impact(fx, at, what, at.z < 0.5 && !object, object, &mut self.rng);
             match h {
                 weapons::Hit::Object(_, _, true) => eprintln!("{} destroyed a building", b.spec.name),
                 weapons::Hit::Object(_, _, false) if std::env::var_os("IL2_TRACE").is_some() => eprintln!("hit object"),
-                weapons::Hit::Ground(p) if std::env::var_os("IL2_TRACE").is_some() => {
-                    eprintln!("hit ground at {:.0?} nearest object {:?}", p, objects.nearest(*p))
-                }
+                weapons::Hit::Ground(p) if std::env::var_os("IL2_TRACE").is_some() => eprintln!("hit ground at {:.0?}", p),
                 _ => {}
             }
         }
+        fx.update(TICK);
     }
 }
 
@@ -252,7 +270,7 @@ impl Game {
         let triggers = [k(KeyCode::Space), k(KeyCode::Space) || k(KeyCode::Enter), k(KeyCode::KeyU), k(KeyCode::KeyK)];
         while self.acc >= TICK {
             self.sim.tick(&self.inputs, &ground);
-            self.combat.step(&mut self.sim, &triggers, field, &mut self.view.objects);
+            self.combat.step(&mut self.sim, &triggers, field, &mut self.view);
             self.acc -= TICK;
         }
         let (Some(r), Some(terrain), Some(plane)) = (self.renderer.as_mut(), &self.terrain, &self.plane) else { return };
@@ -640,7 +658,8 @@ fn main() {
             .flat_map(|g| g.spec.bullets.iter().filter_map(|b| b.trace_mesh.as_deref()))
             .chain(stores.iter().filter_map(|s| s.spec.mesh.as_deref())),
     );
-    let mut view = view::WorldView::new(map_objects, forest, roads, Some(tracers));
+    let effects = particles::Effects::load(&vfs, particles::known_effects().iter().map(String::as_str));
+    let mut view = view::WorldView::new(map_objects, forest, roads, Some(tracers), effects);
     let mut assets = assets;
     let plane_mesh = std::mem::take(&mut assets.mesh);
     let (h, pitch) = assets.parked;
@@ -686,7 +705,7 @@ fn main() {
         let triggers = [args.fire, args.fire, args.fire, args.fire];
         for _ in 0..(args.seconds / TICK) as usize {
             sim.tick(&inputs, &ground);
-            combat.step(&mut sim, &triggers, &field, &mut view.objects);
+            combat.step(&mut sim, &triggers, &field, &mut view);
         }
         let (w, h) = (1280, 720);
         let mut r = Renderer::headless(w, h);
@@ -702,6 +721,12 @@ fn main() {
             let view = DMat4::look_at_rh(DVec3::ZERO, sim.pos - eye, DVec3::Z);
             vp = Mat4::perspective_rh(45f32.to_radians(), w as f32 / h as f32, 0.2, 150_000.0) * view.as_mat4();
         }
+        if let (Some(e), Some(t)) = (&args.eye, &args.target) {
+            eye = DVec3::new(e[0], e[1], e[2]);
+            let target = DVec3::new(t[0], t[1], t[2]);
+            let view = DMat4::look_at_rh(DVec3::ZERO, target - eye, DVec3::Z);
+            vp = Mat4::perspective_rh(45f32.to_radians(), w as f32 / h as f32, 0.2, 150_000.0) * view.as_mat4();
+        }
         place(&r, &terrain, &plane, &sim, eye);
         let posed = world::pose(&assets, &sim.ct);
         if std::env::var_os("IL2_TRACE").is_some() {
@@ -714,7 +739,7 @@ fn main() {
             eprintln!("ct: {:?}", sim.ct);
         }
         r.set_nodes(&plane, &posed);
-        eprintln!("{} bullets in flight", combat.bullets.len());
+        eprintln!("{} bullets in flight, {} effect particles", combat.bullets.len(), view.effects.count());
         let px = view.draw(&mut r, &field, &terrain, vp, eye, &[&plane], &combat.bullets, &combat.projectiles, true).unwrap_or_default();
         image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).unwrap_or_else(|e| fail(e));
         return;

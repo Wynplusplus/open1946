@@ -194,6 +194,7 @@ impl Forest {
                 alpha_cutoff: 0.5,
                 blend: BlendMode::Opaque,
                 depth_offset: false,
+                unlit: false,
                 lod: None,
             });
         }

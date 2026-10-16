@@ -154,6 +154,7 @@ impl Roads {
                 alpha_cutoff: 0.0,
                 blend: BlendMode::Alpha,
                 depth_offset: true,
+                unlit: false,
                 lod: None,
             });
         }

@@ -472,24 +472,6 @@ impl MapObjects {
         best.map(|(t, i)| (i, a + d * t))
     }
 
-    /// Debug: distance to the nearest object, its profile and sphere radius.
-    pub fn nearest(&self, p: DVec3) -> Option<(f64, u16, f32)> {
-        let t = ((p.x / TILE).floor() as i32, (p.y / TILE).floor() as i32);
-        let mut best: Option<(f64, u16, f32)> = None;
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                let Some(r) = self.tiles.get(&(t.0 + dx, t.1 + dy)) else { continue };
-                for o in &self.objects[r.clone()] {
-                    let d = (o.pos - p).length();
-                    if best.is_none_or(|b| d < b.0) {
-                        best = Some((d, o.profile, self.classes[o.class as usize].sphere.1));
-                    }
-                }
-            }
-        }
-        best
-    }
-
     fn kill(&mut self, i: usize) {
         let o = &mut self.objects[i];
         o.alive = false;

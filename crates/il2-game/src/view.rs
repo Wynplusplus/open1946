@@ -18,11 +18,13 @@ pub struct WorldView {
     roads_gpu: Option<GpuMesh>,
     pub tracers: Option<Tracers>,
     tracers_gpu: Option<GpuMesh>,
+    pub effects: crate::particles::Effects,
+    effects_gpu: Option<GpuMesh>,
     instances: Vec<InstanceRaw>,
 }
 
 impl WorldView {
-    pub fn new(objects: MapObjects, forest: Option<Forest>, roads: Option<Roads>, tracers: Option<Tracers>) -> Self {
+    pub fn new(objects: MapObjects, forest: Option<Forest>, roads: Option<Roads>, tracers: Option<Tracers>, effects: crate::particles::Effects) -> Self {
         WorldView {
             objects,
             objects_gpu: None,
@@ -32,6 +34,8 @@ impl WorldView {
             roads_gpu: None,
             tracers,
             tracers_gpu: None,
+            effects,
+            effects_gpu: None,
             instances: Vec::new(),
         }
     }
@@ -43,6 +47,9 @@ impl WorldView {
         }
         if let Some(d) = self.tracers.as_mut().and_then(|t| t.data.take()) {
             self.tracers_gpu = Some(r.upload(&d));
+        }
+        if let Some(d) = self.effects.data.take() {
+            self.effects_gpu = Some(r.upload(&d));
         }
     }
 
@@ -84,6 +91,9 @@ impl WorldView {
                 Some((p.spec.mesh.as_deref()?, glam::DQuat::from_rotation_arc(DVec3::X, p.dir), p.pos))
             });
             draws.extend(t.gather_meshes(m, items, eye, &mut self.instances));
+        }
+        if let Some(m) = &self.effects_gpu {
+            draws.extend(self.effects.gather(m, eye, &mut self.instances));
         }
         r.set_instances(&self.instances);
         let mut meshes: Vec<&GpuMesh> = extra.to_vec();

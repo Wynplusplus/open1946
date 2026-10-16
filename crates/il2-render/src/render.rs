@@ -21,12 +21,18 @@ pub struct Vertex {
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct InstanceRaw {
     pub rows: [[f32; 4]; 3],
+    /// Colour multiplying the texture (white for ordinary objects).
+    pub color: [f32; 4],
 }
 
 impl InstanceRaw {
     pub fn from_mat4(m: Mat4) -> Self {
+        Self::colored(m, [1.0; 4])
+    }
+
+    pub fn colored(m: Mat4, color: [f32; 4]) -> Self {
         let r = m.transpose().to_cols_array_2d();
-        Self { rows: [r[0], r[1], r[2]] }
+        Self { rows: [r[0], r[1], r[2]], color }
     }
 }
 
@@ -134,6 +140,8 @@ pub struct Batch {
     pub blend: BlendMode,
     /// Pull the surface towards the camera so decals win over coplanar skin.
     pub depth_offset: bool,
+    /// Self-lit (material without ambient and diffuse light): not shaded by the sun.
+    pub unlit: bool,
     /// `(LOD group, level)`; the batch is drawn only when that level is selected for the group.
     pub lod: Option<(u32, u8)>,
 }
@@ -364,7 +372,7 @@ impl Renderer {
         let instance_vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<InstanceRaw>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &wgpu::vertex_attr_array![4 => Float32x4, 5 => Float32x4, 6 => Float32x4],
+            attributes: &wgpu::vertex_attr_array![4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4],
         };
         let plain_buffers = [Some(vertex_layout.clone())];
         let instanced_buffers = [Some(vertex_layout), Some(instance_vertex_layout)];
@@ -600,10 +608,10 @@ impl Renderer {
         tex.create_view(&Default::default())
     }
 
-    fn material_bind_group(&self, view: &wgpu::TextureView, alpha_cutoff: f32, blended: bool) -> wgpu::BindGroup {
+    fn material_bind_group(&self, view: &wgpu::TextureView, alpha_cutoff: f32, blended: bool, unlit: bool) -> wgpu::BindGroup {
         let params = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material"),
-            contents: bytemuck::cast_slice(&[alpha_cutoff, blended as u32 as f32, 0.0, 0.0]),
+            contents: bytemuck::cast_slice(&[alpha_cutoff, blended as u32 as f32, unlit as u32 as f32, 0.0]),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -655,17 +663,17 @@ impl Renderer {
             ],
         });
         let views: Vec<wgpu::TextureView> = mesh.textures.iter().map(|t| self.upload_texture(t)).collect();
-        let mut keys: Vec<(usize, u32, bool)> = Vec::new();
+        let mut keys: Vec<(usize, u32, bool, bool)> = Vec::new();
         let mut materials = Vec::new();
         let batches = mesh
             .batches
             .iter()
             .map(|b| {
                 let blended = b.blend != BlendMode::Opaque;
-                let key = (b.texture, b.alpha_cutoff.to_bits(), blended);
+                let key = (b.texture, b.alpha_cutoff.to_bits(), blended, b.unlit);
                 let idx = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
                     keys.push(key);
-                    materials.push(self.material_bind_group(&views[b.texture], b.alpha_cutoff, blended));
+                    materials.push(self.material_bind_group(&views[b.texture], b.alpha_cutoff, blended, b.unlit));
                     keys.len() - 1
                 });
                 (*b, idx)

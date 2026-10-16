@@ -17,7 +17,7 @@ struct Instance {
 @group(2) @binding(0) var tex: texture_2d<f32>;
 @group(2) @binding(1) var samp: sampler;
 struct MaterialParams {
-    // x: alpha-test cutoff (0 disables the test), y: 1 for blended surfaces
+    // x: alpha-test cutoff (0 disables the test), y: 1 for blended surfaces, z: 1 for self-lit
     params: vec4<f32>,
 };
 @group(2) @binding(2) var<uniform> material: MaterialParams;
@@ -33,6 +33,7 @@ struct VsOut {
     @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) view: vec3<f32>,
+    @location(3) color: vec4<f32>,
 };
 
 @vertex
@@ -44,6 +45,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.normal = normalize((m * vec4<f32>(v.normal, 0.0)).xyz);
     o.uv = v.uv;
     o.view = world.xyz;
+    o.color = vec4<f32>(1.0);
     return o;
 }
 
@@ -51,6 +53,7 @@ struct InstIn {
     @location(4) r0: vec4<f32>,
     @location(5) r1: vec4<f32>,
     @location(6) r2: vec4<f32>,
+    @location(7) color: vec4<f32>,
 };
 
 // Instanced draws: a per-instance affine transform between the model and node transforms.
@@ -69,16 +72,20 @@ fn vs_inst(v: VsIn, i: InstIn) -> VsOut {
     o.normal = normalize((m * vec4<f32>(v.normal, 0.0)).xyz);
     o.uv = v.uv;
     o.view = world.xyz;
+    o.color = i.color;
     return o;
 }
 
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
-    let c = textureSample(tex, samp, i.uv);
-    if (material.params.x > 0.0 && c.a < material.params.x) { discard; }
+    let t = textureSample(tex, samp, i.uv);
+    // The alpha test applies to the texture; the instance colour (particle fade) multiplies after.
+    if (material.params.x > 0.0 && t.a < material.params.x) { discard; }
+    let c = t * i.color;
     let lambert = max(dot(normalize(i.normal), -globals.light_dir.xyz), 0.0);
     // Opaque surfaces must write alpha 1: skin alpha is a gloss map, not transparency.
     let a = select(1.0, c.a, material.params.y > 0.0);
     let f = 1.0 - exp(-globals.fog.w * length(i.view));
-    return vec4<f32>(mix(c.rgb * (0.35 + 0.65 * lambert) * globals.light_dir.w, globals.fog.rgb, f), a);
+    let shade = select((0.35 + 0.65 * lambert) * globals.light_dir.w, 1.0, material.params.z > 0.0);
+    return vec4<f32>(mix(c.rgb * shade, globals.fog.rgb, f), a);
 }

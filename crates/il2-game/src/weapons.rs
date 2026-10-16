@@ -277,6 +277,7 @@ pub fn advance(
         b.pos += b.vel * dt;
         b.life -= dt;
         if let Some((obj, at)) = objects.hit(b.prev, b.pos) {
+            let at = DVec3::new(at.x, at.y, at.z.max(field.height_at(at.x, at.y)));
             let ty = b.ty().clone();
             let speed = b.vel.length();
             let mut killed = objects.shot(obj, 0.5 * ty.mass * speed * speed, ty.shot_type(), speed, rng);
@@ -535,7 +536,8 @@ pub fn fly(projectiles: &mut Vec<Projectile>, dt: f64, field: &HeightField, obje
         let ground = field.height_at(p.pos.x, p.pos.y);
         let hit_obj = objects.hit(p.prev, p.pos).map(|(_, at)| at);
         let at = if let Some(at) = hit_obj {
-            Some(at)
+            // Object spheres may reach below the surface.
+            Some(DVec3::new(at.x, at.y, at.z.max(ground)))
         } else if p.pos.z <= ground {
             Some(DVec3::new(p.pos.x, p.pos.y, ground))
         } else if p.t > sp.time_life {
