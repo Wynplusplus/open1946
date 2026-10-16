@@ -16,6 +16,15 @@ pub struct Vertex {
     pub node: u32,
 }
 
+/// A vertex of the screen-space overlay: pixel position, atlas UV, RGBA colour.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+pub struct OverlayVertex {
+    pub pos: [f32; 2],
+    pub uv: [f32; 2],
+    pub color: [f32; 4],
+}
+
 /// Per-instance transform of an instanced draw: the top three rows of an affine matrix.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -210,6 +219,13 @@ pub struct Renderer {
     pipelines: Vec<wgpu::RenderPipeline>,
     instances: wgpu::Buffer,
     pub env: Environment,
+    overlay_pipeline: wgpu::RenderPipeline,
+    overlay_screen: wgpu::Buffer,
+    overlay_screen_bg: wgpu::BindGroup,
+    overlay_tex_layout: wgpu::BindGroupLayout,
+    overlay_atlas: Option<wgpu::BindGroup>,
+    overlay_vbuf: wgpu::Buffer,
+    overlay_count: u32,
     terrain_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     terrain_layout: wgpu::BindGroupLayout,
@@ -541,6 +557,83 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        // Screen-space overlay.
+        let overlay_screen_layout = uniform_layout(&device, "overlay screen");
+        let overlay_tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("overlay texture"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let overlay_shader = device.create_shader_module(wgpu::include_wgsl!("overlay.wgsl"));
+        let overlay_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("overlay"),
+            bind_group_layouts: &[Some(&overlay_screen_layout), Some(&overlay_tex_layout)],
+            ..Default::default()
+        });
+        let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("overlay"),
+            layout: Some(&overlay_pl),
+            vertex: wgpu::VertexState {
+                module: &overlay_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<OverlayVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                })],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &overlay_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState { format: config.format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let overlay_screen = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("overlay screen"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let overlay_screen_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("overlay screen"),
+            layout: &overlay_screen_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: overlay_screen.as_entire_binding() }],
+        });
+        let overlay_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("overlay vertices"),
+            size: 6 * 4096 * std::mem::size_of::<OverlayVertex>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
@@ -560,6 +653,13 @@ impl Renderer {
             pipelines,
             instances,
             env: Environment::default(),
+            overlay_pipeline,
+            overlay_screen,
+            overlay_screen_bg,
+            overlay_tex_layout,
+            overlay_atlas: None,
+            overlay_vbuf,
+            overlay_count: 0,
             terrain_pipeline,
             sky_pipeline,
             terrain_layout,
@@ -581,6 +681,10 @@ impl Renderer {
             s.configure(&self.device, &self.config);
         }
         self.depth = create_depth(&self.device, w, h);
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
     }
 
     pub fn aspect(&self) -> f32 {
@@ -771,6 +875,34 @@ impl Renderer {
         self.queue.write_buffer(&mesh.instance, 0, bytemuck::cast_slice(&m.to_cols_array_2d()));
     }
 
+    /// Sets the overlay's texture atlas (alpha coverage; keep a white texel for solid shapes).
+    pub fn set_overlay_atlas(&mut self, img: &Image) {
+        let view = self.upload_texture(img);
+        self.overlay_atlas = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("overlay atlas"),
+            layout: &self.overlay_tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        }));
+    }
+
+    /// Replaces the overlay triangles drawn on top of the next frames.
+    pub fn set_overlay(&mut self, verts: &[OverlayVertex]) {
+        let bytes: &[u8] = bytemuck::cast_slice(verts);
+        if bytes.len() as u64 > self.overlay_vbuf.size() {
+            self.overlay_vbuf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("overlay vertices"),
+                size: (bytes.len() as u64).next_power_of_two(),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        self.queue.write_buffer(&self.overlay_vbuf, 0, bytes);
+        self.overlay_count = verts.len() as u32;
+    }
+
     /// Replaces the instance transforms that `InstancedDraw::instances` index into.
     pub fn set_instances(&mut self, data: &[InstanceRaw]) {
         let bytes: &[u8] = bytemuck::cast_slice(data);
@@ -876,6 +1008,14 @@ impl Renderer {
                         pass.draw_indexed(b.first..b.first + b.count, 0, d.instances.clone());
                     }
                 }
+            }
+            if let (Some(atlas), true) = (&self.overlay_atlas, self.overlay_count > 0) {
+                self.queue.write_buffer(&self.overlay_screen, 0, bytemuck::cast_slice(&[self.config.width as f32, self.config.height as f32, 0.0, 0.0]));
+                pass.set_pipeline(&self.overlay_pipeline);
+                pass.set_bind_group(0, &self.overlay_screen_bg, &[]);
+                pass.set_bind_group(1, atlas, &[]);
+                pass.set_vertex_buffer(0, self.overlay_vbuf.slice(..));
+                pass.draw(0..self.overlay_count, 0..1);
             }
         }
         enc

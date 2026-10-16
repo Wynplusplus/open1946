@@ -2,6 +2,7 @@ mod audio;
 mod damage;
 mod effects;
 mod forest;
+mod hud;
 mod joystick;
 mod mission_objects;
 mod objects;
@@ -173,6 +174,7 @@ struct Game {
     combat: Combat,
     vfs: Arc<il2_vfs::Vfs>,
     audio: audio::Audio,
+    hud: hud::Hud,
     keys: HashSet<KeyCode>,
     #[cfg(feature = "gamepad")]
     gilrs: Option<Gilrs>,
@@ -180,11 +182,47 @@ struct Game {
     inputs: Inputs,
     last: Instant,
     acc: f64,
-    title_timer: f64,
     /// Free orbit camera around the aircraft: (yaw, pitch, distance), relative to the heading.
     orbit: Option<(f64, f64, f64)>,
     dragging: bool,
     cursor: Option<(f64, f64)>,
+}
+
+/// The speed bar: flight and engine readouts.
+fn hud_lines(s: &Sim, field: &HeightField) -> Vec<String> {
+    let fwd = s.ori * DVec3::X;
+    let heading = (90.0 - fwd.y.atan2(fwd.x).to_degrees()).rem_euclid(360.0);
+    let agl = s.pos.z - field.height_at(s.pos.x, s.pos.y);
+    let mut l = vec![format!(
+        "Speed {:.0} km/h   Alt {:.0} m ({:.0} AGL)   Hdg {:03.0}°   Thr {:.0}%{}",
+        s.ias * 3.6,
+        s.pos.z,
+        agl,
+        heading,
+        s.ct.throttle * 100.0,
+        if s.ct.wep { " WEP" } else { "" }
+    )];
+    if let Some(e) = s.engines.first() {
+        l.push(format!(
+            "Engine {}  {:.0} rpm   Oil {:.0}°   Water {:.0}°   Rad {}   Prop {}   Fuel {:.0} kg",
+            match e.stage { 0 => "off", 1..=5 => "starting", 6 => "on", 7 => "dead", _ => "seized" },
+            e.rpm(),
+            e.t_oil_out,
+            e.t_water,
+            e.radiator_manual.map_or("auto".to_owned(), |r| format!("{:.0}%", r * 100.0)),
+            e.prop_manual.map_or("auto".to_owned(), |p| format!("{:.0}%", p * 100.0)),
+            s.fuel
+        ));
+    }
+    l.push(format!(
+        "Flaps {:.0}%   Gear {}   Trim {:+.2}{}{}",
+        s.ct.flaps * 100.0,
+        if s.ct.gear > 0.98 { "down" } else if s.ct.gear < 0.02 { "up" } else { "moving" },
+        s.trim[1] * 100.0,
+        if s.airbrake > 0.5 { "   Air brake" } else { "" },
+        if s.on_ground { "   On ground" } else { "" }
+    ));
+    l
 }
 
 /// Orbit camera "yaw, pitch, distance" (radians relative to the aircraft heading, metres).
@@ -317,39 +355,14 @@ impl Game {
                 self.audio.play(&self.vfs, &pr, 1.0 / (1.0 + d / 300.0));
             }
         }
+        let (w, h) = (r.size().0 as f32, r.size().1 as f32);
+        r.set_overlay(self.hud.build(w, h, &hud_lines(s, field), self.orbit.is_none(), dt));
         self.view.draw(r, field, terrain, vp, eye, &[plane], &self.combat.bullets, &self.combat.projectiles, false);
 
         for (i, e) in self.sim.engines.iter_mut().enumerate() {
             for ev in e.events.drain(..) {
-                eprintln!("engine {}: {ev}", i + 1);
+                self.hud.message(format!("Engine {}: {ev}", i + 1));
             }
-        }
-        let s = &self.sim;
-        self.title_timer -= dt;
-        if self.title_timer <= 0.0 {
-            self.title_timer = 0.25;
-            let agl = s.pos.z - field.height_at(s.pos.x, s.pos.y);
-            r.window.as_ref().unwrap().set_title(&format!(
-                "OpenIL2 | IAS {:4.0} km/h | ALT {:5.0} m (AGL {:5.0}) | THR {:3.0}%{} | FLAPS {:3.0}% | GEAR {} | AoA {:5.1} | FUEL {:4.0} kg | TRIM {:+.3} | {}{}{}",
-                s.ias * 3.6,
-                s.pos.z,
-                agl,
-                s.ct.throttle * 100.0,
-                if s.ct.wep { " WEP" } else { "" },
-                s.ct.flaps * 100.0,
-                if s.ct.gear > 0.98 { "DOWN" } else if s.ct.gear < 0.02 { "UP" } else { "MOVING" },
-                s.aoa,
-                s.fuel,
-                s.trim[1],
-                s.engines.first().map_or(String::new(), |e| format!(
-                    "ENG {} {:4.0} rpm PROP {} OIL {:3.0} WATER {:3.0} RAD {}",
-                    match e.stage { 0 => "OFF", 1..=5 => "START", 6 => "ON", 7 => "DEAD", _ => "SEIZED" },
-                    e.rpm(), e.prop_manual.map_or("AUTO".to_owned(), |l| format!("{:.0}%", l * 100.0)), e.t_oil_out, e.t_water,
-                    e.radiator_manual.map_or("AUTO".to_owned(), |r| format!("{:.0}%", r * 100.0))
-                )),
-                if s.airbrake > 0.5 { " | AIRBRAKE" } else { "" },
-                if s.on_ground { " | GROUND" } else { "" }
-            ));
         }
         r.window.as_ref().unwrap().request_redraw();
     }
@@ -366,6 +379,9 @@ impl ApplicationHandler for Game {
         self.terrain = self.terrain_data.take().map(|d| r.upload_terrain(&d));
         self.plane = self.plane_data.take().map(|d| r.upload(&d));
         self.view.upload(&r);
+        if let Some(a) = &self.hud.atlas {
+            r.set_overlay_atlas(a);
+        }
         self.renderer = Some(r);
         self.last = Instant::now();
     }
@@ -774,6 +790,11 @@ fn main() {
         }
         r.set_nodes(&plane, &posed);
         eprintln!("{} bullets in flight, {} effect particles", combat.bullets.len(), view.effects.count());
+        let mut hud = hud::Hud::new(&args.root.join("lib/fonts/LucidaSansRegular.ttf"));
+        if let Some(a) = &hud.atlas {
+            r.set_overlay_atlas(a);
+        }
+        r.set_overlay(hud.build(w as f32, h as f32, &hud_lines(&sim, &field), args.orbit.is_none() && args.eye.is_none(), 0.0));
         let px = view.draw(&mut r, &field, &terrain, vp, eye, &[&plane], &combat.bullets, &combat.projectiles, true).unwrap_or_default();
         image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).unwrap_or_else(|e| fail(e));
         return;
@@ -792,6 +813,7 @@ fn main() {
         env,
         combat: Combat::new(guns.clone(), stores.clone()),
         audio: audio::Audio::start(),
+        hud: hud::Hud::new(&args.root.join("lib/fonts/LucidaSansRegular.ttf")),
         vfs: Arc::new(vfs),
         keys: HashSet::new(),
         #[cfg(feature = "gamepad")]
@@ -805,7 +827,6 @@ fn main() {
         },
         last: Instant::now(),
         acc: 0.0,
-        title_timer: 0.0,
         orbit: None,
         dragging: false,
         cursor: None,

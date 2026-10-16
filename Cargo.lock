@@ -854,6 +854,7 @@ dependencies = [
 name = "il2-game"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "clap",
  "gilrs",
  "glam",

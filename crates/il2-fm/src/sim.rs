@@ -158,7 +158,20 @@ impl Sim {
         let fuel = ac.fuel_max;
         let nitro = ac.nitro_max;
         let ac_trim = ac.controls.default_trim;
-        let engines = ac.engines.iter().map(|p| EngineState::new(p, p.w_nom)).collect();
+        // In flight, blades start at their working pitch for the airspeed (no windmilling overspeed).
+        let engines = ac
+            .engines
+            .iter()
+            .map(|p| {
+                let mut e = EngineState::new(p, p.w_nom);
+                if speed > 1.0 && p.piston {
+                    let phi_w = (speed / (p.w_nom * p.reductor * p.prop_r).max(1.0)).atan();
+                    e.phi = (phi_w + p.prop_aoa0).clamp(p.phi_min, p.phi_max);
+                    e.phi_target = e.phi;
+                }
+                e
+            })
+            .collect();
         Sim {
             engines,
             vel: ori * DVec3::new(speed, 0.0, 0.0),
