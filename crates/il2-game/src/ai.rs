@@ -34,6 +34,10 @@ pub enum Phase {
     Takeoff { heading: f64 },
     /// Following waypoints.
     Cruise,
+    /// Approach and landing on a runway: touchdown point and landing direction (radians).
+    Landing { at: DVec3, heading: f64 },
+    /// Stopped on the ground at the end of the flight.
+    Parked,
 }
 
 pub struct AiPilot {
@@ -53,6 +57,10 @@ pub struct AiPilot {
     prev_vx: f64,
     /// Integral part of the formation throttle.
     thr_i: f64,
+    /// Touchdown point and direction of the runway at the landing waypoint.
+    pub landing_runway: Option<(DVec3, f64)>,
+    on_final: bool,
+    ev_i: f64,
 }
 
 impl AiPilot {
@@ -75,6 +83,9 @@ impl AiPilot {
             prev_w: DVec3::ZERO,
             prev_vx: 0.0,
             thr_i: 0.6,
+            landing_runway: None,
+            on_final: false,
+            ev_i: 0.0,
         }
     }
 
@@ -172,7 +183,30 @@ impl AiPilot {
                 return self.ct;
             }
             Phase::Takeoff { heading } => return self.takeoff(s, ground, heading),
+            Phase::Landing { at, heading } => {
+                return self.land(s, ground, terrain, at, heading, dt)
+            }
+            Phase::Parked => {
+                self.ct = Inputs {
+                    throttle: 0.0,
+                    gear: 1.0,
+                    brakes: 1.0,
+                    flaps: self.ct.flaps,
+                    ..Default::default()
+                };
+                return self.ct;
+            }
             Phase::Cruise => {}
+        }
+        // The landing waypoint: the caller turns it into a runway (`start_landing`).
+        if self
+            .way
+            .get(self.cur)
+            .is_some_and(|w| w.kind.starts_with("LANDING"))
+            && self.landing_runway.is_some()
+        {
+            let (at, heading) = self.landing_runway.unwrap();
+            self.phase = Phase::Landing { at, heading };
         }
         if self.reached(s.pos) && self.cur + 1 < self.way.len() {
             self.cur += 1;
@@ -187,6 +221,99 @@ impl AiPilot {
         }
         self.stab_alt = wp.z;
         self.steer(s, wp, ground, terrain, dt)
+    }
+
+    /// Approach and landing (OpenIL2's own): fly to a gate 5 km out at 400 m above the runway,
+    /// then down a 4° glide path with gear and flaps down at the faster of 1.5·VminFLAPS and the speed for a lift coefficient of 0.8; flare, cut the throttle
+    /// and brake to a stop.
+    fn land(
+        &mut self,
+        s: &Sim,
+        ground: f64,
+        terrain: &dyn Fn(f64, f64) -> f64,
+        at: DVec3,
+        heading: f64,
+        dt: f64,
+    ) -> Inputs {
+        let dir = DVec3::new(heading.cos(), heading.sin(), 0.0);
+        let to = at - s.pos;
+        let along = -to.truncate().dot(dir.truncate()); // < 0 before the threshold
+        let dist = -along;
+        let side = to.truncate().perp_dot(dir.truncate());
+        let agl = s.pos.z - ground;
+        // Fast enough to fly the approach at modest angles of attack: lift coefficient 0.8.
+        let vlift = (2.0 * s.mass() * 9.81 / (1.225 * s.ac.wing_area.max(1.0) * 0.8)).sqrt();
+        let vref = (1.5 * s.ac.vmin_flaps).max(vlift);
+        if s.on_ground {
+            let v = s.vel.length();
+            self.ct.throttle = 0.0;
+            self.ct.brakes = if v < 0.75 * vref { 1.0 } else { 0.3 };
+            self.ct.elevator = 0.3;
+            self.ct.aileron = 0.0;
+            let f = (s.ori * DVec3::X).truncate().normalize_or_zero();
+            self.ct.rudder = (2.0 * dir.truncate().perp_dot(f) + 0.8 * s.w.z).clamp(-1.0, 1.0);
+            if v < 2.0 {
+                self.phase = Phase::Parked;
+            }
+            return self.ct;
+        }
+        if dist > 6000.0 || dist < -200.0 {
+            self.on_final = false;
+        }
+        let f = (s.ori * DVec3::X).truncate().normalize_or_zero();
+        let hdg = f.y.atan2(f.x);
+        let wrap_rad = |a: f64| {
+            (a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+        };
+        // Not lined up yet: go to the gate 5 km out; take the final once roughly lined up.
+        if !self.on_final {
+            let gate = at - dir * 5000.0 + DVec3::new(0.0, 0.0, 400.0);
+            let near_gate = (gate - s.pos).truncate().length() < 1500.0;
+            let lined_up = (2000.0..6000.0).contains(&dist)
+                && side.abs() < 0.25 * dist
+                && wrap_rad(heading - hdg).abs() < 60f64.to_radians();
+            if !near_gate && !lined_up {
+                self.stab_alt = gate.z;
+                self.stab_speed = 1.6 * vref;
+                return self.steer(s, gate, ground, terrain, dt);
+            }
+        }
+        // Final: glide path, gear and flaps.
+        self.on_final = true;
+        self.ct.gear = 1.0;
+        self.ct.flaps = 1.0;
+        self.stab_speed = vref;
+        let glide = at.z + (dist.max(0.0) * 4f64.to_radians().tan());
+        self.stab_alt = glide;
+        // Localizer: intercept the centre line at up to 30°, banking at most 20°.
+        let mut ct = self.ct;
+        let wv = s.wtrue + s.w;
+        let bank = s.bank_deg();
+        let cmd = heading + (-side * 0.004).clamp(-0.52, 0.52);
+        let herr = wrap_rad(cmd - hdg).to_degrees();
+        let bank_cmd = (-2.0 * herr).clamp(-20.0, 20.0);
+        ct.aileron = (0.03 * (bank_cmd - bank) - 0.3 * wv.x).clamp(-1.0, 1.0);
+        let aos = {
+            let v = s.ori.inverse() * s.vel;
+            v.y.atan2(v.x).to_degrees()
+        };
+        ct.rudder = (ct.rudder - aos * 0.04 * dt).clamp(-1.0, 1.0);
+        let _ = terrain;
+        // Vertical speed for the glide path, corrected towards it.
+        let v = s.vel.length();
+        let vz_t = (-v * 4f64.to_radians().tan() + 0.15 * (glide - s.pos.z)).clamp(-8.0, 3.0);
+        let e = vz_t - s.vel.z;
+        self.ev_i = (self.ev_i + 0.15 * e * dt).clamp(-0.5, 0.85);
+        ct.elevator = (self.ev_i + 0.02 * e + 0.5 * wv.y).clamp(-0.5, 0.85);
+        ct.throttle = (0.4 + 0.1 * (vref - v) + 0.08 * e).clamp(0.0, 1.0);
+        if agl < 8.0 {
+            // Flare.
+            ct.throttle = 0.0;
+            self.ev_i = (self.ev_i + 0.3 * dt).min(0.8);
+            ct.elevator = self.ev_i;
+        }
+        self.ct = ct;
+        ct
     }
 
     /// Station on a leader (OpenIL2's own formation keeping): aim at a point 300 m ahead of the
@@ -238,7 +365,11 @@ impl AiPilot {
                 terrain(p.x, p.y)
             })
             .fold(ground, f64::max);
-        let alt_floor = self.stab_alt.max(high + 150.0).max(ground + 5.0);
+        let alt_floor = if self.on_final {
+            self.stab_alt.max(ground)
+        } else {
+            self.stab_alt.max(high + 150.0).max(ground + 5.0)
+        };
         let speed = s.vel.length();
         let alt = s.pos.z;
         let tangage = pitch(s);

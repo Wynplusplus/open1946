@@ -1076,6 +1076,7 @@ fn main() {
     if args.ai_test {
         let assets = world::load_aircraft_with(&vfs, &fms, &args.aircraft, false)
             .unwrap_or_else(|e| fail(e));
+        print!("{}", ai_landing_test(&assets));
         print!("{}", ai_takeoff_test(&assets));
         print!("{}", ai_test(assets.fm));
         return;
@@ -1517,6 +1518,63 @@ fn main() {
     };
     let el = EventLoop::new().expect("event loop");
     el.run_app(&mut game).expect("run");
+}
+
+/// The AI lands from 8 km out at 600 m, abeam the runway, on flat ground.
+fn ai_landing_test(a: &world::AircraftAssets) -> String {
+    let flat = |_: f64, _: f64| 0.0;
+    let mut sim = Sim::new(
+        a.fm.clone(),
+        DVec3::new(-8000.0, 2000.0, 600.0),
+        glam::DQuat::IDENTITY,
+        80.0,
+    );
+    sim.ai = true;
+    sim.ct.gear = 0.0;
+    let mut pilot = ai::AiPilot::new(Vec::new(), 0, 0, 2);
+    pilot.phase = ai::Phase::Landing {
+        at: DVec3::ZERO,
+        heading: 0.0,
+    };
+    let mut out = String::new();
+    let mut t = 0.0;
+    while t < 400.0 && pilot.phase != ai::Phase::Parked {
+        let inputs = pilot.update(&sim, 0.0, &flat, TICK);
+        sim.tick(&inputs, &flat);
+        t += TICK;
+        let every = if std::env::var_os("IL2_TRACE").is_some() {
+            2.0
+        } else {
+            10.0
+        };
+        if (t / TICK) as usize % (every / TICK) as usize == 0 {
+            out += &format!(
+                "land vz {:+.1} e {:+.2} thr {:.2} aoa {:+.1} pitch {:+.1}  ",
+                sim.vel.z,
+                inputs.elevator,
+                inputs.throttle,
+                sim.aoa,
+                (sim.ori * DVec3::X).z.asin().to_degrees()
+            );
+            out += &format!(
+                "land t {t:4.0}  pos {:6.0} {:6.0} {:5.0}  {:4.0} km/h  gear {:.1} flaps {:.1}{}{}\n",
+                sim.pos.x, sim.pos.y, sim.pos.z, sim.vel.length() * 3.6, sim.ct.gear, sim.ct.flaps,
+                if sim.on_ground { " ground" } else { "" },
+                if sim.structure.destroyed { " DESTROYED" } else { "" }
+            );
+        }
+    }
+    out + &format!(
+        "land: {:?} after {t:.0} s at {:.0} {:.0}{}\n",
+        pilot.phase,
+        sim.pos.x,
+        sim.pos.y,
+        if sim.structure.destroyed {
+            " DESTROYED"
+        } else {
+            ""
+        }
+    )
 }
 
 /// The AI takes off from flat ground and climbs towards a waypoint 20 km ahead at 1500 m.

@@ -115,7 +115,19 @@ impl Traffic {
                     continue;
                 }
                 let a = &t.classes[class].assets;
-                let (sim, pilot) = spawn(a, wing, i, field, runways);
+                let (sim, mut pilot) = spawn(a, wing, i, field, runways);
+                if let Some(l) = wing
+                    .waypoints
+                    .iter()
+                    .find(|w| w.kind.starts_with("LANDING"))
+                {
+                    if let Some((x, y, heading)) = world::takeoff_spot(runways, l.x, l.y) {
+                        let (fx, fy) = (heading.cos(), heading.sin());
+                        let (tx, ty) = (x + fx * 300.0, y + fy * 300.0);
+                        pilot.landing_runway =
+                            Some((DVec3::new(tx, ty, field.height_at(tx, ty)), heading));
+                    }
+                }
                 let mut sim = sim;
                 sim.ai = true;
                 sim.structure.twin_fin = a.twin_fin;

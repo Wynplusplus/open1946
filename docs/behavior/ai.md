@@ -62,6 +62,24 @@ rudder holding the runway heading, tail up from 0.6·`v_r`, lift-off at `v_r = 1
 after the takeoff ones. Flights starting in the air begin at their first waypoint in echelon
 (40 m back, 30 m to the side per aircraft).
 
+## Landing
+OpenIL2's own landing pilot, until the runway logic of the runtime's `LANDING` maneuver and
+`Airport.makeLandWay` is ported. At the `LANDING` waypoint the pilot uses the takeoff spot of the
+nearest runway, touching down 300 m beyond it in the takeoff direction.
+
+- **Gate**: he flies to a point 5 km before touchdown, 400 m above it, at 1.6 `v_ref`. He takes
+  the final within 1.5 km of the gate, or when 2–6 km out, within a quarter of the distance of the
+  centre line and heading within 60° of the runway.
+- **Final**: gear and flaps down. `v_ref` is the faster of 1.5·VminFLAPS and the speed for a lift
+  coefficient of 0.8 at sea level. The localizer intercept heading is `runway − 0.004·offset`
+  (at most 30°), bank `−2·heading error` (at most 20°). The glide path is 4°; the vertical speed
+  wanted is `−v·tan 4° + 0.15·(path height − height)`, limited to −8…3 m/s. The elevator is
+  `i + 0.02·e + 0.5·pitch rate`, with `i` integrating `0.15·e`. The throttle is
+  `0.4 + 0.1·(v_ref − v) + 0.08·e`.
+- **Flare** below 8 m: throttle closed, elevator easing up. On the ground: brakes, rudder on the
+  runway heading; stopped is the end of the flight. Known gap: heavy types (B-25) can porpoise and
+  float past the runway.
+
 ## Sides
 A wing's name is its regiment followed by two digits. The regiment's army comes from
 `PaintSchemes/regiments.ini`: regiments listed under `[Red]` are army 1, under `[Blue]` army 2.
