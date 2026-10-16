@@ -5,6 +5,7 @@ mod cockpit;
 mod damage;
 mod effects;
 mod forest;
+mod ground;
 mod hitbox;
 mod hud;
 mod joystick;
@@ -177,6 +178,7 @@ fn build_targets(
     assets: &world::AircraftAssets,
     af: &airframe::Airframe,
     traffic: Option<&traffic::Traffic>,
+    ground: Option<&ground::Ground>,
 ) -> Vec<hitbox::Target> {
     let mut nodes = world::pose(assets, &sim.ct);
     af.apply(&mut nodes, sim);
@@ -190,7 +192,42 @@ fn build_targets(
     if let Some(t) = traffic {
         t.targets(&mut out);
     }
+    if let Some(g) = ground {
+        g.targets(&mut out);
+    }
     out
+}
+
+/// Gunfire and blasts on ground units; destroyed ones burst into flames.
+fn ground_hits(combat: &mut Combat, ground: &mut ground::Ground, view: &mut view::WorldView) {
+    let mut killed = Vec::new();
+    for (b, h) in &combat.hits {
+        let weapons::Hit::Aircraft(id, _, _) = h else {
+            continue;
+        };
+        if *id >= ground::ID_BASE {
+            let ty = b.ty();
+            let v = b.vel.length();
+            if let Some(at) = ground.shot(*id, 0.5 * ty.mass * v * v, &mut combat.rng) {
+                killed.push(at);
+            }
+        }
+    }
+    for &(at, power) in &combat.tick_booms {
+        killed.extend(ground.explode(at, power));
+    }
+    for at in killed {
+        eprintln!("ground unit destroyed at {:.0?}", at);
+        particles::impact(
+            &mut view.effects,
+            at,
+            particles::Impact::Blast { power: 5.0 },
+            false,
+            true,
+            &mut combat.rng,
+        );
+        combat.booms.push((at, 5.0));
+    }
 }
 
 /// Bullet hits on aircraft from the last step: kinetic energy as TNT (2.4·10⁻⁷ kg/J) plus half the
@@ -253,6 +290,8 @@ struct Combat {
     hits: Vec<(weapons::Bullet, weapons::Hit)>,
     /// Explosions of the last steps (point, kg TNT), for sound.
     booms: Vec<(DVec3, f64)>,
+    /// Explosions of the last step only (bombs, rockets, shells), for ground units.
+    tick_booms: Vec<(DVec3, f64)>,
 }
 
 impl Combat {
@@ -265,6 +304,7 @@ impl Combat {
             rng: weapons::Rng::new(0x5EED),
             hits: Vec::new(),
             booms: Vec::new(),
+            tick_booms: Vec::new(),
         }
     }
 
@@ -320,6 +360,20 @@ impl Combat {
             &mut self.hits,
         );
         let fx = &mut view.effects;
+        self.tick_booms.clear();
+        self.tick_booms
+            .extend(booms.iter().map(|&(at, power, _)| (at, power)));
+        for (b, h) in &self.hits {
+            let ty = b.ty();
+            if ty.power > 0.0 && ty.power_radius > 0.0 {
+                let at = match h {
+                    weapons::Hit::Ground(p)
+                    | weapons::Hit::Object(_, p, _)
+                    | weapons::Hit::Aircraft(_, _, p) => *p,
+                };
+                self.tick_booms.push((at, ty.power + 0.03 * ty.mass));
+            }
+        }
         for &(at, power, _) in &booms {
             self.booms.push((at, power));
             particles::impact(
@@ -364,6 +418,7 @@ struct Game {
     sim: Sim,
     airframe: airframe::Airframe,
     traffic: Option<traffic::Traffic>,
+    ground: Option<ground::Ground>,
     assets: world::AircraftAssets,
     field: HeightField,
     terrain_data: Option<il2_render::TerrainData>,
@@ -556,6 +611,7 @@ impl Game {
                 &self.assets,
                 &self.airframe,
                 self.traffic.as_ref(),
+                self.ground.as_ref(),
             );
             self.combat
                 .step(&mut self.sim, &triggers, field, &mut self.view, &targets);
@@ -573,6 +629,10 @@ impl Game {
                 &mut self.combat,
                 &mut self.view,
             );
+            if let Some(g) = self.ground.as_mut() {
+                ground_hits(&mut self.combat, g, &mut self.view);
+                g.step(field, TICK);
+            }
             if let Some(t) = self.traffic.as_mut() {
                 let pl = (
                     self.sim.pos,
@@ -695,6 +755,9 @@ impl Game {
             .as_mut()
             .map(|t| t.prepare(r, eye))
             .unwrap_or_default();
+        if let Some(g) = self.ground.as_mut() {
+            outside.extend(g.prepare(r, eye));
+        }
         let fg = match fg_vp {
             Some(m) => Some((m, cockpit.as_slice())),
             None => {
@@ -1127,6 +1190,12 @@ fn main() {
         .map(|c| c.flight_model)
         .unwrap_or_default();
     let field = world::load_heights(&vfs, &args.map).unwrap_or_else(|e| fail(e));
+    let mut columns = mission
+        .as_ref()
+        .filter(|m| !args.no_ai && !m.chiefs.is_empty())
+        .map(|m| {
+            ground::Ground::from_mission(&vfs, &fms, m, &field, &objects::season(&vfs, &args.map))
+        });
     let mut traffic = mission.as_ref().filter(|_| !args.no_ai).map(|m| {
         traffic::Traffic::from_mission(&vfs, &fms, m, &field, &world::load_runways(&vfs, &args.map))
     });
@@ -1326,10 +1395,14 @@ fn main() {
         let mut max_g = (0.0f64, 0.0f64);
         for _ in 0..(args.seconds / TICK) as usize {
             sim.tick(&inputs, &ground);
-            let targets = build_targets(&sim, &assets, &af, traffic.as_ref());
+            let targets = build_targets(&sim, &assets, &af, traffic.as_ref(), columns.as_ref());
             combat.step(&mut sim, &triggers, &field, &mut view, &targets);
             apply_aircraft_hits(&combat, &mut sim, &mut af, &assets, traffic.as_mut());
             airframe_step(&mut af, &mut sim, &field, &mut combat, &mut view);
+            if let Some(g) = columns.as_mut() {
+                ground_hits(&mut combat, g, &mut view);
+                g.step(&field, TICK);
+            }
             if let Some(t) = traffic.as_mut() {
                 let pl = (sim.pos, sim.vel, t.player_army, !sim.structure.destroyed);
                 t.step(&field, TICK, pl, &mut combat.rng, &mut combat.bullets);
@@ -1439,6 +1512,9 @@ fn main() {
             .as_mut()
             .map(|t| t.prepare(&r, eye))
             .unwrap_or_default();
+        if let Some(g) = columns.as_mut() {
+            outside.extend(g.prepare(&r, eye));
+        }
         let fg = match fg_vp {
             Some(m) => Some((m, cockpit.as_slice())),
             None => {
@@ -1470,6 +1546,7 @@ fn main() {
     let mut game = Game {
         airframe,
         traffic,
+        ground: columns,
         inputs: Inputs {
             throttle: throttle0,
             gear: gear0,

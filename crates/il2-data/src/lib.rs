@@ -293,6 +293,18 @@ impl<'a> Classes<'a> {
         )
     }
 
+    /// The string constants of a class (e.g. model paths named in its code).
+    pub fn class_strings(&self, class: &str) -> Vec<String> {
+        let full = if class.starts_with("com.") {
+            class.to_owned()
+        } else {
+            format!("com.maddox.il2.objects.{class}")
+        };
+        self.load(&full)
+            .map(|c| c.strings().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
     /// Short names of the interfaces the class and its superclasses implement (`TypeFighter`, …).
     pub fn interfaces(&self, class: &str) -> Vec<String> {
         let full = if class.starts_with("com.") {

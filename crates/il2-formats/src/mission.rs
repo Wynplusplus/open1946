@@ -27,6 +27,29 @@ pub struct Wing {
     pub skills: Vec<u8>,
 }
 
+/// A point of a ground or naval column's route (`[<name>_Road]`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoadPoint {
+    pub x: f64,
+    pub y: f64,
+    /// Road width (negative: a bridge segment index).
+    pub width: f64,
+    /// Time to wait here, minutes.
+    pub wait: f64,
+    /// The mission builder's speed for the leg from here, m/s, when given.
+    pub speed: Option<f64>,
+}
+
+/// A moving column (`[Chiefs]`): `name type army`, e.g. `0_Chief Armor.3-BT5 1`.
+#[derive(Clone, Debug)]
+pub struct Chief {
+    pub name: String,
+    /// `Category.Type` in `com/maddox/il2/objects/chief.ini`.
+    pub kind: String,
+    pub army: u8,
+    pub road: Vec<RoadPoint>,
+}
+
 /// A placed object from `[NStationary]` or `[Buildings]`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
@@ -85,6 +108,7 @@ pub struct Mission {
     /// The player's plane in the wing (`playerNum`).
     pub player_num: u32,
     pub wings: Vec<Wing>,
+    pub chiefs: Vec<Chief>,
 }
 
 impl Mission {
@@ -161,6 +185,7 @@ impl Mission {
             player_wing: get("player").map(str::to_owned),
             player_num: get("playerNum").and_then(atof).map_or(0, |v| v as u32),
             wings,
+            chiefs: chiefs(&f),
         }
     }
 
@@ -168,6 +193,57 @@ impl Mission {
         let p = self.player_wing.as_deref()?;
         self.wings.iter().find(|w| w.name == p)
     }
+}
+
+fn chiefs(f: &SectFile) -> Vec<Chief> {
+    let Some(sect) = f.section_ci("Chiefs") else {
+        return Vec::new();
+    };
+    sect.entries
+        .iter()
+        .filter_map(|(name, v)| {
+            let mut t = v.split_whitespace();
+            let kind = t.next()?.to_owned();
+            let army = t.next().and_then(|a| a.parse().ok()).unwrap_or(1);
+            let road = f
+                .section(&format!("{name}_Road"))
+                .map(|r| {
+                    r.entries
+                        .iter()
+                        .filter_map(|(k, v)| {
+                            let n: Vec<f64> = std::iter::once(k.as_str())
+                                .chain(v.split_whitespace())
+                                .map(|t| atof(t).map_or(f64::NAN, f64::from))
+                                .collect();
+                            (n.len() >= 3 && n[0].is_finite() && n[1].is_finite()).then(|| {
+                                RoadPoint {
+                                    x: n[0],
+                                    y: n[1],
+                                    width: n[2],
+                                    wait: n
+                                        .get(3)
+                                        .copied()
+                                        .filter(|w| w.is_finite())
+                                        .unwrap_or(0.0),
+                                    speed: if n.len() >= 6 {
+                                        n.last().copied().filter(|v| v.is_finite() && *v > 0.0)
+                                    } else {
+                                        None
+                                    },
+                                }
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(Chief {
+                name: name.clone(),
+                kind,
+                army,
+                road,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
