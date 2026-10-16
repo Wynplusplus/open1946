@@ -3,6 +3,7 @@ mod airframe;
 mod audio;
 mod cockpit;
 mod damage;
+mod devicelink;
 mod effects;
 mod flak;
 mod forest;
@@ -73,6 +74,9 @@ struct Args {
     /// Render a menu screen to a PNG: `main|single|quick,out.png`.
     #[arg(long, value_delimiter = ',')]
     menu_shot: Option<Vec<String>>,
+    /// Serve DeviceLink on this UDP port (else `[DeviceLink] port` in the install's `conf.ini`).
+    #[arg(long)]
+    devicelink: Option<u16>,
     /// Show the menus (also the default without any options).
     #[arg(long)]
     menu: bool,
@@ -497,6 +501,10 @@ struct Game {
     flak: Vec<flak::Battery>,
     player_army: u8,
     mission: Option<il2_formats::mission::Mission>,
+    devicelink: Option<devicelink::DeviceLink>,
+    dl_axes: [Option<f64>; 3],
+    dl_fire: [bool; 4],
+    plane_name: String,
     assets: world::AircraftAssets,
     field: HeightField,
     terrain_data: Option<il2_render::TerrainData>,
@@ -667,20 +675,84 @@ impl Game {
         }
     }
 
+    /// Answers DeviceLink queries and applies what they set (`devicelink.rs`).
+    fn device_link(&mut self) {
+        let Some(dl) = self.devicelink.as_mut() else {
+            return;
+        };
+        let firing = self.dl_fire;
+        let r = devicelink::Readings {
+            sim: &self.sim,
+            plane: &self.plane_name,
+            time_of_day: self.time_of_day,
+            cockpit: self.in_cockpit && self.orbit.is_none(),
+            cockpits: self.cockpit_state.is_some() as usize,
+            firing,
+            wep: self.inputs.wep,
+            tail_lock: self.inputs.tail_lock,
+        };
+        for c in dl.poll(&r) {
+            use devicelink::Command as C;
+            let i = &mut self.inputs;
+            match c {
+                // Power and flaps axes run −1..1 over the lever's travel.
+                C::Power(v) => i.throttle = (v + 1.0) * 0.5,
+                C::Flaps(v) => i.flaps = (v + 1.0) * 0.5,
+                C::Aileron(v) => self.dl_axes[0] = Some(v),
+                C::Elevator(v) => self.dl_axes[1] = Some(v),
+                C::Rudder(v) => self.dl_axes[2] = Some(v),
+                C::Brakes(v) => i.brakes = (v + 1.0) * 0.5,
+                C::PropPitch(v) => self.sim.set_prop(Some((v + 1.0) * 0.5)),
+                C::Trim(axis, v) => self.sim.trim_target[axis] = v * 0.5,
+                C::ToggleEngine => self
+                    .sim
+                    .toggle_engines(self.sim.on_ground && self.sim.vel.length() < 1.0),
+                C::ToggleWep => i.wep = !i.wep,
+                C::ToggleGear => i.gear = if i.gear > 0.5 { 0.0 } else { 1.0 },
+                C::ToggleAirbrake => i.airbrake = if i.airbrake > 0.5 { 0.0 } else { 1.0 },
+                C::ToggleTailLock => i.tail_lock = !i.tail_lock,
+                C::Fire(g, on) => self.dl_fire[g.min(3)] = on,
+            }
+        }
+        // Stick axes set over DeviceLink hold until the keyboard moves them.
+        let k = |c: KeyCode| self.keys.contains(&c);
+        if k(KeyCode::ArrowLeft) || k(KeyCode::ArrowRight) {
+            self.dl_axes[0] = None;
+        }
+        if k(KeyCode::ArrowUp) || k(KeyCode::ArrowDown) {
+            self.dl_axes[1] = None;
+        }
+        if k(KeyCode::KeyZ) || k(KeyCode::KeyX) {
+            self.dl_axes[2] = None;
+        }
+        let i = &mut self.inputs;
+        for (k, v) in self.dl_axes.iter().enumerate() {
+            if let Some(v) = *v {
+                match k {
+                    0 => i.aileron = v,
+                    1 => i.elevator = v,
+                    _ => i.rudder = v,
+                }
+            }
+        }
+    }
+
     fn frame(&mut self) {
         let now = Instant::now();
         let dt = (now - self.last).as_secs_f64().min(0.25);
         self.last = now;
         self.update_inputs(dt);
+        self.device_link();
         self.acc += dt;
         let field = &self.field;
         let ground = |x: f64, y: f64| field.height_at(x, y);
         let k = |c| self.keys.contains(&c);
+        let dlf = self.dl_fire;
         let triggers = [
-            k(KeyCode::Space),
-            k(KeyCode::Space) || k(KeyCode::Enter),
-            k(KeyCode::KeyU),
-            k(KeyCode::KeyK),
+            k(KeyCode::Space) || dlf[0],
+            k(KeyCode::Space) || k(KeyCode::Enter) || dlf[1],
+            k(KeyCode::KeyU) || dlf[2],
+            k(KeyCode::KeyK) || dlf[3],
         ];
         while self.acc >= TICK {
             self.sim.tick(&self.inputs, &ground);
@@ -1770,6 +1842,10 @@ fn main() {
         flak: batteries,
         player_army,
         mission: mission.clone(),
+        devicelink: devicelink::DeviceLink::open(&args.root, args.devicelink),
+        dl_axes: [None; 3],
+        dl_fire: [false; 4],
+        plane_name: args.aircraft.clone(),
         inputs: Inputs {
             throttle: throttle0,
             gear: gear0,
