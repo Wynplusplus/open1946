@@ -1,8 +1,9 @@
 //! The mission's other aircraft: AI flights spawned from `[Wing]` sections, flown by `ai::AiPilot`
 //! with the AI flight model, drawn with shared meshes.
 
-use crate::ai::{AiPilot, Phase};
+use crate::ai::{AiPilot, Contact, Phase};
 use crate::airframe::Airframe;
+use crate::weapons::{self, Bullet, Gun, Rng};
 use crate::world::{self, AircraftAssets};
 use glam::{DMat4, DVec3};
 use il2_fm::Sim;
@@ -27,11 +28,17 @@ pub struct AiPlane {
     pub airframe: Airframe,
     gpu: Option<GpuMesh>,
     trace_t: f64,
+    pub guns: Vec<Gun>,
+    /// Who it is fighting: contact id (0 player, 1 + n AI) and whether it attacks or evades.
+    engaged: Option<(usize, bool)>,
+    think: f64,
 }
 
 pub struct Traffic {
     classes: Vec<ClassAssets>,
     pub planes: Vec<AiPlane>,
+    /// The player's side.
+    pub player_army: u8,
 }
 
 /// Regiment name -> army (1 red, 2 blue) from `PaintSchemes/regiments.ini`.
@@ -67,9 +74,16 @@ impl Traffic {
         runways: &[il2_formats::statics::Placed],
     ) -> Traffic {
         let armies = armies(vfs);
+        let classes_db = il2_data::Classes::new(vfs, &fms.keys);
+        let mut armoury = weapons::Armoury::default();
+        let player_army = m
+            .player_wing
+            .as_deref()
+            .map_or(1, |w| wing_army(&armies, w));
         let mut t = Traffic {
             classes: Vec::new(),
             planes: Vec::new(),
+            player_army,
         };
         let mut by_class: HashMap<String, usize> = HashMap::new();
         for wing in &m.wings {
@@ -118,6 +132,9 @@ impl Traffic {
                     airframe,
                     gpu: None,
                     trace_t: 0.0,
+                    guns: Self::guns(&mut armoury, &classes_db, &wing.class, &wing.weapons, a),
+                    engaged: None,
+                    think: 0.0,
                 });
             }
         }
@@ -127,6 +144,90 @@ impl Traffic {
             t.classes.len()
         );
         t
+    }
+
+    /// One AI aircraft flying straight from `pos` towards `toward` (tests and gunnery practice).
+    pub fn single(
+        vfs: &Vfs,
+        fms: &il2_data::FlightModels,
+        class: &str,
+        pos: DVec3,
+        toward: DVec3,
+        speed: f64,
+    ) -> Option<Traffic> {
+        let mut assets = world::load_aircraft_with(vfs, fms, class, false)
+            .map_err(|e| eprintln!("target {class}: {e}"))
+            .ok()?;
+        let mesh = std::mem::take(&mut assets.mesh);
+        let mut sim = world::spawn_at(assets.fm.clone(), pos, toward, speed);
+        sim.ai = true;
+        sim.structure.twin_fin = assets.twin_fin;
+        let d = toward - pos;
+        let far = pos + d.normalize() * 200_000.0;
+        let wp = il2_formats::mission::Waypoint {
+            kind: "NORMFLY".into(),
+            x: far.x,
+            y: far.y,
+            z: pos.z,
+            speed: speed * 3.6,
+            target: None,
+        };
+        let mut pilot = AiPilot::new(vec![wp], 0, 0, 2);
+        let classes_db = il2_data::Classes::new(vfs, &fms.keys);
+        let guns = Self::guns(
+            &mut weapons::Armoury::default(),
+            &classes_db,
+            class,
+            "default",
+            &assets,
+        );
+        pilot.ct.gear = 0.0;
+        let airframe = Airframe::new(
+            assets.rig.names.clone(),
+            assets.rig.parents.clone(),
+            &assets.hidden,
+            assets.gear_chunks.clone(),
+        );
+        Some(Traffic {
+            classes: vec![ClassAssets {
+                assets,
+                mesh: Some(mesh),
+                gpu: None,
+            }],
+            player_army: 2,
+            planes: vec![AiPlane {
+                name: "target".into(),
+                army: 1,
+                class: 0,
+                sim,
+                pilot,
+                airframe,
+                gpu: None,
+                trace_t: 0.0,
+                guns,
+                engaged: None,
+                think: 0.0,
+            }],
+        })
+    }
+
+    fn guns(
+        armoury: &mut weapons::Armoury,
+        classes: &il2_data::Classes,
+        class: &str,
+        loadout: &str,
+        a: &AircraftAssets,
+    ) -> Vec<Gun> {
+        let w = classes.aircraft_weapons(class).unwrap_or_default();
+        weapons::mount(armoury, classes, &w, loadout, &a.hook_frames)
+    }
+
+    /// The tracer and bullet types the AI guns use, for `effects::Tracers`.
+    pub fn gun_specs(&self) -> Vec<std::sync::Arc<weapons::GunSpec>> {
+        self.planes
+            .iter()
+            .flat_map(|p| p.guns.iter().map(|g| g.spec.clone()))
+            .collect()
     }
 
     /// One line per aircraft: where it is and what it does (diagnostics).
@@ -154,13 +255,104 @@ impl Traffic {
         out
     }
 
-    /// One simulation tick for every AI aircraft.
-    pub fn step(&mut self, field: &HeightField, dt: f64) {
+    /// Hit targets for the AI aircraft (ids 1 + index).
+    pub fn targets(&self, out: &mut Vec<crate::hitbox::Target>) {
+        for (n, p) in self.planes.iter().enumerate() {
+            let c = &self.classes[p.class].assets;
+            let mut nodes = world::pose(c, &p.sim.ct);
+            p.airframe.apply(&mut nodes, &p.sim);
+            out.push(crate::hitbox::Target::new(
+                1 + n,
+                p.sim.pos,
+                p.sim.ori,
+                &nodes,
+                &c.boxes,
+            ));
+        }
+    }
+
+    /// Damage to AI aircraft `n` (its index) in chunk `node`.
+    pub fn shot(&mut self, n: usize, node: usize, tnt: f64) {
+        let Some(p) = self.planes.get_mut(n) else {
+            return;
+        };
+        let toughness = self.classes[p.class].assets.toughness;
+        p.airframe.shot(&mut p.sim, node, tnt, &toughness);
+    }
+
+    /// One simulation tick for every AI aircraft: choose whom to fight, fly, shoot.
+    /// `player` is the player's aircraft (position, velocity, army, still flying).
+    pub fn step(
+        &mut self,
+        field: &HeightField,
+        dt: f64,
+        player: (DVec3, DVec3, u8, bool),
+        rng: &mut Rng,
+        bullets: &mut Vec<Bullet>,
+    ) {
         let ground = |x: f64, y: f64| field.height_at(x, y);
-        for p in &mut self.planes {
+        // Everyone the pilots can see: id, position, velocity, army.
+        let mut contacts: Vec<(usize, DVec3, DVec3, u8)> = Vec::new();
+        if player.3 {
+            contacts.push((0, player.0, player.1, player.2));
+        }
+        for (n, p) in self.planes.iter().enumerate() {
+            if !p.sim.structure.destroyed && !matches!(p.pilot.phase, Phase::Lineup(_)) {
+                contacts.push((1 + n, p.sim.pos, p.sim.vel, p.army));
+            }
+        }
+        for (n, p) in self.planes.iter_mut().enumerate() {
             let g = field.height_at(p.sim.pos.x, p.sim.pos.y);
-            let inputs = p.pilot.update(&p.sim, g, &ground, dt);
+            let fighter = self.classes[p.class].assets.fighter;
+            let mut fire = false;
+            let alive = !p.sim.structure.destroyed;
+            p.think -= dt;
+            if alive && p.pilot.phase == Phase::Cruise && p.think <= 0.0 {
+                p.think = 0.5;
+                p.engaged = engage(p, n, fighter, &contacts);
+            }
+            let contact = p.engaged.and_then(|(id, attack)| {
+                contacts
+                    .iter()
+                    .find(|c| c.0 == id)
+                    .map(|c| (Contact { pos: c.1, vel: c.2 }, attack))
+            });
+            let inputs = match (&contact, alive) {
+                (Some((c, true)), true) => {
+                    let speed = p
+                        .guns
+                        .first()
+                        .and_then(|g| g.spec.bullets.first())
+                        .map_or(800.0, |b| b.speed);
+                    let (i, f) = p.pilot.attack(&p.sim, c, g, speed);
+                    fire = f;
+                    i
+                }
+                (Some((c, false)), true) => p.pilot.evade(&p.sim, c, g),
+                _ => {
+                    p.engaged = None;
+                    p.pilot.update(&p.sim, g, &ground, dt)
+                }
+            };
             p.sim.tick(&inputs, &ground);
+            if alive {
+                let t = [fire, fire, false, false];
+                let recoil = weapons::fire(
+                    &mut p.guns,
+                    &t,
+                    p.sim.pos,
+                    p.sim.ori,
+                    p.sim.vel,
+                    dt,
+                    rng,
+                    1 + n,
+                    bullets,
+                );
+                if recoil != DVec3::ZERO {
+                    let m = p.sim.mass();
+                    p.sim.vel += p.sim.ori * recoil / m;
+                }
+            }
             p.airframe.update(&mut p.sim, field, dt);
             if std::env::var("IL2_TRACE_AI").is_ok_and(|n| n == p.name) {
                 p.trace_t += dt;
@@ -168,8 +360,8 @@ impl Traffic {
                     p.trace_t = 0.0;
                     let s = &p.sim;
                     eprintln!(
-                        "{} {:?} wp {} pos {:.0} {:.0} {:.0} agl {:.0} {:.0} km/h pitch {:+.1} bank {:+.0} aoa {:+.1} ct a{:+.2} e{:+.2} r{:+.2} t{:.2} {}",
-                        p.name, p.pilot.phase, p.pilot.cur, s.pos.x, s.pos.y, s.pos.z, s.pos.z - g, s.vel.length() * 3.6,
+                        "{} {:?} {:?} wp {} pos {:.0} {:.0} {:.0} agl {:.0} {:.0} km/h pitch {:+.1} bank {:+.0} aoa {:+.1} ct a{:+.2} e{:+.2} r{:+.2} t{:.2} fire {fire} {}",
+                        p.name, p.pilot.phase, p.engaged, p.pilot.cur, s.pos.x, s.pos.y, s.pos.z, s.pos.z - g, s.vel.length() * 3.6,
                         (s.ori * DVec3::X).z.asin().to_degrees(), s.bank_deg(), s.aoa,
                         s.ct.aileron, s.ct.elevator, s.ct.rudder, s.ct.throttle,
                         p.airframe.messages.join(", ")
@@ -202,6 +394,47 @@ impl Traffic {
         }
         self.planes.iter().filter_map(|p| p.gpu.as_ref()).collect()
     }
+}
+
+/// Whom to fight (OpenIL2's own rules, `docs/behavior/ai.md`, "Air combat"): an enemy close
+/// behind is evaded; fighters attack the nearest enemy they see; others keep to their route.
+fn engage(
+    p: &AiPlane,
+    n: usize,
+    fighter: bool,
+    contacts: &[(usize, DVec3, DVec3, u8)],
+) -> Option<(usize, bool)> {
+    let me = 1 + n;
+    let sight = [2500.0, 3500.0, 4500.0, 5500.0][p.pilot.skill.min(3) as usize];
+    let fwd = p.sim.ori * DVec3::X;
+    let mut best: Option<(usize, f64)> = None;
+    for &(id, pos, _, army) in contacts {
+        if id == me || army == p.army {
+            continue;
+        }
+        let rel = pos - p.sim.pos;
+        let d = rel.length();
+        // Someone close on our tail.
+        if d < 600.0 && rel.normalize_or_zero().dot(fwd) < -0.5 {
+            return Some((id, false));
+        }
+        if d < sight && best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((id, d));
+        }
+    }
+    if !fighter {
+        return None;
+    }
+    // Keep the current target unless it got away.
+    if let Some((id, true)) = p.engaged {
+        if contacts
+            .iter()
+            .any(|c| c.0 == id && (c.1 - p.sim.pos).length() < sight * 1.5)
+        {
+            return Some((id, true));
+        }
+    }
+    best.map(|(id, _)| (id, true))
 }
 
 /// Where and how a wing's `i`-th aircraft starts: lined up on the runway for a `TAKEOFF` waypoint

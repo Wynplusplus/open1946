@@ -68,6 +68,8 @@ pub struct ClassFile {
     pub consts: Vec<Const>,
     pub this_class: String,
     pub super_class: Option<String>,
+    /// Implemented interfaces (`com/maddox/il2/objects/air/TypeFighter`, …).
+    pub interfaces: Vec<String>,
     pub methods: Vec<Method>,
 }
 
@@ -127,7 +129,10 @@ impl ClassFile {
         let this_idx = r.u16()?;
         let super_idx = r.u16()?;
         let ifaces = r.u16()? as usize;
-        r.bytes(ifaces * 2)?;
+        let mut iface_idx = Vec::with_capacity(ifaces);
+        for _ in 0..ifaces {
+            iface_idx.push(r.u16()?);
+        }
         let skip_attrs = |r: &mut Reader| -> Result<(), Error> {
             for _ in 0..r.u16()? {
                 r.u16()?;
@@ -144,8 +149,13 @@ impl ClassFile {
             consts,
             this_class: String::new(),
             super_class: None,
+            interfaces: Vec::new(),
             methods: Vec::new(),
         };
+        cf.interfaces = iface_idx
+            .iter()
+            .filter_map(|&i| cf.class_name(i).map(str::to_owned))
+            .collect();
         cf.this_class = cf.class_name(this_idx).unwrap_or_default().to_owned();
         cf.super_class = cf.class_name(super_idx).map(str::to_owned);
         for _ in 0..r.u16()? {

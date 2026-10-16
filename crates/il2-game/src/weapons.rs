@@ -271,6 +271,8 @@ pub enum Hit {
     Ground(DVec3),
     /// A map object (index) at a point; whether it was destroyed.
     Object(usize, DVec3, bool),
+    /// An aircraft (owner id, see `hitbox::Target::id`), the chunk node hit and the point.
+    Aircraft(usize, usize, DVec3),
 }
 
 impl BulletType {
@@ -294,6 +296,7 @@ pub fn advance(
     field: &HeightField,
     objects: &mut crate::objects::MapObjects,
     rng: &mut Rng,
+    targets: &[crate::hitbox::Target],
     hits: &mut Vec<(Bullet, Hit)>,
 ) {
     let mut i = 0;
@@ -306,6 +309,11 @@ pub fn advance(
         b.vel.z -= 9.8 * dt;
         b.pos += b.vel * dt;
         b.life -= dt;
+        if let Some((id, node, at)) = crate::hitbox::first_hit(targets, b.prev, b.pos, b.owner) {
+            let b = bullets.swap_remove(i);
+            hits.push((b, Hit::Aircraft(id, node, at)));
+            continue;
+        }
         if let Some((obj, at)) = objects.hit(b.prev, b.pos) {
             let at = DVec3::new(at.x, at.y, at.z.max(field.height_at(at.x, at.y)));
             let ty = b.ty().clone();

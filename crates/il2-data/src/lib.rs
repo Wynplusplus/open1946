@@ -293,6 +293,23 @@ impl<'a> Classes<'a> {
         )
     }
 
+    /// Short names of the interfaces the class and its superclasses implement (`TypeFighter`, …).
+    pub fn interfaces(&self, class: &str) -> Vec<String> {
+        let full = if class.starts_with("com.") {
+            class.to_owned()
+        } else {
+            format!("com.maddox.il2.objects.{class}")
+        };
+        self.chain(&full)
+            .iter()
+            .flat_map(|c| {
+                c.interfaces
+                    .iter()
+                    .map(|i| i.rsplit('/').next().unwrap_or("").to_owned())
+            })
+            .collect()
+    }
+
     /// Short names of the class and its superclasses, most derived first (`BF_109G6`, `BF_109`, …).
     pub fn lineage(&self, class: &str) -> Vec<String> {
         let full = if class.starts_with("com.") {

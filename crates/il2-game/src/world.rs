@@ -27,6 +27,12 @@ pub struct AircraftAssets {
     pub gear_chunks: Vec<String>,
     /// Twin-fin layout (`Scheme2a`, `Scheme5`, `Scheme7`).
     pub twin_fin: bool,
+    /// Per node: the box around its geometry in node space (for bullet hits).
+    pub boxes: Vec<Option<(glam::Vec3, glam::Vec3)>>,
+    /// `[Toughness]` per part (`il2_fm::damage::PART_NAMES`), × 10⁻⁴; `NullPart` can't be damaged.
+    pub toughness: [f64; 44],
+    /// The class implements `TypeFighter`.
+    pub fighter: bool,
 }
 
 /// Loads the height field of a map's `load.ini`.
@@ -194,6 +200,9 @@ pub fn load_aircraft_with(
         hidden: Vec::new(),
         gear_chunks: Vec::new(),
         twin_fin: false,
+        boxes: Vec::new(),
+        toughness: [0.01; 44],
+        fighter: false,
     };
     let down = pose(
         &assets_for_pose,
@@ -313,6 +322,23 @@ pub fn load_aircraft_with(
         })
         .collect();
     let twin_fin = is(&["Scheme2a", "Scheme5", "Scheme7"]);
+    let mut boxes: Vec<Option<(glam::Vec3, glam::Vec3)>> = vec![None; rig.names.len()];
+    for v in &mesh.vertices {
+        let Some(b) = boxes.get_mut(v.node as usize) else {
+            continue;
+        };
+        let p = glam::Vec3::from(v.pos);
+        *b = Some(b.map_or((p, p), |(lo, hi)| (lo.min(p), hi.max(p))));
+    }
+    let mut toughness = [0.01; 44];
+    for (i, part) in il2_fm::damage::PART_NAMES.iter().enumerate() {
+        let v = fmd
+            .get("Toughness", part)
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(100.0);
+        toughness[i] = v * 1e-4;
+    }
+    toughness[43] = f64::INFINITY;
     Ok(AircraftAssets {
         him,
         hook_frames,
@@ -325,6 +351,9 @@ pub fn load_aircraft_with(
         hidden,
         gear_chunks,
         twin_fin,
+        boxes,
+        toughness,
+        fighter: classes.interfaces(class).iter().any(|i| i == "TypeFighter"),
     })
 }
 

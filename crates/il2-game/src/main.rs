@@ -5,6 +5,7 @@ mod cockpit;
 mod damage;
 mod effects;
 mod forest;
+mod hitbox;
 mod hud;
 mod joystick;
 mod mission_objects;
@@ -62,6 +63,9 @@ struct Args {
     /// Fly the level-speed check for every aircraft in air.ini and print a table.
     #[arg(long)]
     survey: bool,
+    /// An AI aircraft of this class 150 m ahead, flying straight (gunnery practice, tests).
+    #[arg(long)]
+    enemy: Option<String>,
     /// Leave out the mission's AI aircraft.
     #[arg(long)]
     no_ai: bool,
@@ -167,6 +171,61 @@ fn airframe_step(
     }
 }
 
+/// Everything bullets can hit this tick: the player (id 0) and the AI aircraft.
+fn build_targets(
+    sim: &Sim,
+    assets: &world::AircraftAssets,
+    af: &airframe::Airframe,
+    traffic: Option<&traffic::Traffic>,
+) -> Vec<hitbox::Target> {
+    let mut nodes = world::pose(assets, &sim.ct);
+    af.apply(&mut nodes, sim);
+    let mut out = vec![hitbox::Target::new(
+        0,
+        sim.pos,
+        sim.ori,
+        &nodes,
+        &assets.boxes,
+    )];
+    if let Some(t) = traffic {
+        t.targets(&mut out);
+    }
+    out
+}
+
+/// Bullet hits on aircraft from the last step: kinetic energy as TNT (2.4·10⁻⁷ kg/J) plus half the
+/// charge of high-explosive rounds.
+fn apply_aircraft_hits(
+    combat: &Combat,
+    sim: &mut Sim,
+    af: &mut airframe::Airframe,
+    assets: &world::AircraftAssets,
+    mut traffic: Option<&mut traffic::Traffic>,
+) {
+    for (b, h) in &combat.hits {
+        let weapons::Hit::Aircraft(id, node, _) = h else {
+            continue;
+        };
+        let ty = b.ty();
+        let speed = b.vel.length();
+        let mut tnt = 0.5 * ty.mass * speed * speed * 2.4e-7;
+        if ty.power > 0.0 && ty.power_radius > 0.0 {
+            tnt += 0.5 * (ty.power + 0.03 * ty.mass);
+        }
+        if std::env::var_os("IL2_TRACE").is_some() {
+            eprintln!(
+                "{} hit aircraft {id} in node {node} ({tnt:.4} kg TNT)",
+                b.spec.name
+            );
+        }
+        if *id == 0 {
+            af.shot(sim, *node, tnt, &assets.toughness);
+        } else if let Some(t) = traffic.as_deref_mut() {
+            t.shot(id - 1, *node, tnt);
+        }
+    }
+}
+
 fn new_airframe(a: &world::AircraftAssets) -> airframe::Airframe {
     airframe::Airframe::new(
         a.rig.names.clone(),
@@ -215,6 +274,7 @@ impl Combat {
         triggers: &[bool; 4],
         field: &HeightField,
         view: &mut view::WorldView,
+        targets: &[hitbox::Target],
     ) {
         let objects = &mut view.objects;
         let recoil = weapons::fire(
@@ -256,6 +316,7 @@ impl Combat {
             field,
             objects,
             &mut self.rng,
+            targets,
             &mut self.hits,
         );
         let fx = &mut view.effects;
@@ -274,7 +335,7 @@ impl Combat {
             let ty = b.ty();
             let (at, object) = match h {
                 weapons::Hit::Ground(p) => (*p, false),
-                weapons::Hit::Object(_, p, _) => (*p, true),
+                weapons::Hit::Object(_, p, _) | weapons::Hit::Aircraft(_, _, p) => (*p, true),
             };
             let what = if ty.power > 0.0 && ty.power_radius > 0.0 {
                 particles::Impact::Blast { power: ty.power }
@@ -490,8 +551,21 @@ impl Game {
         ];
         while self.acc >= TICK {
             self.sim.tick(&self.inputs, &ground);
+            let targets = build_targets(
+                &self.sim,
+                &self.assets,
+                &self.airframe,
+                self.traffic.as_ref(),
+            );
             self.combat
-                .step(&mut self.sim, &triggers, field, &mut self.view);
+                .step(&mut self.sim, &triggers, field, &mut self.view, &targets);
+            apply_aircraft_hits(
+                &self.combat,
+                &mut self.sim,
+                &mut self.airframe,
+                &self.assets,
+                self.traffic.as_mut(),
+            );
             airframe_step(
                 &mut self.airframe,
                 &mut self.sim,
@@ -500,7 +574,19 @@ impl Game {
                 &mut self.view,
             );
             if let Some(t) = self.traffic.as_mut() {
-                t.step(field, TICK);
+                let pl = (
+                    self.sim.pos,
+                    self.sim.vel,
+                    t.player_army,
+                    !self.sim.structure.destroyed,
+                );
+                t.step(
+                    field,
+                    TICK,
+                    pl,
+                    &mut self.combat.rng,
+                    &mut self.combat.bullets,
+                );
             }
             self.acc -= TICK;
         }
@@ -1153,20 +1239,6 @@ fn main() {
         (guns, stores)
     };
     let (guns, stores) = guns;
-    let tracers = effects::Tracers::load(
-        &vfs,
-        guns.iter()
-            .flat_map(|g| {
-                g.spec
-                    .bullets
-                    .iter()
-                    .filter_map(|b| b.trace_mesh.as_deref())
-            })
-            .chain(stores.iter().filter_map(|s| s.spec.mesh.as_deref())),
-    );
-    let effects =
-        particles::Effects::load(&vfs, particles::known_effects().iter().map(String::as_str));
-    let mut view = view::WorldView::new(map_objects, forest, roads, Some(tracers), effects);
     let mut assets = assets;
     let plane_mesh = std::mem::take(&mut assets.mesh);
     let (h, pitch) = assets.parked;
@@ -1192,6 +1264,32 @@ fn main() {
         }
     };
     sim.fuel *= fuel;
+    sim.structure.twin_fin = assets.twin_fin;
+    if let Some(class) = &args.enemy {
+        let fwd = sim.ori * DVec3::X;
+        let pos = sim.pos + fwd * 150.0;
+        traffic = traffic::Traffic::single(&vfs, &fms, class, pos, pos + fwd, sim.vel.length());
+    }
+    let ai_specs = traffic.as_ref().map(|t| t.gun_specs()).unwrap_or_default();
+    let tracers = effects::Tracers::load(
+        &vfs,
+        guns.iter()
+            .flat_map(|g| {
+                g.spec
+                    .bullets
+                    .iter()
+                    .filter_map(|b| b.trace_mesh.as_deref())
+            })
+            .chain(stores.iter().filter_map(|s| s.spec.mesh.as_deref()))
+            .chain(
+                ai_specs
+                    .iter()
+                    .flat_map(|g| g.bullets.iter().filter_map(|b| b.trace_mesh.as_deref())),
+            ),
+    );
+    let effects =
+        particles::Effects::load(&vfs, particles::known_effects().iter().map(String::as_str));
+    let mut view = view::WorldView::new(map_objects, forest, roads, Some(tracers), effects);
     let on_ground_start = matches!(start, Start::Takeoff { .. });
     let gear0 = if on_ground_start { 1.0 } else { 0.0 };
     sim.ct.gear = gear0;
@@ -1227,10 +1325,13 @@ fn main() {
         let mut max_g = (0.0f64, 0.0f64);
         for _ in 0..(args.seconds / TICK) as usize {
             sim.tick(&inputs, &ground);
-            combat.step(&mut sim, &triggers, &field, &mut view);
+            let targets = build_targets(&sim, &assets, &af, traffic.as_ref());
+            combat.step(&mut sim, &triggers, &field, &mut view, &targets);
+            apply_aircraft_hits(&combat, &mut sim, &mut af, &assets, traffic.as_mut());
             airframe_step(&mut af, &mut sim, &field, &mut combat, &mut view);
             if let Some(t) = traffic.as_mut() {
-                t.step(&field, TICK);
+                let pl = (sim.pos, sim.vel, t.player_army, !sim.structure.destroyed);
+                t.step(&field, TICK, pl, &mut combat.rng, &mut combat.bullets);
             }
             max_g = (max_g.0.max(sim.overload), max_g.1.min(sim.overload));
         }

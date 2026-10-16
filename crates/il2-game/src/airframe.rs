@@ -29,6 +29,8 @@ pub struct Airframe {
     /// Points where something broke off or the aircraft exploded, with the explosion size (kg TNT).
     pub crashes: Vec<(DVec3, f64)>,
     rng: u64,
+    /// Damage below a full level, per part (the runtime's `eAbsorber`).
+    absorbed: [f64; 44],
 }
 
 impl Airframe {
@@ -51,6 +53,7 @@ impl Airframe {
             messages: Vec::new(),
             crashes: Vec::new(),
             rng: 0x2545_F491_4F6C_DD1D,
+            absorbed: [0.0; 44],
         }
     }
 
@@ -63,6 +66,53 @@ impl Airframe {
         self.rng ^= self.rng >> 7;
         self.rng ^= self.rng << 17;
         (self.rng >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// The node's name (diagnostics, damage).
+    pub fn name(&self, node: usize) -> &str {
+        self.names.get(node).map_or("", String::as_str)
+    }
+
+    /// A bullet or a direct blast delivering `tnt` kg TNT into `node` (the runtime's generic chunk
+    /// damage): the level count is the TNT over the part's toughness, with remainders carried.
+    pub fn shot(&mut self, sim: &mut Sim, node: usize, tnt: f64, toughness: &[f64; 44]) {
+        if tnt <= 5.0e-7 {
+            return;
+        }
+        let mut chunk = self.name(node).to_owned();
+        // Hits on outer wings, stabilizers and fins sometimes strike their control surfaces.
+        let r = (self.uniform() * 100.0) as i32;
+        for (from, to, pct) in [
+            ("WingLOut", "AroneL_D0", 20),
+            ("WingROut", "AroneR_D0", 20),
+            ("StabL", "VatorL_D0", 45),
+            ("StabR", "VatorR_D0", 45),
+            ("Keel1", "Rudder1_D0", 33),
+            ("Keel2", "Rudder2_D0", 33),
+        ] {
+            if chunk.starts_with(from) && r < pct && self.find(to).is_some() {
+                chunk = to.to_owned();
+            }
+        }
+        let part = damage::part(&chunk);
+        let tough = toughness[part.min(43)];
+        if std::env::var_os("IL2_TRACE").is_some() {
+            eprintln!(
+                "  shot in {chunk}: {tnt:.5} kg TNT, toughness {tough}, carried {:.2}",
+                self.absorbed[part.min(43)]
+            );
+        }
+        let mut x = if !chunk.ends_with("_D0") || chunk.starts_with("Gear") {
+            tnt / tough
+        } else if tnt > 0.01 {
+            1.0 + (tnt - 0.01) / tough
+        } else {
+            tnt / 0.01
+        };
+        x += self.absorbed[part.min(43)];
+        let levels = x as usize;
+        self.absorbed[part.min(43)] = x - levels as f64;
+        self.next_dmg_levels(sim, levels, &chunk);
     }
 
     /// The chunk was struck hard (the runtime's `msgCollision`): four damage levels at once,

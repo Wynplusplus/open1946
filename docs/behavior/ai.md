@@ -65,3 +65,31 @@ after the takeoff ones. Flights starting in the air begin at their first waypoin
 ## Sides
 A wing's name is its regiment followed by two digits. The regiment's army comes from
 `PaintSchemes/regiments.ini`: regiments listed under `[Red]` are army 1, under `[Blue]` army 2.
+
+## Air combat
+OpenIL2's own interim pilot, until the runtime's `Maneuver` attack and defence maneuvers are
+ported:
+
+- Every 0.5 s a pilot looks around. An enemy within 600 m behind (more than 120° off the nose)
+  is evaded with a 75° bank hard turn towards its side. Fighters (classes implementing
+  `TypeFighter`) attack the nearest enemy in sight: 2.5, 3.5, 4.5 or 5.5 km for rookie to ace.
+  They keep a target until it is 1.5 sight ranges away. Other types keep to their route.
+- **Attack**: lead pursuit. The aim point is the target's position plus the relative velocity
+  times the bullets' time of flight, raised by the drop. The pilot rolls it into the lift plane
+  (`aileron = 0.02·roll error − 0.3·roll rate`) and pulls in proportion to its elevation above the
+  nose (`elevator = 0.08·elevation° + 0.15`), at full throttle. Below 300 m and descending he
+  levels out and climbs. Guns fire with the aim point within 6°/4°/3°/2.5° and range under
+  350/450/550/650 m (rookie to ace).
+
+## Bullet hits on aircraft
+OpenIL2 tests bullets against a box per visible chunk (from the chunk's geometry), posed with the
+aircraft. The runtime uses the meshes' collision shapes and, for most types, detailed internal
+"bones" (`xx…`) handled per class. The hit applies the runtime's generic chunk damage
+(`docs/behavior/damage.md`):
+
+- Energy as TNT: `½mv²·2.4·10⁻⁷` kg, plus half the charge (`power + 0.03·mass`) for high explosive.
+- Hits on an outer wing strike the aileron 20 % of the time, a stabilizer its elevator 45 %, a
+  fin its rudder 33 %.
+- Damage levels: on an intact `_D0` chunk (not gear) `1 + (TNT − 0.01)/toughness` above 0.01 kg,
+  else `TNT/0.01`; on damaged chunks and gear `TNT/toughness`. Fractions carry over per part.
+  `[Toughness]` in the `.fmd` gives per-part values (default 100, × 10⁻⁴).

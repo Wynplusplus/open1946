@@ -268,3 +268,84 @@ impl AiPilot {
         self.ct
     }
 }
+
+/// What an attacking pilot sees of its target.
+pub struct Contact {
+    pub pos: DVec3,
+    pub vel: DVec3,
+}
+
+impl AiPilot {
+    /// Lead pursuit of `t` (OpenIL2's own air-combat pilot, see `docs/behavior/ai.md`): roll the
+    /// aim point into the lift plane and pull towards it. Returns the controls and whether the guns
+    /// should fire.
+    pub fn attack(
+        &mut self,
+        s: &Sim,
+        t: &Contact,
+        ground: f64,
+        bullet_speed: f64,
+    ) -> (Inputs, bool) {
+        let rel = t.pos - s.pos;
+        let range = rel.length();
+        let tof = range / bullet_speed.max(100.0);
+        // Where to point the guns: the target's future position, less our own motion the rounds
+        // inherit, raised for the drop.
+        let aim = rel + (t.vel - s.vel) * tof + DVec3::new(0.0, 0.0, 0.5 * 9.81 * tof * tof);
+        let local = s.ori.inverse() * aim;
+        let off = local.y.hypot(local.z).atan2(local.x).to_degrees();
+        let alt = s.pos.z - ground;
+        // Roll so the aim point lies above the nose (towards the lift).
+        let roll_err = (-local.y)
+            .atan2(local.z.max(1e-3) + local.x.max(0.0) * 0.05)
+            .to_degrees();
+        let roll_err = if local.x < 0.0 {
+            roll_err.clamp(-90.0, 90.0)
+        } else {
+            roll_err
+        };
+        let wv = s.wtrue + s.w;
+        let mut ail = 0.02 * roll_err - 0.3 * wv.x;
+        // Pull in proportion to how far above the nose the aim point is.
+        let up = local.z.atan2(local.x.abs().max(1.0)).to_degrees();
+        let mut elev = (0.08 * up + 0.15).clamp(-0.3, 1.0);
+        if local.x < 0.0 {
+            elev = 1.0;
+        }
+        // Don't fly into the ground: level out and climb when low and descending.
+        if alt < 300.0 && s.vel.z < 0.0 {
+            ail = -0.03 * s.bank_deg();
+            elev = 0.6;
+        }
+        self.ct.aileron = ail.clamp(-1.0, 1.0);
+        self.ct.elevator = 0.6 * self.ct.elevator + 0.4 * elev;
+        self.ct.rudder = (-0.05 * local.y.atan2(local.x.max(1.0)).to_degrees()).clamp(-0.5, 0.5);
+        self.ct.throttle = 1.0;
+        self.ct.gear = 0.0;
+        // Better pilots fire from further and only with a good solution.
+        let (cone, reach) = match self.skill {
+            0 => (6.0, 350.0),
+            1 => (4.0, 450.0),
+            2 => (3.0, 550.0),
+            _ => (2.5, 650.0),
+        };
+        (self.ct, off < cone && range < reach)
+    }
+
+    /// A hard turn away from an attacker behind.
+    pub fn evade(&mut self, s: &Sim, threat: &Contact, ground: f64) -> Inputs {
+        let local = s.ori.inverse() * (threat.pos - s.pos);
+        // Turn towards the side the attacker is on, to spoil his deflection.
+        let want_bank = if local.y > 0.0 { -75.0 } else { 75.0 };
+        let wv = s.wtrue + s.w;
+        self.ct.aileron = (0.03 * (want_bank - s.bank_deg()) - 0.3 * wv.x).clamp(-1.0, 1.0);
+        self.ct.elevator = 0.8;
+        if s.pos.z - ground < 300.0 && s.vel.z < 0.0 {
+            self.ct.aileron = (-0.03 * s.bank_deg()).clamp(-1.0, 1.0);
+            self.ct.elevator = 0.6;
+        }
+        self.ct.throttle = 1.0;
+        self.ct.rudder = 0.0;
+        self.ct
+    }
+}
