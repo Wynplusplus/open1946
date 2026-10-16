@@ -1,6 +1,6 @@
 //! One aircraft's rigid-body simulation: `docs/behavior/flight-model.md`.
 
-use crate::aircraft::{Aircraft, ContactKind};
+use crate::aircraft::Aircraft;
 use crate::atmosphere::{self, G};
 use crate::engine::{EngineEnv, EngineKind, EngineState};
 use crate::polar::Polar;
@@ -21,6 +21,8 @@ pub struct Inputs {
     pub wep: bool,
     /// Dive brake lever, 0..1.
     pub airbrake: f64,
+    /// Tail wheel lock (aircraft with `CLockTailwheel`).
+    pub tail_lock: bool,
 }
 
 /// The runtime's control filter: exponential approach with time constant `tau`, plus a linear
@@ -45,21 +47,14 @@ fn trimmed(input: f64, trim: f64, limit: f64) -> f64 {
 /// Flap lever positions.
 pub const FLAP_STEPS: [f64; 4] = [0.0, 0.2, 0.33, 1.0];
 
-/// Ground height query in world coordinates.
-pub trait Ground {
-    fn height(&self, x: f64, y: f64) -> f64;
-}
-
-impl<F: Fn(f64, f64) -> f64> Ground for F {
-    fn height(&self, x: f64, y: f64) -> f64 {
-        self(x, y)
-    }
-}
+pub use crate::gear::Ground;
+use crate::gear::{GearInputs, GearState};
 
 pub const TICK: f64 = 0.030;
 
 /// Spring compression of each wheel under an even share of the aircraft's weight, metres.
-pub const GEAR_STATIC_SINK: f64 = 0.08;
+/// Static compression of the gear legs used to place wheels when the gear animation is unknown.
+pub const GEAR_STATIC_SINK: f64 = 0.02;
 
 pub struct Sim {
     pub ac: Aircraft,
@@ -78,6 +73,9 @@ pub struct Sim {
     pub airbrake: f64,
     /// Difficulty: engines suffer from overheating.
     pub engine_overheat: bool,
+    pub gear: GearState,
+    dry_friction: f64,
+    ticks: u64,
     /// Body-x airspeed of the last step, for the controls' speed limits.
     last_vx: f64,
     /// Elevator before the high-speed neutral shift.
@@ -167,6 +165,9 @@ impl Sim {
             trim: ac_trim,
             airbrake: 0.0,
             engine_overheat: true,
+            gear: GearState::default(),
+            dry_friction: 1.0,
+            ticks: 0,
             last_vx: speed,
             ev: 0.0,
             ct: Inputs { gear: 1.0, ..Default::default() },
@@ -231,6 +232,7 @@ impl Sim {
         self.ct.flaps = filter(dt, flaps_target, self.ct.flaps, 999.0, flap_rate);
         self.ct.brakes = if input.brakes > self.ct.brakes { (self.ct.brakes + 0.3 * dt).min(input.brakes) } else { input.brakes };
         self.ct.wep = input.wep;
+        self.ct.tail_lock = input.tail_lock && c.tailwheel_lock;
         self.ct.gear = if c.retractable { filter(dt, input.gear.clamp(0.0, 1.0), self.ct.gear, 999.9, 0.2) } else { 1.0 };
         if c.airbrake {
             self.airbrake = filter(dt, input.airbrake.clamp(0.0, 1.0), self.airbrake, 999.9, 0.5);
@@ -436,9 +438,36 @@ impl Sim {
         }
 
         let j = ac.j0 * ac.mass_empty;
+        self.ticks += 1;
+        if self.ticks % 2 == 1 {
+            self.gear.read_surface(ground, self.pos.x, self.pos.y);
+        }
         let mut gear_f = self.gear_forces(ground, mass);
-        let n = if gear_f.2 { 5 } else { 1 };
-        let sub = dt / n as f64;
+        let n = if gear_f.0 == DVec3::ZERO && gear_f.1 == DVec3::ZERO { 1 } else { 5 };
+        // Static friction: at low power, small forces and motion leave a grounded aircraft standing.
+        self.dry_friction -= 0.01;
+        if self.gear.changed {
+            self.dry_friction = 1.0;
+        }
+        if self.gear.points_on_ground > 0 {
+            self.dry_friction += 0.02;
+        }
+        self.dry_friction = self.dry_friction.clamp(1.0, 32.0);
+        let power = (self.engines.iter().map(|e| if e.running() { self.ct.throttle.min(1.1) * e.readyness } else { 0.0 }).sum::<f64>()
+            / self.engines.len().max(1) as f64)
+            .min(1.1);
+        let k = (4.0 * (0.25 - power)).max(0.0).powi(2) * self.dry_friction;
+        let km = k * mass * mass;
+        let sum_f = af + gear_f.0 + self.ori.inverse() * DVec3::new(0.0, 0.0, -gravity);
+        let sum_m = am + gear_f.1;
+        let stuck = !((self.gear.points_on_ground == 0 && self.gear.wheels_on_ground < 3)
+            || k == 0.0
+            || sum_m.length_squared() > 2.0 * km
+            || sum_f.length_squared() > 80.0 * km
+            || self.w.length_squared() > 1.4e-4 * k
+            || self.vel.length_squared() > 0.09 * k);
+        let n = if stuck { 0 } else { n };
+        let sub = dt / n.max(1) as f64;
         for k in 0..n {
             let f = af + gear_f.0 + self.ori.inverse() * DVec3::new(0.0, 0.0, -gravity);
             let m = am + gear_f.1;
@@ -456,10 +485,27 @@ impl Sim {
                 gear_f = self.gear_forces(ground, mass);
             }
         }
-        self.on_ground = gear_f.2;
+        self.on_ground = self.gear.on_ground();
         self.aoa = aoa;
         self.ias = ias;
         self.thrust = thrust;
+    }
+
+    fn gear_forces(&mut self, ground: &impl Ground, mass: f64) -> (DVec3, DVec3) {
+        let c = GearInputs {
+            pos: self.pos,
+            ori: self.ori,
+            vel: self.vel,
+            w: self.w,
+            mass,
+            brake: self.ct.brakes,
+            rudder: self.ct.rudder,
+            gear: self.ct.gear,
+            tail_locked: self.ct.tail_lock,
+            gc_gear_shift: self.ac.gc_gear_shift,
+            wing_end: self.ac.wingspan * 0.5,
+        };
+        self.gear.forces(&self.ac.gear, ground, &c)
     }
 
     /// Bank angle in degrees, positive when banked right.
@@ -467,56 +513,5 @@ impl Sim {
         let y = self.ori * DVec3::Y;
         let z = self.ori * DVec3::Z;
         deg(y.z.atan2(z.z))
-    }
-
-    /// Gear forces and moments in the body frame, and whether any wheel touches the ground.
-    /// OpenIL2 simplification (see spec, "Landing gear").
-    fn gear_forces(&self, ground: &impl Ground, mass: f64) -> (DVec3, DVec3, bool) {
-        let wheels = self.ac.gear.iter().filter(|g| g.kind != ContactKind::Body).count().max(1) as f64;
-        let k_wheel = mass * G / (wheels * GEAR_STATIC_SINK);
-        let c_wheel = 2.0 * 0.6 * (k_wheel * mass / wheels).sqrt();
-        let (mut f_body, mut m_body, mut contact) = (DVec3::ZERO, DVec3::ZERO, false);
-        let fwd_w = self.ori * DVec3::X;
-        let gear_down = self.ct.gear > 0.98;
-        for g in &self.ac.gear {
-            if g.kind != ContactKind::Body && !gear_down {
-                continue;
-            }
-            let pw = self.pos + self.ori * g.pos;
-            let gz = ground.height(pw.x, pw.y);
-            let depth = gz - pw.z;
-            if depth <= 0.0 {
-                continue;
-            }
-            let (k, c) = match g.kind {
-                ContactKind::Body => (10.0 * k_wheel, 3.0 * c_wheel),
-                _ => (k_wheel, c_wheel),
-            };
-            contact = true;
-            let vp = self.vel + self.ori * self.w.cross(g.pos);
-            let fn_ = (k * depth - c * vp.z).max(0.0);
-            let fwd = DVec3::new(fwd_w.x, fwd_w.y, 0.0).normalize_or_zero();
-            let lat = DVec3::Z.cross(fwd);
-            let (vf, vl) = (vp.dot(fwd), vp.dot(lat));
-            // Differential braking: rudder towards a side brakes that side's wheel more.
-            let brake = if g.kind != ContactKind::Wheel {
-                0.0
-            } else if g.pos.y > 0.0 {
-                self.ct.brakes * (1.0 - self.ct.rudder).min(1.0)
-            } else {
-                self.ct.brakes * (1.0 + self.ct.rudder).min(1.0)
-            };
-            let (mu_f, mu_l) = match g.kind {
-                ContactKind::Wheel => (0.03 + 0.6 * brake, 0.8),
-                ContactKind::Castor => (0.03, 0.1),
-                ContactKind::Body => (0.6, 0.6),
-            };
-            let smooth = |v: f64| (v / 0.5).clamp(-1.0, 1.0);
-            let fw = DVec3::Z * fn_ - fwd * (mu_f * fn_ * smooth(vf)) - lat * (mu_l * fn_ * smooth(vl));
-            let fb = self.ori.inverse() * fw;
-            f_body += fb;
-            m_body += g.pos.cross(fb);
-        }
-        (f_body, m_body, contact)
     }
 }

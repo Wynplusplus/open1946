@@ -329,6 +329,7 @@ impl ApplicationHandler for Game {
                                 };
                                 self.sim.set_radiator(next);
                             }
+                            KeyCode::KeyL => self.inputs.tail_lock = !self.inputs.tail_lock,
                             KeyCode::KeyN => self.inputs.airbrake = if self.inputs.airbrake > 0.5 { 0.0 } else { 1.0 },
                             KeyCode::KeyG => self.inputs.gear = if self.inputs.gear > 0.5 { 0.0 } else { 1.0 },
                             KeyCode::Digit0 => self.inputs.throttle = 1.0,
@@ -425,9 +426,10 @@ fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
 fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
     let start = sim.pos;
     let heading0 = (sim.ori * DVec3::X).truncate().normalize();
-    let mut inputs = Inputs { throttle: 1.1, gear: 1.0, ..Default::default() };
+    let mut inputs = Inputs { throttle: 1.1, gear: 1.0, tail_lock: true, ..Default::default() };
     let ground = |x: f64, y: f64| field.height_at(x, y);
     let mut t = 0.0;
+    let mut last_contact = (0.0, sim.pos, 0.0, heading0);
     for _ in 0..(90.0 / TICK) as usize {
         let fwd = (sim.ori * DVec3::X).truncate().normalize();
         let yaw_err = heading0.perp_dot(fwd); // >0: nose left of the runway heading
@@ -437,9 +439,11 @@ fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
         let target = if kmh < 100.0 { 99.0 } else if kmh < 170.0 { 1.5 } else { 8.0 };
         inputs.elevator = if target > 90.0 { 0.0 } else { (0.08 * (target - pitch) + 0.3 * sim.w.y).clamp(-1.0, 1.0) };
         inputs.aileron = (-0.05 * sim.bank_deg() - 0.3 * sim.w.x).clamp(-1.0, 1.0);
-        let was_on_ground = sim.on_ground;
         sim.tick(&inputs, &ground);
         t += TICK;
+        if sim.on_ground {
+            last_contact = (t, sim.pos, sim.ias, fwd);
+        }
         if std::env::var_os("IL2_TRACE").is_some() && ((t / TICK).round() as usize).is_multiple_of(33) {
             eprintln!(
                 "t={t:5.1} v={kmh:5.0} yaw_err={:6.1} wz={:6.2} rud={:5.2} pitch={:5.1} gnd={} agl={:5.2}",
@@ -447,11 +451,13 @@ fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
                 (sim.ori * DVec3::X).z.asin().to_degrees(), sim.on_ground, sim.pos.z - field.height_at(sim.pos.x, sim.pos.y)
             );
         }
-        if t > 2.0 && was_on_ground && !sim.on_ground {
-            let roll = (sim.pos - start).truncate().length();
+        // Lift-off: a full second without ground contact (wheels may skip over bumps before).
+        if t > 2.0 && !sim.on_ground && t - last_contact.0 > 1.0 {
+            let (tl, pl, ias, fl) = last_contact;
+            let roll = (pl - start).truncate().length();
             return format!(
                 "takeoff: lift-off at {:.0} km/h IAS after {:.0} m ground roll, {:.1} s, heading deviation {:.1} deg",
-                sim.ias * 3.6, roll, t, heading0.angle_to(fwd).to_degrees()
+                ias * 3.6, roll, tl, heading0.angle_to(fl).to_degrees()
             );
         }
     }

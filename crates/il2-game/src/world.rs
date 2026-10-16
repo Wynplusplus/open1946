@@ -31,9 +31,9 @@ pub fn load_heights(vfs: &Vfs, ini_path: &str) -> Result<HeightField, String> {
     Ok(HeightField::from_raw(img.width() as usize, img.height() as usize, img.as_raw()))
 }
 
-/// Wheel contact points: hook x/y positions, with heights solved from the flight model's parked
-/// attitude (`[Gear] H`, `Pitch`) so all wheels touch the ground when parked.
-fn gear_points(hooks: &[(String, glam::Vec3)], fmd: &SectFile) -> Vec<GearPoint> {
+/// Wheel contact points (`docs/behavior/gear.md`, "Contact points"): the gear-down hooks when the gear
+/// animation moves them, else hook x/y with heights solved from `[Gear] H`/`Pitch`.
+fn gear_points(hooks: &[(String, glam::Vec3)], fmd: &SectFile, gear_moves: bool) -> Vec<GearPoint> {
     let num = |k: &str, d: f64| {
         fmd.section_ci("Gear")
             .and_then(|s| s.get_ci(k))
@@ -46,8 +46,12 @@ fn gear_points(hooks: &[(String, glam::Vec3)], fmd: &SectFile) -> Vec<GearPoint>
     for (name, kind) in [("_ClipLGear", ContactKind::Wheel), ("_ClipRGear", ContactKind::Wheel), ("_ClipCGear", ContactKind::Castor)] {
         if let Some(p) = hook(name) {
             let x = p.x as f64;
-            // Lowered by the springs' static compression so the parked attitude matches H/Pitch.
-            let z = -(h + x * pitch.sin()) / pitch.cos() - il2_fm::sim::GEAR_STATIC_SINK;
+            let z = if gear_moves {
+                p.z as f64
+            } else {
+                // Lowered by the springs' static compression so the parked attitude matches H/Pitch.
+                -(h + x * pitch.sin()) / pitch.cos() - il2_fm::sim::GEAR_STATIC_SINK
+            };
             out.push(GearPoint { pos: DVec3::new(x, p.y as f64, z), kind });
         }
     }
@@ -58,6 +62,25 @@ fn gear_points(hooks: &[(String, glam::Vec3)], fmd: &SectFile) -> Vec<GearPoint>
         }
     }
     out
+}
+
+/// Parked origin height and nose-up pitch (degrees) from the wheel points, like the runtime's land
+/// pose: the line through the main-wheel mid-point and the third wheel is level; the height is
+/// lowered by the springs' sink `m·g/2 700 000`.
+fn land_pose(gear: &[GearPoint], mass: f64) -> Option<(f64, f64)> {
+    let wheels: Vec<&GearPoint> = gear.iter().filter(|g| g.kind == ContactKind::Wheel).collect();
+    let c = gear.iter().find(|g| g.kind == ContactKind::Castor)?;
+    if wheels.len() < 2 {
+        return None;
+    }
+    let (mx, mz) = ((wheels[0].pos.x + wheels[1].pos.x) * 0.5, (wheels[0].pos.z + wheels[1].pos.z) * 0.5);
+    let (dx, dz) = (mx - c.pos.x, mz - c.pos.z);
+    let mut pitch = -dz.atan2(dx).to_degrees();
+    if dx < 0.0 {
+        pitch += 180.0;
+    }
+    let h = (dx * c.pos.z - dz * c.pos.x).abs() / dx.hypot(dz).max(1e-6);
+    Some((h - mass * 9.80665 / 2_700_000.0, pitch))
 }
 
 /// Loads an aircraft by runtime class name (e.g. `air.BF_109G6`).
@@ -84,7 +107,10 @@ pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Re
     let hooks = loader.hier_hooks_posed(&him, &down)?;
     mesh.textures = loader.take_images();
     let fmd = fms.sect_file(fmd_name).map_err(|e| e.to_string())?;
-    let gear = gear_points(&hooks, &fmd);
+    let rest = assets_for_pose.rig.pose(&[]);
+    let gear_moves = down.iter().zip(&rest).any(|(a, b)| !a.abs_diff_eq(*b, 1e-4));
+    let from_ini = fmd.section_ci("Gear").and_then(|s| s.get_ci("FromIni")).and_then(il2_formats::sectfile::atof).unwrap_or(0.0) != 0.0;
+    let gear = gear_points(&hooks, &fmd, gear_moves && !from_ini);
     let mut fm = Aircraft::load(&fmd, |fam| fms.sect_file(&format!("FlightModels/{fam}.emd")).ok(), gear).map_err(|e| e.to_string())?;
     // The runtime picks these rocket burn rates by aircraft class (docs/behavior/engine.md).
     let short = class.rsplit('.').next().unwrap_or(class);
@@ -110,7 +136,9 @@ pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Re
     let num = |k: &str, d: f64| {
         fmd.section_ci("Gear").and_then(|s| s.get_ci(k)).and_then(il2_formats::sectfile::atof).map_or(d, f64::from)
     };
-    Ok(AircraftAssets { mesh, rig, tracks, fm, parked: (num("H", 2.0), num("Pitch", 10.0)) })
+    let mass = fm.mass_empty + fm.fuel_max + fm.nitro_max;
+    let parked = if gear_moves && !from_ini { land_pose(&fm.gear, mass) } else { None }.unwrap_or((num("H", 2.0), num("Pitch", 10.0)));
+    Ok(AircraftAssets { mesh, rig, tracks, fm, parked })
 }
 
 /// Node transforms for the current control positions (`docs/behavior/animation.md`).

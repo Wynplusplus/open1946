@@ -126,6 +126,8 @@ pub struct Aircraft {
     pub controls: Controls,
     /// `[Params] VmaxH`, m/s.
     pub vmax_h: f64,
+    /// `[Arm] GC_Gear_Shift`: moment arm shift of the gear forces.
+    pub gc_gear_shift: f64,
 }
 
 fn num(f: &SectFile, s: &'static str, k: &'static str) -> Result<f64, Error> {
@@ -179,6 +181,7 @@ impl Aircraft {
             gear: Vec::new(),
             controls: Controls::default(),
             vmax_h: 150.0,
+            gc_gear_shift: 0.0,
         }
     }
 
@@ -307,6 +310,7 @@ impl Aircraft {
             gear,
             controls: Controls::load(fmd),
             vmax_h: num_or(fmd, "Params", "VmaxH", 540.0) / 3.6,
+            gc_gear_shift: num_or(fmd, "Arm", "GC_Gear_Shift", 0.0),
         })
     }
 

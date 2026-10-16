@@ -174,19 +174,6 @@ any wheel touches the ground, otherwise 1. Each sub-step:
 See `engine.md`. Thrust acts along body +x. The torque reaction acts about body x. Slipstream terms feed the
 wing and tail flow as described above.
 
-## Landing gear — *OpenIL2 simplification*
-Contact points are the hooks `_ClipLGear`, `_ClipRGear`, `_ClipCGear` of the aircraft's hierarchy, taken with
-the gear animation at "down" (`animation.md`), because the meshes are modelled with the gear retracted. Only
-the hooks' x and y are used. Each wheel's z is solved
-so the aircraft rests at `[Gear] H` (origin height) and `Pitch` (nose-up angle):
-`z = −(H + x·sin Pitch)/cos Pitch − 0.08`, where 0.08 m is the springs' static compression.
-Each point is a spring-damper:
-- stiffness `k = m·g/(n·0.08 m)` and damping `c = 2·0.6·√(k·m/n)`,
-- friction: rolling 0.03 along the wheel, 0.8 sideways (0.1 for the tail or nose wheel unless locked),
-- brakes add up to 0.6 along the wheel.
-- Airframe points (hooks `_Clip<digits>`: nose, wingtips, tail) also collide with the ground: 10× stiffer,
-  3× damping, friction 0.6 in all directions.
-- Differential braking: the left wheel gets `brakes·min(1, 1 − rudder)`
-  and the right wheel `brakes·min(1, 1 + rudder)`; the castoring wheel is unbraked.
-
-The original `Gear` model (sink factor, roughness, water, arrestor hooks) is to be specified.
+## Landing gear
+See `gear.md`. When the gear animation of a class is not decoded, the wheels' heights are solved from
+`[Gear] H` and `Pitch`: `z = −(H + x·sin Pitch)/cos Pitch − 0.02`.

@@ -3,6 +3,7 @@
 pub mod aircraft;
 pub mod atmosphere;
 pub mod engine;
+pub mod gear;
 pub mod polar;
 pub mod sim;
 
