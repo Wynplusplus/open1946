@@ -1,0 +1,252 @@
+//! The mission's other aircraft: AI flights spawned from `[Wing]` sections, flown by `ai::AiPilot`
+//! with the AI flight model, drawn with shared meshes.
+
+use crate::ai::{AiPilot, Phase};
+use crate::airframe::Airframe;
+use crate::world::{self, AircraftAssets};
+use glam::{DMat4, DVec3};
+use il2_fm::Sim;
+use il2_formats::map::HeightField;
+use il2_formats::mission::{Mission, Wing};
+use il2_render::{GpuMesh, MeshData, Renderer};
+use il2_vfs::Vfs;
+use std::collections::HashMap;
+
+struct ClassAssets {
+    assets: AircraftAssets,
+    mesh: Option<MeshData>,
+    gpu: Option<GpuMesh>,
+}
+
+pub struct AiPlane {
+    pub name: String,
+    pub army: u8,
+    class: usize,
+    pub sim: Sim,
+    pub pilot: AiPilot,
+    pub airframe: Airframe,
+    gpu: Option<GpuMesh>,
+    trace_t: f64,
+}
+
+pub struct Traffic {
+    classes: Vec<ClassAssets>,
+    pub planes: Vec<AiPlane>,
+}
+
+/// Regiment name -> army (1 red, 2 blue) from `PaintSchemes/regiments.ini`.
+pub fn armies(vfs: &Vfs) -> HashMap<String, u8> {
+    let mut out = HashMap::new();
+    let Ok(d) = vfs.read("PaintSchemes/regiments.ini") else {
+        return out;
+    };
+    let f = il2_formats::SectFile::parse(&d);
+    for (sect, army) in [("Red", 1u8), ("Blue", 2u8)] {
+        if let Some(s) = f.section_ci(sect) {
+            for (k, _) in &s.entries {
+                out.insert(k.to_ascii_lowercase(), army);
+            }
+        }
+    }
+    out
+}
+
+/// A wing's army: its name without the squadron and flight digits names the regiment.
+pub fn wing_army(armies: &HashMap<String, u8>, wing: &str) -> u8 {
+    let reg = &wing[..wing.len().saturating_sub(2)];
+    armies.get(&reg.to_ascii_lowercase()).copied().unwrap_or(1)
+}
+
+impl Traffic {
+    /// Spawns every AI aircraft of the mission (the player's wingmen included).
+    pub fn from_mission(
+        vfs: &Vfs,
+        fms: &il2_data::FlightModels,
+        m: &Mission,
+        field: &HeightField,
+        runways: &[il2_formats::statics::Placed],
+    ) -> Traffic {
+        let armies = armies(vfs);
+        let mut t = Traffic {
+            classes: Vec::new(),
+            planes: Vec::new(),
+        };
+        let mut by_class: HashMap<String, usize> = HashMap::new();
+        for wing in &m.wings {
+            let is_player = m.player_wing.as_deref() == Some(&wing.name);
+            let class = match by_class.get(&wing.class) {
+                Some(&c) => c,
+                None => match world::load_aircraft_with(vfs, fms, &wing.class, false) {
+                    Ok(mut assets) => {
+                        let mesh = std::mem::take(&mut assets.mesh);
+                        t.classes.push(ClassAssets {
+                            assets,
+                            mesh: Some(mesh),
+                            gpu: None,
+                        });
+                        by_class.insert(wing.class.clone(), t.classes.len() - 1);
+                        t.classes.len() - 1
+                    }
+                    Err(e) => {
+                        eprintln!("AI flight {}: {e}", wing.name);
+                        continue;
+                    }
+                },
+            };
+            for i in 0..wing.planes as usize {
+                if is_player && i == m.player_num as usize {
+                    continue;
+                }
+                let a = &t.classes[class].assets;
+                let (sim, pilot) = spawn(a, wing, i, field, runways);
+                let mut sim = sim;
+                sim.ai = true;
+                sim.structure.twin_fin = a.twin_fin;
+                sim.fuel *= (wing.fuel_percent / 100.0).clamp(0.0, 1.0);
+                let airframe = Airframe::new(
+                    a.rig.names.clone(),
+                    a.rig.parents.clone(),
+                    &a.hidden,
+                    a.gear_chunks.clone(),
+                );
+                t.planes.push(AiPlane {
+                    name: format!("{}{}", wing.name, i),
+                    army: wing_army(&armies, &wing.name),
+                    class,
+                    sim,
+                    pilot,
+                    airframe,
+                    gpu: None,
+                    trace_t: 0.0,
+                });
+            }
+        }
+        eprintln!(
+            "AI: {} aircraft in {} classes",
+            t.planes.len(),
+            t.classes.len()
+        );
+        t
+    }
+
+    /// One line per aircraft: where it is and what it does (diagnostics).
+    pub fn report(&self, field: &HeightField) -> String {
+        let mut out = String::new();
+        for p in &self.planes {
+            let s = &p.sim;
+            out += &format!(
+                "{:10} army {} {:?} wp {} pos {:.0} {:.0} agl {:.0} {:.0} km/h{}\n",
+                p.name,
+                p.army,
+                p.pilot.phase,
+                p.pilot.cur,
+                s.pos.x,
+                s.pos.y,
+                s.pos.z - field.height_at(s.pos.x, s.pos.y),
+                s.vel.length() * 3.6,
+                if s.structure.destroyed {
+                    " DESTROYED"
+                } else {
+                    ""
+                }
+            );
+        }
+        out
+    }
+
+    /// One simulation tick for every AI aircraft.
+    pub fn step(&mut self, field: &HeightField, dt: f64) {
+        let ground = |x: f64, y: f64| field.height_at(x, y);
+        for p in &mut self.planes {
+            let g = field.height_at(p.sim.pos.x, p.sim.pos.y);
+            let inputs = p.pilot.update(&p.sim, g, &ground, dt);
+            p.sim.tick(&inputs, &ground);
+            p.airframe.update(&mut p.sim, field, dt);
+            if std::env::var("IL2_TRACE_AI").is_ok_and(|n| n == p.name) {
+                p.trace_t += dt;
+                if p.trace_t >= 2.0 {
+                    p.trace_t = 0.0;
+                    let s = &p.sim;
+                    eprintln!(
+                        "{} {:?} wp {} pos {:.0} {:.0} {:.0} agl {:.0} {:.0} km/h pitch {:+.1} bank {:+.0} aoa {:+.1} ct a{:+.2} e{:+.2} r{:+.2} t{:.2} {}",
+                        p.name, p.pilot.phase, p.pilot.cur, s.pos.x, s.pos.y, s.pos.z, s.pos.z - g, s.vel.length() * 3.6,
+                        (s.ori * DVec3::X).z.asin().to_degrees(), s.bank_deg(), s.aoa,
+                        s.ct.aileron, s.ct.elevator, s.ct.rudder, s.ct.throttle,
+                        p.airframe.messages.join(", ")
+                    );
+                }
+            }
+        }
+    }
+
+    /// Places every AI aircraft relative to the camera `eye` and returns the meshes to draw.
+    pub fn prepare(&mut self, r: &Renderer, eye: DVec3) -> Vec<&GpuMesh> {
+        for c in &mut self.classes {
+            if c.gpu.is_none() {
+                if let Some(m) = c.mesh.take() {
+                    c.gpu = Some(r.upload(&m));
+                }
+            }
+        }
+        for p in &mut self.planes {
+            let c = &self.classes[p.class];
+            let Some(base) = &c.gpu else { continue };
+            let g = p.gpu.get_or_insert_with(|| r.instance_of(base));
+            r.set_transform(
+                g,
+                DMat4::from_rotation_translation(p.sim.ori, p.sim.pos - eye).as_mat4(),
+            );
+            let mut nodes = world::pose(&c.assets, &p.sim.ct);
+            p.airframe.apply(&mut nodes, &p.sim);
+            r.set_nodes(g, &nodes);
+        }
+        self.planes.iter().filter_map(|p| p.gpu.as_ref()).collect()
+    }
+}
+
+/// Where and how a wing's `i`-th aircraft starts: lined up on the runway for a `TAKEOFF` waypoint
+/// (each one 40 m further back, 15 s later), else in the air at the first waypoint in echelon.
+fn spawn(
+    a: &AircraftAssets,
+    wing: &Wing,
+    i: usize,
+    field: &HeightField,
+    runways: &[il2_formats::statics::Placed],
+) -> (Sim, AiPilot) {
+    let skill = wing.skills.get(i).copied().unwrap_or(1);
+    let way = wing.waypoints.clone();
+    let Some(w0) = way.first() else {
+        let sim = world::spawn_airborne(a.fm.clone(), field, 1000.0, 100.0);
+        return (sim, AiPilot::new(way, 0, i, skill));
+    };
+    if w0.kind.starts_with("TAKEOFF") {
+        if let Some((x, y, heading)) = world::takeoff_spot(runways, w0.x, w0.y) {
+            let back = 40.0 * i as f64;
+            let side = if i % 2 == 1 { 12.0 } else { 0.0 };
+            let (fx, fy) = (heading.cos(), heading.sin());
+            let (h, pitch) = a.parked;
+            let sim = world::spawn_on_ground(
+                a.fm.clone(),
+                field,
+                x - fx * back - fy * side,
+                y - fy * back + fx * side,
+                heading,
+                h,
+                pitch,
+            );
+            let mut p = AiPilot::new(way, 0, i, skill);
+            p.phase = Phase::Lineup(3.0 + 15.0 * i as f64);
+            return (sim, p);
+        }
+    }
+    let next = way.get(1).unwrap_or(w0);
+    let start = DVec3::new(w0.x, w0.y, w0.z.max(field.height_at(w0.x, w0.y) + 300.0));
+    let dir = (DVec3::new(next.x, next.y, start.z) - start).normalize_or(DVec3::Y);
+    let right = DVec3::new(dir.y, -dir.x, 0.0);
+    let pos = start - dir * (40.0 * i as f64) + right * (30.0 * i as f64);
+    let sim = world::spawn_at(a.fm.clone(), pos, pos + dir, (w0.speed / 3.6).max(70.0));
+    let first = if w0.kind.starts_with("TAKEOFF") { 1 } else { 0 };
+    let mut p = AiPilot::new(way.clone(), first, i, skill);
+    p.ct.gear = 0.0;
+    (sim, p)
+}

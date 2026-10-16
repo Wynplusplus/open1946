@@ -100,6 +100,10 @@ pub struct Sim {
     pub structure: crate::damage::Structure,
     /// Aerodynamic and thrust load factor along body z of the last step.
     pub overload: f64,
+    /// Flown by the AI: the simplified flight model (`ai_fm`).
+    pub ai: bool,
+    /// Rotation rates the AI's controls command, body axes (the runtime's `Wtrue`).
+    pub wtrue: DVec3,
 }
 
 fn deg(r: f64) -> f64 {
@@ -231,6 +235,8 @@ impl Sim {
             sq,
             structure,
             overload: 1.0,
+            ai: false,
+            wtrue: DVec3::ZERO,
         }
     }
 
@@ -420,183 +426,227 @@ impl Sim {
             self.engines.iter().map(|e| e.radiator).sum::<f64>() / self.engines.len() as f64
         };
 
-        // Wing halves.
-        let delta = ac.wing_v * aos.to_radians().sin()
-            + ac.sens_roll * self.sq.sens[0] * (1.0 - 0.1 * flap) * 14.0 * self.ct.aileron;
-        let half = |side: f64| {
-            let p = DVec3::new(-ac.gcenter, side * 0.85 * ac.arm_wing_out, -0.5);
-            let mut vn = w.cross(p) + vflow;
-            let a_geo = side * delta - deg(vn.z.atan2(vn.x));
-            vn.x += 0.07 * self.add_vflow;
-            let qn = q(vn);
-            let a =
-                side * delta - deg((vn.z + side * 0.07 * self.add_vside * prop_sign).atan2(vn.x));
-            let mut ail_drag = 0.015 * side * delta;
-            if ail_drag < 0.0 {
-                ail_drag *= 0.18;
+        let (mut af, mut am, excessive_force, wtrue) = 'aero: {
+            if self.ai {
+                let out = crate::ai_fm::ai_aero(&crate::ai_fm::AiAeroIn {
+                    ac,
+                    sq: &self.sq,
+                    wing: &self.wing,
+                    tail: &self.tail,
+                    ct: &self.ct,
+                    vflow,
+                    rho,
+                    aoa,
+                    aos,
+                    full_mach,
+                    kq,
+                    height,
+                    gravity,
+                    w,
+                    prop_sign,
+                    on_ground: self.on_ground,
+                    tail_intact: self.structure.intact(crate::damage::TAIL1),
+                    wing_mid_l: self.structure.intact(crate::damage::WING_L_IN + 1),
+                    wing_mid_r: self.structure.intact(crate::damage::WING_R_IN + 1),
+                    radiator,
+                });
+                break 'aero (out.af, out.am, out.excessive_force, out.wtrue);
             }
-            let (cx, cy) = self.wing.coeffs_mach(a, full_mach, ac.mach.as_ref());
-            let (fcx, fcy) = self.fusel.coeffs(aos);
-            // Gear (0.035 when down, none for fixed gear) and dive brake drag.
-            let gear_cx = if ac.controls.retractable {
-                0.035 * self.ct.gear
+            // Wing halves.
+            let delta = ac.wing_v * aos.to_radians().sin()
+                + ac.sens_roll * self.sq.sens[0] * (1.0 - 0.1 * flap) * 14.0 * self.ct.aileron;
+            let half = |side: f64| {
+                let p = DVec3::new(-ac.gcenter, side * 0.85 * ac.arm_wing_out, -0.5);
+                let mut vn = w.cross(p) + vflow;
+                let a_geo = side * delta - deg(vn.z.atan2(vn.x));
+                vn.x += 0.07 * self.add_vflow;
+                let qn = q(vn);
+                let a = side * delta
+                    - deg((vn.z + side * 0.07 * self.add_vside * prop_sign).atan2(vn.x));
+                let mut ail_drag = 0.015 * side * delta;
+                if ail_drag < 0.0 {
+                    ail_drag *= 0.18;
+                }
+                let (cx, cy) = self.wing.coeffs_mach(a, full_mach, ac.mach.as_ref());
+                let (fcx, fcy) = self.fusel.coeffs(aos);
+                // Gear (0.035 when down, none for fixed gear) and dive brake drag.
+                let gear_cx = if ac.controls.retractable {
+                    0.035 * self.ct.gear
+                } else {
+                    0.0
+                };
+                let radiator_cx = 0.003 * radiator;
+                let cw = DVec3::new(
+                    -qn * (cx + ail_drag + gear_cx + radiator_cx + ac.airbrake_cx * self.airbrake)
+                        - qn * fcx,
+                    -qn * fcy,
+                    qn * cy * kq,
+                );
+                (cw, a_geo, qn)
+            };
+            let (mut cwl, al, ql) = half(1.0);
+            let (mut cwr, ar, _qr) = half(-1.0);
+
+            // Stall and spin.
+            let crit = self.wing.aoa_crit_h;
+            let mut rudder_infl = 1.0;
+            if al > crit || ar > crit {
+                self.spin_coeff += 0.2 * dt;
+                if self.sq.rudders > 0.0 && self.ct.rudder.abs() > 0.5 && self.ct.rudder * w.z > 0.0
+                {
+                    self.spin_coeff -= 0.3 * dt;
+                }
+                let amax = al.max(ar);
+                let turb = (0.8 * (amax - crit)).clamp(1.0, 15.0);
+                let mut s = ql * turb * self.spin_coeff;
+                if height < 10.0 {
+                    s *= 0.1 * height;
+                }
+                let (stalled, other) = if al > ar {
+                    (&mut cwl, &mut cwr)
+                } else {
+                    (&mut cwr, &mut cwl)
+                };
+                other.x += 0.02 * s * ac.spin_cx_loss;
+                stalled.x -= 0.25 * s * ac.spin_cx_loss;
+                other.z += 0.02 * s * ac.spin_cy_loss;
+                stalled.z -= 0.1 * s * ac.spin_cy_loss;
+                rudder_infl = 1.0 + 0.035 * turb;
             } else {
+                self.spin_coeff -= 0.2 * dt;
+            }
+            self.spin_coeff = self
+                .spin_coeff
+                .clamp(0.5 + 0.4 * power_out, 1.2 + 0.4 * power_out);
+
+            // Ground effect.
+            if height < 0.4 * ac.length {
+                let k = 1.0 + 0.2 * (1.0 - height / (0.4 * ac.length));
+                cwl *= DVec3::new(k, 1.0, k);
+                cwr *= DVec3::new(k, 1.0, k);
+            }
+
+            // Horizontal tail and fin.
+            let mut vn = w.cross(DVec3::new(-ac.arm_keel, 0.0, 0.0)) + vflow;
+            let yz = (vn.y * vn.y + vn.z * vn.z).sqrt();
+            let mut side = 0.0;
+            if !ac.engines.is_empty() {
+                let r = 1.0 / (1.0 + 0.04 * ac.arm_rudder).powi(2);
+                let base = (vn.x + r * self.add_vflow).max(0.2);
+                let s = (1.0 - 1.5 * yz / base).max(0.0);
+                vn.x += s * r * self.add_vflow;
+                let k = if vn.x < 0.0 {
+                    0.0
+                } else {
+                    (0.0011 * vn.x * vn.x).min(1.0)
+                };
+                side = s * k * self.add_vside;
+            }
+            let qt = q(vn);
+            let defl_e = self.ct.elevator * if self.ct.elevator > 0.0 { 28.0 } else { 20.0 };
+            let tail_a = |dz: f64| {
+                -deg((vn.z + dz).atan2(vn.x))
+                    - 2.0
+                    - 0.002 * v
+                    - ac.sens_pitch * self.sq.sens[1] * defl_e
+            };
+            let (al_t, ar_t) = if single_prop {
+                (
+                    tail_a(-0.36 * side * prop_sign),
+                    tail_a(0.36 * side * prop_sign),
+                )
+            } else {
+                (tail_a(0.0), tail_a(0.0))
+            };
+            let tail_force = |a: f64| {
+                let (cx, cy) = self.tail.coeffs(a);
+                DVec3::new(-qt * cx, 0.0, qt * cy) * ((self.sq.stab + self.sq.elevators) * 0.5)
+            };
+            let fhl = tail_force(al_t);
+            let fhr = tail_force(ar_t);
+            let defl_r = if self.sq.rudders < 0.05 {
                 0.0
-            };
-            let radiator_cx = 0.003 * radiator;
-            let cw = DVec3::new(
-                -qn * (cx + ail_drag + gear_cx + radiator_cx + ac.airbrake_cx * self.airbrake)
-                    - qn * fcx,
-                -qn * fcy,
-                qn * cy * kq,
-            );
-            (cw, a_geo, qn)
-        };
-        let (mut cwl, al, ql) = half(1.0);
-        let (mut cwr, ar, _qr) = half(-1.0);
-
-        // Stall and spin.
-        let crit = self.wing.aoa_crit_h;
-        let mut rudder_infl = 1.0;
-        if al > crit || ar > crit {
-            self.spin_coeff += 0.2 * dt;
-            if self.sq.rudders > 0.0 && self.ct.rudder.abs() > 0.5 && self.ct.rudder * w.z > 0.0 {
-                self.spin_coeff -= 0.3 * dt;
-            }
-            let amax = al.max(ar);
-            let turb = (0.8 * (amax - crit)).clamp(1.0, 15.0);
-            let mut s = ql * turb * self.spin_coeff;
-            if height < 10.0 {
-                s *= 0.1 * height;
-            }
-            let (stalled, other) = if al > ar {
-                (&mut cwl, &mut cwr)
             } else {
-                (&mut cwr, &mut cwl)
+                28.0 * self.ct.rudder
             };
-            other.x += 0.02 * s * ac.spin_cx_loss;
-            stalled.x -= 0.25 * s * ac.spin_cx_loss;
-            other.z += 0.02 * s * ac.spin_cy_loss;
-            stalled.z -= 0.1 * s * ac.spin_cy_loss;
-            rudder_infl = 1.0 + 0.035 * turb;
-        } else {
-            self.spin_coeff -= 0.2 * dt;
-        }
-        self.spin_coeff = self
-            .spin_coeff
-            .clamp(0.5 + 0.4 * power_out, 1.2 + 0.4 * power_out);
+            let fin_a = -deg((vn.y - 0.5 * side * prop_sign).atan2(vn.x))
+                + ac.sens_yaw * self.sq.sens[2] * rudder_infl * defl_r;
+            let (cx, cy) = self.tail.coeffs(fin_a);
+            let fv =
+                DVec3::new(-qt * cx, qt * cy, 0.0) * (0.2 + 1.5 * self.sq.keel + self.sq.rudders);
 
-        // Ground effect.
-        if height < 0.4 * ac.length {
-            let k = 1.0 + 0.2 * (1.0 - height / (0.4 * ac.length));
-            cwl *= DVec3::new(k, 1.0, k);
-            cwr *= DVec3::new(k, 1.0, k);
-        }
-
-        // Horizontal tail and fin.
-        let mut vn = w.cross(DVec3::new(-ac.arm_keel, 0.0, 0.0)) + vflow;
-        let yz = (vn.y * vn.y + vn.z * vn.z).sqrt();
-        let mut side = 0.0;
-        if !ac.engines.is_empty() {
-            let r = 1.0 / (1.0 + 0.04 * ac.arm_rudder).powi(2);
-            let base = (vn.x + r * self.add_vflow).max(0.2);
-            let s = (1.0 - 1.5 * yz / base).max(0.0);
-            vn.x += s * r * self.add_vflow;
-            let k = if vn.x < 0.0 {
-                0.0
-            } else {
-                (0.0011 * vn.x * vn.x).min(1.0)
-            };
-            side = s * k * self.add_vside;
-        }
-        let qt = q(vn);
-        let defl_e = self.ct.elevator * if self.ct.elevator > 0.0 { 28.0 } else { 20.0 };
-        let tail_a = |dz: f64| {
-            -deg((vn.z + dz).atan2(vn.x))
-                - 2.0
-                - 0.002 * v
-                - ac.sens_pitch * self.sq.sens[1] * defl_e
-        };
-        let (al_t, ar_t) = if single_prop {
-            (
-                tail_a(-0.36 * side * prop_sign),
-                tail_a(0.36 * side * prop_sign),
-            )
-        } else {
-            (tail_a(0.0), tail_a(0.0))
-        };
-        let tail_force = |a: f64| {
-            let (cx, cy) = self.tail.coeffs(a);
-            DVec3::new(-qt * cx, 0.0, qt * cy) * ((self.sq.stab + self.sq.elevators) * 0.5)
-        };
-        let fhl = tail_force(al_t);
-        let fhr = tail_force(ar_t);
-        let defl_r = if self.sq.rudders < 0.05 {
-            0.0
-        } else {
-            28.0 * self.ct.rudder
-        };
-        let fin_a = -deg((vn.y - 0.5 * side * prop_sign).atan2(vn.x))
-            + ac.sens_yaw * self.sq.sens[2] * rudder_infl * defl_r;
-        let (cx, cy) = self.tail.coeffs(fin_a);
-        let fv = DVec3::new(-qt * cx, qt * cy, 0.0) * (0.2 + 1.5 * self.sq.keel + self.sq.rudders);
-
-        // Wing forces and drag.
-        let mut fwl = cwl * self.sq.wing_l.iter().sum::<f64>();
-        let mut fwr = cwr * self.sq.wing_r.iter().sum::<f64>();
-        let parasite = self.sq.drag_produced;
-        fwl.x -= q(vflow) * parasite * 0.5;
-        fwr.x -= q(vflow) * parasite * 0.5;
-        let mut af = fwl + fwr;
-        let mut excessive_force = false;
-        if !af.is_finite() {
-            af = DVec3::ZERO;
-        } else if af.length() > gravity * 50.0 {
-            af = af.normalize() * gravity * 50.0;
-            excessive_force = true;
-        }
-
-        // Moments.
-        let u = {
-            let mut u = 0.0111 * aoa.abs();
-            if aoa > self.wing.aoa_crit_l && aoa < self.wing.aoa_crit_h {
-                u = 0.0;
-            } else if aoa >= self.wing.aoa_crit_h {
-                u = u.min(0.3 * (aoa - self.wing.aoa_crit_h));
-            } else {
-                u = u.min(0.3 * (self.wing.aoa_crit_l - aoa));
+            // Wing forces and drag.
+            let mut fwl = cwl * self.sq.wing_l.iter().sum::<f64>();
+            let mut fwr = cwr * self.sq.wing_r.iter().sum::<f64>();
+            let parasite = self.sq.drag_produced;
+            fwl.x -= q(vflow) * parasite * 0.5;
+            fwr.x -= q(vflow) * parasite * 0.5;
+            let mut af = fwl + fwr;
+            let mut excessive_force = false;
+            if !af.is_finite() {
+                af = DVec3::ZERO;
+            } else if af.length() > gravity * 50.0 {
+                af = af.normalize() * gravity * 50.0;
+                excessive_force = true;
             }
-            u
-        };
-        let xcg = ac.gcenter
-            + ac.gc_flaps_shift * (3.0 * flap).min(1.0) * (1.0 - u)
-            + ac.gc_aoa_shift * u;
-        let saos = aos.to_radians().sin();
-        let mut am = DVec3::ZERO;
-        if aoa.abs() < 12.0 {
-            let bank = self.bank_deg().clamp(-30.0, 30.0) * ((vflow.x - 50.0).min(50.0) * 0.003);
-            am.x -= bank * 0.01 * gravity;
-        }
-        am += DVec3::new(-xcg, ac.arm_wing_mid * (1.3 + saos), -ac.gcenter_z).cross(fwl);
-        am += DVec3::new(-xcg, -ac.arm_wing_mid * (1.3 - saos), -ac.gcenter_z).cross(fwr);
-        am += DVec3::new(-ac.arm_stab, 1.0, 0.0).cross(fhl);
-        am += DVec3::new(-ac.arm_stab, -1.0, 0.0).cross(fhr);
-        am += DVec3::new(-ac.arm_keel, 0.0, 1.0).cross(fv);
-        am += self.tail_moments(vflow.x, prop_sign);
-        if !am.is_finite() {
-            am = DVec3::ZERO;
-        } else if am.length() > gravity * 150.0 {
-            am = am.normalize() * gravity * 150.0;
-        }
 
+            // Moments.
+            let u = {
+                let mut u = 0.0111 * aoa.abs();
+                if aoa > self.wing.aoa_crit_l && aoa < self.wing.aoa_crit_h {
+                    u = 0.0;
+                } else if aoa >= self.wing.aoa_crit_h {
+                    u = u.min(0.3 * (aoa - self.wing.aoa_crit_h));
+                } else {
+                    u = u.min(0.3 * (self.wing.aoa_crit_l - aoa));
+                }
+                u
+            };
+            let xcg = ac.gcenter
+                + ac.gc_flaps_shift * (3.0 * flap).min(1.0) * (1.0 - u)
+                + ac.gc_aoa_shift * u;
+            let saos = aos.to_radians().sin();
+            let mut am = DVec3::ZERO;
+            if aoa.abs() < 12.0 {
+                let bank =
+                    self.bank_deg().clamp(-30.0, 30.0) * ((vflow.x - 50.0).min(50.0) * 0.003);
+                am.x -= bank * 0.01 * gravity;
+            }
+            am += DVec3::new(-xcg, ac.arm_wing_mid * (1.3 + saos), -ac.gcenter_z).cross(fwl);
+            am += DVec3::new(-xcg, -ac.arm_wing_mid * (1.3 - saos), -ac.gcenter_z).cross(fwr);
+            am += DVec3::new(-ac.arm_stab, 1.0, 0.0).cross(fhl);
+            am += DVec3::new(-ac.arm_stab, -1.0, 0.0).cross(fhr);
+            am += DVec3::new(-ac.arm_keel, 0.0, 1.0).cross(fv);
+            am += self.tail_moments(vflow.x, prop_sign);
+            if !am.is_finite() {
+                am = DVec3::ZERO;
+            } else if am.length() > gravity * 150.0 {
+                am = am.normalize() * gravity * 150.0;
+            }
+
+            (af, am, excessive_force, DVec3::ZERO)
+        };
         // Engine force and torque.
         af.x += thrust;
         am.x += torque;
 
+        self.wtrue = wtrue;
         // Per-step damping and rate limit.
-        self.w *= (1.0 - 1e-5 * ias).max(0.8);
-        if self.w.length_squared() > 25.0 {
-            self.w *= 5.0 / self.w.length();
+        if self.ai {
+            if self.w.length_squared() > 36.0 {
+                self.w *= 6.0 / self.w.length();
+            }
+            let wl: f64 = self.sq.wing_l.iter().sum();
+            let wr: f64 = self.sq.wing_r.iter().sum();
+            let k = 1.0 / (0.1 + ac.wing_area).max(1.0);
+            self.w.x *= 1.0 - 0.12 * (0.2 + wl + wr) * k;
+            self.w.y *= 1.0 - 0.5 * (0.2 + self.sq.stab) * k;
+            self.w.z *= 1.0 - 0.5 * (0.2 + self.sq.keel) * k;
+        } else {
+            self.w *= (1.0 - 1e-5 * ias).max(0.8);
+            if self.w.length_squared() > 25.0 {
+                self.w *= 5.0 / self.w.length();
+            }
         }
 
         let j = ac.j0 * ac.mass_empty;
@@ -654,7 +704,7 @@ impl Sim {
                 ((j.x - j.y) * w.x * w.y + m.z) / j.z,
             );
             self.w += aw * sub;
-            self.ori = (self.ori * DQuat::from_scaled_axis(self.w * sub)).normalize();
+            self.ori = (self.ori * DQuat::from_scaled_axis((self.w + wtrue) * sub)).normalize();
             self.vel += self.ori * (f / mass) * sub;
             self.pos += self.vel * sub;
             if k + 1 < n {

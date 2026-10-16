@@ -10,6 +10,8 @@ pub struct Waypoint {
     pub z: f64,
     /// km/h
     pub speed: f64,
+    /// The wing or object this waypoint is about (escort, attack), with the target's waypoint index.
+    pub target: Option<(String, u32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -21,6 +23,8 @@ pub struct Wing {
     /// Loadout name (`weapons`), e.g. `default`.
     pub weapons: String,
     pub waypoints: Vec<Waypoint>,
+    /// AI skill per plane: 0 rookie, 1 average, 2 veteran, 3 ace (`Skill`, or `Skill0`..`Skill3`).
+    pub skills: Vec<u8>,
 }
 
 /// A placed object from `[NStationary]` or `[Buildings]`.
@@ -78,6 +82,8 @@ pub struct Mission {
     /// `[SEASON] Month`, `Day` if given.
     pub date: Option<(u32, u32)>,
     pub player_wing: Option<String>,
+    /// The player's plane in the wing (`playerNum`).
+    pub player_num: u32,
     pub wings: Vec<Wing>,
 }
 
@@ -106,18 +112,32 @@ impl Mission {
                                     .map(|t| atof(t).map_or(0.0, f64::from))
                                     .collect();
                                 let at = |i: usize| n.get(i).copied().unwrap_or(0.0);
+                                let rest: Vec<&str> = v.split_whitespace().skip(4).collect();
+                                let target =
+                                    rest.first().filter(|t| !t.starts_with('&')).map(|t| {
+                                        (
+                                            t.to_string(),
+                                            rest.get(1).and_then(|i| i.parse().ok()).unwrap_or(0),
+                                        )
+                                    });
                                 Waypoint {
                                     kind: kind.clone(),
                                     x: at(0),
                                     y: at(1),
                                     z: at(2),
                                     speed: at(3),
+                                    target,
                                 }
                             })
                             .collect()
                     })
                     .unwrap_or_default();
+                let base = num("Skill", 1.0) as u8;
+                let skills = (0..4)
+                    .map(|i| num(&format!("Skill{i}"), base as f64) as u8)
+                    .collect();
                 Some(Wing {
+                    skills,
                     class: s.get_ci("Class")?.trim().to_owned(),
                     planes: num("Planes", 1.0) as u32,
                     fuel_percent: num("Fuel", 100.0),
@@ -139,6 +159,7 @@ impl Mission {
                 Some((n("Month")?, n("Day").unwrap_or(15)))
             }),
             player_wing: get("player").map(str::to_owned),
+            player_num: get("playerNum").and_then(atof).map_or(0, |v| v as u32),
             wings,
         }
     }

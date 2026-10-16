@@ -149,6 +149,16 @@ pub fn load_aircraft(
     fms: &il2_data::FlightModels,
     class: &str,
 ) -> Result<AircraftAssets, String> {
+    load_aircraft_with(vfs, fms, class, true)
+}
+
+/// Like `load_aircraft`; `with_cockpit: false` skips the cockpit (AI aircraft).
+pub fn load_aircraft_with(
+    vfs: &Vfs,
+    fms: &il2_data::FlightModels,
+    class: &str,
+    with_cockpit: bool,
+) -> Result<AircraftAssets, String> {
     let classes = il2_data::Classes::new(vfs, &fms.keys);
     let info = classes
         .aircraft(class)
@@ -289,7 +299,9 @@ pub fn load_aircraft(
     }
     .unwrap_or((num("H", 2.0), num("Pitch", 10.0)));
     let hook_frames = loader.hier_hook_frames(&him, &rest).unwrap_or_default();
-    let cockpit = crate::cockpit::Cockpit::load(vfs, &classes, class, &him);
+    let cockpit = with_cockpit
+        .then(|| crate::cockpit::Cockpit::load(vfs, &classes, class, &him))
+        .flatten();
     let owners = loader.hier_hook_owners(&him).unwrap_or_default();
     let gear_chunks = gear_hook_names(&hooks)
         .iter()

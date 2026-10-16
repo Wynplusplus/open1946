@@ -831,6 +831,49 @@ impl Renderer {
         })
     }
 
+    /// Another copy of an uploaded mesh with its own transform and node poses; geometry and
+    /// textures are shared.
+    pub fn instance_of(&self, m: &GpuMesh) -> GpuMesh {
+        let instance = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("instance"),
+                contents: bytemuck::cast_slice(&Mat4::IDENTITY.to_cols_array_2d()),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let nodes = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nodes"),
+            size: m.nodes.size(),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let instance_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("instance"),
+            layout: &self.instance_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: instance.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: nodes.as_entire_binding(),
+                },
+            ],
+        });
+        GpuMesh {
+            vbuf: m.vbuf.clone(),
+            ibuf: m.ibuf.clone(),
+            batches: m.batches.clone(),
+            materials: m.materials.clone(),
+            lod_distances: m.lod_distances.clone(),
+            instance,
+            nodes,
+            node_count: m.node_count,
+            instance_bg,
+        }
+    }
+
     pub fn upload(&self, mesh: &MeshData) -> GpuMesh {
         // Buffers can't be empty; an empty mesh gets one unused vertex and triangle.
         let one_vertex = [Vertex::default()];

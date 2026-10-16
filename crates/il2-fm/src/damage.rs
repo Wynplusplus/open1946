@@ -68,7 +68,7 @@ impl Squares {
             elevators: ac.elevator_area,
             keel: ac.keel_area,
             rudders: ac.rudder_area,
-            ailerons: 1.0,
+            ailerons: ac.aileron_area,
             drag_produced: 0.0,
             sens: [1.0; 3],
         }

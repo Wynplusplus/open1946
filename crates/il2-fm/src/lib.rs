@@ -1,5 +1,6 @@
 //! Aircraft flight model. Behavior spec: `docs/behavior/flight-model.md`.
 
+pub mod ai_fm;
 pub mod aircraft;
 pub mod atmosphere;
 pub mod damage;

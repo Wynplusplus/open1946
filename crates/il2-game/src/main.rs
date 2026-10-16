@@ -1,3 +1,4 @@
+mod ai;
 mod airframe;
 mod audio;
 mod cockpit;
@@ -11,6 +12,7 @@ mod objects;
 mod particles;
 mod roads;
 mod sky;
+mod traffic;
 mod view;
 mod weapons;
 mod world;
@@ -60,6 +62,12 @@ struct Args {
     /// Fly the level-speed check for every aircraft in air.ini and print a table.
     #[arg(long)]
     survey: bool,
+    /// Leave out the mission's AI aircraft.
+    #[arg(long)]
+    no_ai: bool,
+    /// Fly the aircraft by the AI around a square of waypoints and print its track.
+    #[arg(long)]
+    ai_test: bool,
     /// Fly headless level-flight tests instead of opening a window.
     #[arg(long)]
     test: bool,
@@ -294,6 +302,7 @@ impl Combat {
 struct Game {
     sim: Sim,
     airframe: airframe::Airframe,
+    traffic: Option<traffic::Traffic>,
     assets: world::AircraftAssets,
     field: HeightField,
     terrain_data: Option<il2_render::TerrainData>,
@@ -490,6 +499,9 @@ impl Game {
                 &mut self.combat,
                 &mut self.view,
             );
+            if let Some(t) = self.traffic.as_mut() {
+                t.step(field, TICK);
+            }
             self.acc -= TICK;
         }
         let (Some(r), Some(terrain), Some(plane)) =
@@ -592,9 +604,17 @@ impl Game {
             dt,
         ));
         let cockpit: Vec<&GpuMesh> = self.cockpit.iter().collect();
-        let (outside, fg): (&[&GpuMesh], _) = match fg_vp {
-            Some(m) => (&[], Some((m, cockpit.as_slice()))),
-            None => (std::slice::from_ref(&plane), None),
+        let mut outside: Vec<&GpuMesh> = self
+            .traffic
+            .as_mut()
+            .map(|t| t.prepare(r, eye))
+            .unwrap_or_default();
+        let fg = match fg_vp {
+            Some(m) => Some((m, cockpit.as_slice())),
+            None => {
+                outside.push(plane);
+                None
+            }
         };
         self.view.draw(
             r,
@@ -602,7 +622,7 @@ impl Game {
             terrain,
             vp,
             eye,
-            outside,
+            &outside,
             &self.combat.bullets,
             &self.combat.projectiles,
             fg,
@@ -967,6 +987,13 @@ fn main() {
         survey(&vfs, &fms);
         return;
     }
+    if args.ai_test {
+        let assets = world::load_aircraft_with(&vfs, &fms, &args.aircraft, false)
+            .unwrap_or_else(|e| fail(e));
+        print!("{}", ai_takeoff_test(&assets));
+        print!("{}", ai_test(assets.fm));
+        return;
+    }
     let mut start = Start::Default;
     let mut fuel = 1.0;
     let mission = args.mission.as_ref().map(|path| {
@@ -1013,6 +1040,9 @@ fn main() {
         .map(|c| c.flight_model)
         .unwrap_or_default();
     let field = world::load_heights(&vfs, &args.map).unwrap_or_else(|e| fail(e));
+    let mut traffic = mission.as_ref().filter(|_| !args.no_ai).map(|m| {
+        traffic::Traffic::from_mission(&vfs, &fms, m, &field, &world::load_runways(&vfs, &args.map))
+    });
 
     if args.test && !matches!(start, Start::Takeoff { .. }) {
         let fmd = fms.sect_file(&fmd_name).unwrap_or_else(|e| fail(e));
@@ -1199,6 +1229,9 @@ fn main() {
             sim.tick(&inputs, &ground);
             combat.step(&mut sim, &triggers, &field, &mut view);
             airframe_step(&mut af, &mut sim, &field, &mut combat, &mut view);
+            if let Some(t) = traffic.as_mut() {
+                t.step(&field, TICK);
+            }
             max_g = (max_g.0.max(sim.overload), max_g.1.min(sim.overload));
         }
         eprintln!(
@@ -1207,6 +1240,9 @@ fn main() {
         );
         for m in af.messages.drain(..) {
             eprintln!("{m}");
+        }
+        if let (Some(t), true) = (traffic.as_ref(), std::env::var_os("IL2_TRACE").is_some()) {
+            eprint!("{}", t.report(&field));
         }
         let (w, h) = (1280, 720);
         let mut r = Renderer::headless(w, h);
@@ -1297,9 +1333,16 @@ fn main() {
             0.0,
         ));
         let cockpit: Vec<&GpuMesh> = cockpit_gpu.iter().collect();
-        let (outside, fg): (Vec<&GpuMesh>, _) = match fg_vp {
-            Some(m) => (vec![], Some((m, cockpit.as_slice()))),
-            None => (vec![&plane], None),
+        let mut outside: Vec<&GpuMesh> = traffic
+            .as_mut()
+            .map(|t| t.prepare(&r, eye))
+            .unwrap_or_default();
+        let fg = match fg_vp {
+            Some(m) => Some((m, cockpit.as_slice())),
+            None => {
+                outside.push(&plane);
+                None
+            }
         };
         let px = view
             .draw(
@@ -1324,6 +1367,7 @@ fn main() {
     let airframe = new_airframe(&assets);
     let mut game = Game {
         airframe,
+        traffic,
         inputs: Inputs {
             throttle: throttle0,
             gear: gear0,
@@ -1372,6 +1416,103 @@ fn main() {
     };
     let el = EventLoop::new().expect("event loop");
     el.run_app(&mut game).expect("run");
+}
+
+/// The AI takes off from flat ground and climbs towards a waypoint 20 km ahead at 1500 m.
+fn ai_takeoff_test(a: &world::AircraftAssets) -> String {
+    use il2_formats::mission::Waypoint;
+    let flat = |_: f64, _: f64| 0.0;
+    let field = HeightField::from_raw(2, 2, &[0; 4]);
+    let (h, pitch) = a.parked;
+    let mut sim = world::spawn_on_ground(a.fm.clone(), &field, 0.0, 0.0, 0.0, h, pitch);
+    sim.ai = true;
+    let wp = |kind: &str, x: f64, z: f64| Waypoint {
+        kind: kind.into(),
+        x,
+        y: 0.0,
+        z,
+        speed: 300.0,
+        target: None,
+    };
+    let mut pilot = ai::AiPilot::new(
+        vec![wp("TAKEOFF", 0.0, 0.0), wp("NORMFLY", 20_000.0, 1500.0)],
+        0,
+        0,
+        2,
+    );
+    pilot.phase = ai::Phase::Lineup(1.0);
+    let mut out = String::new();
+    let mut t = 0.0;
+    while t < 120.0 {
+        let inputs = pilot.update(&sim, 0.0, &flat, TICK);
+        sim.tick(&inputs, &flat);
+        t += TICK;
+        if (t / TICK) as usize % (4.0 / TICK) as usize == 0 {
+            out += &format!(
+                "t {t:4.0}  x {:6.0}  agl {:5.0}  {:4.0} km/h  pitch {:+5.1}  aoa {:+5.1}  elev {:+.2}  {:?}{}\n",
+                sim.pos.x,
+                sim.pos.z,
+                sim.vel.length() * 3.6,
+                (sim.ori * DVec3::X).z.asin().to_degrees(),
+                sim.aoa,
+                inputs.elevator,
+                pilot.phase,
+                if sim.on_ground { " ground" } else { "" }
+            );
+        }
+    }
+    out
+}
+
+/// The AI flies a 10 km square at 1500 m and 350 km/h over flat ground.
+fn ai_test(ac: il2_fm::Aircraft) -> String {
+    use il2_formats::mission::Waypoint;
+    let flat = |_: f64, _: f64| 0.0;
+    let mut sim = Sim::new(
+        ac,
+        DVec3::new(0.0, 0.0, 1000.0),
+        glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
+        90.0,
+    );
+    sim.ai = true;
+    sim.ct.gear = 0.0;
+    let wp = |x: f64, y: f64| Waypoint {
+        kind: "NORMFLY".into(),
+        x,
+        y,
+        z: 1500.0,
+        speed: 350.0,
+        target: None,
+    };
+    let way = vec![
+        wp(0.0, 10_000.0),
+        wp(10_000.0, 10_000.0),
+        wp(10_000.0, 0.0),
+        wp(0.0, 0.0),
+        wp(0.0, 10_000.0),
+    ];
+    let mut pilot = ai::AiPilot::new(way, 0, 0, 2);
+    let mut out = String::new();
+    let mut t = 0.0;
+    while t < 400.0 {
+        let inputs = pilot.update(&sim, 0.0, &flat, TICK);
+        sim.tick(&inputs, &flat);
+        t += TICK;
+        if (t / TICK) as usize % (20.0 / TICK) as usize == 0 {
+            let fwd = sim.ori * DVec3::X;
+            out += &format!(
+                "t {t:5.0}  pos {:7.0} {:7.0} {:5.0}  {:4.0} km/h  hdg {:3.0}  bank {:+4.0}  wp {}\n",
+                sim.pos.x,
+                sim.pos.y,
+                sim.pos.z,
+                sim.vel.length() * 3.6,
+                (90.0 - fwd.y.atan2(fwd.x).to_degrees()).rem_euclid(360.0),
+                sim.bank_deg(),
+                pilot.cur
+            );
+        }
+    }
+    out
 }
 
 /// Cold start on the ground, then temperatures after 5 minutes of full power at 300 km/h and after

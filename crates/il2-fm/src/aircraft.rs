@@ -113,6 +113,8 @@ pub struct Aircraft {
     pub wing_sections: [f64; 3],
     pub stab_area: f64,
     pub elevator_area: f64,
+    /// `[Squares] Aileron`, m².
+    pub aileron_area: f64,
     pub keel_area: f64,
     pub rudder_area: f64,
     pub airbrake_cx: f64,
@@ -139,6 +141,10 @@ pub struct Aircraft {
     pub controls: Controls,
     /// `[Params] VmaxH`, m/s.
     pub vmax_h: f64,
+    /// `[Params] Vmax`, m/s.
+    pub vmax: f64,
+    /// `[Params] VminFLAPS` × 0.2417 (as the runtime scales it), m/s.
+    pub vmin_flaps: f64,
     /// `[Params] G_CLASS`: ultimate load factor at the reference weight.
     pub g_class: f64,
     /// `[Params] ReferenceWeight`: added to the full take-off mass for the load limit, kg.
@@ -184,6 +190,7 @@ impl Aircraft {
             wing_sections: [1.0 / 6.0; 3],
             stab_area: 0.0,
             elevator_area: 0.0,
+            aileron_area: 1.0,
             keel_area: 0.0,
             rudder_area: 0.0,
             airbrake_cx: 0.0,
@@ -215,6 +222,8 @@ impl Aircraft {
             gear: Vec::new(),
             controls: Controls::default(),
             vmax_h: 150.0,
+            vmax: 150.0,
+            vmin_flaps: 40.0,
             g_class: 12.0,
             reference_weight: 0.0,
             vmax_allowed: 195.0,
@@ -343,6 +352,7 @@ impl Aircraft {
             wing_sections: sections,
             stab_area: num(fmd, "Squares", "Stabilizer")?,
             elevator_area: num(fmd, "Squares", "Elevator")?,
+            aileron_area: num_or(fmd, "Squares", "Aileron", 1.0),
             keel_area: num(fmd, "Squares", "Keel")?,
             rudder_area: num(fmd, "Squares", "Rudder")?,
             airbrake_cx: num_or(fmd, "Squares", "AirbrakeCxS", 0.0),
@@ -380,6 +390,8 @@ impl Aircraft {
             gear,
             controls: Controls::load(fmd),
             vmax_h: num_or(fmd, "Params", "VmaxH", 540.0) / 3.6,
+            vmax: num_or(fmd, "Params", "Vmax", 500.0) / 3.6,
+            vmin_flaps: num_or(fmd, "Params", "VminFLAPS", 160.0) * 0.241_666_67,
             // Without `G_CLASS` the limit load is 12 g, as if `G_CLASS` were 18.
             g_class: num(fmd, "Params", "G_CLASS").map_or(18.0, |g| g.clamp(0.0, 15.0)),
             reference_weight: num_or(fmd, "Params", "ReferenceWeight", 0.0).clamp(-2000.0, 2000.0),
