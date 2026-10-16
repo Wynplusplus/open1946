@@ -68,6 +68,16 @@ impl<'a> Classes<'a> {
         out
     }
 
+    /// For each channel, whether its animation was imported, else why not (diagnostics).
+    pub fn animation_report(&self, class: &str) -> Vec<(anim::Channel, Result<(), String>)> {
+        let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };
+        let chain = self.chain(&full);
+        anim::Channel::ALL
+            .iter()
+            .map(|&ch| (ch, anim::sample(&chain, ch).map(|_| ()).ok_or_else(anim::last_abort)))
+            .collect()
+    }
+
     /// Part animation tracks of an aircraft class, imported where possible, else the generic defaults.
     pub fn animations(&self, class: &str) -> Vec<anim::Track> {
         let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };

@@ -705,6 +705,13 @@ fn survey(vfs: &il2_vfs::Vfs, fms: &il2_data::FlightModels) {
         let (pitch, _, _) = parked_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 0.0));
         let g = fmd.as_ref().and_then(|f| f.get("Gear", "Pitch")).unwrap_or("?").to_owned();
         let e0 = assets.fm.engines.first();
+        if std::env::var_os("IL2_ANIM").is_some() {
+            for (ch, r) in classes.animation_report(class) {
+                if let Err(why) = r {
+                    eprintln!("anim {class} {ch:?}: {why}");
+                }
+            }
+        }
         println!(
             "{class}\t{fmd_name}\t{v0:.0}\t{}\t{vh:.0}\t{}\t{hv:.0}\t{pitch:.1}\t{g}\t{}\t{}",
             p("Vmax"),

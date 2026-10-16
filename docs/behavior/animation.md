@@ -37,8 +37,16 @@ interpreter:
   chunk calls above, and calls to other such methods along the class chain.
 - It **samples** each function at 41 points over its input range and stores the node states.
 - The runtime then interpolates linearly between samples.
-- Any instruction outside this set (reading flight-model state, randomness, etc.) aborts that method, and the
-  default above is used for that input.
+- Static fields: a class's static initializer runs once, on first use of one of its fields, in a lenient mode
+  where unknown calls return zero values, and the fields it assigns are kept (gear angle tables are static
+  `float[]` literals). Unassigned static fields and the fields of `this` start at zero/false and keep values
+  the methods assign.
+- `chunkFindCheck` reports the node as present.
+- Any instruction outside this set (reading flight-model state, randomness, `World.cur()`, other objects'
+  fields) aborts that method, and the default above is used for that input.
+
+Coverage (2026-10-16, 404 aircraft × 5 channels): all but about 50 channels import; the rest read live
+flight-model state.
 
 The methods sampled are `moveRudder(F)`, `moveElevator(F)`, `moveAileron(F)`, `moveFlap(F)` (instance methods,
 resolved along the class chain), and the gear statics `moveGear(HierMesh, F, F, F)` (left, right and tail/nose

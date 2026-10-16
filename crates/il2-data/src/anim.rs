@@ -5,7 +5,7 @@
 //! set aborts that method and the generic default is used instead.
 
 use crate::classfile::{ClassFile, Const, Method};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Channel {
@@ -99,12 +99,45 @@ enum V {
 
 struct Abort;
 
+thread_local! {
+    static WHY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Records why evaluation stopped (see `last_abort`).
+fn why(reason: String) -> Abort {
+    WHY.with(|w| *w.borrow_mut() = reason);
+    Abort
+}
+
+/// Why the last failed sampling on this thread stopped, for diagnostics.
+pub fn last_abort() -> String {
+    WHY.with(|w| w.borrow().clone())
+}
+
 /// Interpreter state shared across the calls of one sampling run.
 struct Machine<'a> {
     chain: &'a [ClassFile],
     arrays: Vec<Vec<f32>>,
     out: BTreeMap<String, NodeState>,
     budget: usize,
+    /// Static fields (`class.name`), filled by the classes' static initializers.
+    statics: HashMap<String, V>,
+    /// Instance fields of `this`.
+    fields: HashMap<String, V>,
+    clinit_done: HashSet<String>,
+    /// Inside a static initializer: unknown calls yield defaults instead of aborting.
+    lenient: bool,
+}
+
+/// Zero value of a field or return descriptor.
+fn default_of(desc: &str) -> V {
+    match desc.chars().next() {
+        Some('F') => V::F(0.0),
+        Some('D') => V::D(0.0),
+        Some('J') => V::L(0),
+        Some('I' | 'Z' | 'B' | 'C' | 'S') => V::I(0),
+        _ => V::Null,
+    }
 }
 
 fn desc_args(desc: &str) -> Vec<char> {
@@ -380,12 +413,90 @@ impl<'a> Machine<'a> {
                 0xAC | 0xAE | 0xAF | 0xB0 => return Ok(Some(pop!())),
                 0xB1 => return Ok(None),
                 0xB2 => {
-                    let (_, name, _) = cf.member(u16_at(pc + 1)?).ok_or(Abort)?;
-                    st.push(match name {
+                    let (class, name, desc) = cf.member(u16_at(pc + 1)?).ok_or(Abort)?;
+                    let v = match name {
                         "xyz" => V::Arr(0),
                         "ypr" => V::Arr(1),
-                        _ => return Err(Abort),
-                    });
+                        _ => {
+                            let key = format!("{class}.{name}");
+                            if !self.statics.contains_key(&key) {
+                                self.run_clinit(class, depth);
+                            }
+                            self.statics.get(&key).cloned().unwrap_or_else(|| default_of(desc))
+                        }
+                    };
+                    st.push(v);
+                    next = pc + 3;
+                }
+                0xB3 => {
+                    let (class, name, _) = cf.member(u16_at(pc + 1)?).ok_or(Abort)?;
+                    let v = pop!();
+                    self.statics.insert(format!("{class}.{name}"), v);
+                    next = pc + 3;
+                }
+                0xB4 => {
+                    let (_, name, desc) = cf.member(u16_at(pc + 1)?).ok_or(Abort)?;
+                    if pop!() != V::This {
+                        return Err(why(format!("getfield {name} of another object")));
+                    }
+                    st.push(self.fields.get(name).cloned().unwrap_or_else(|| default_of(desc)));
+                    next = pc + 3;
+                }
+                0xB5 => {
+                    let (_, name, _) = cf.member(u16_at(pc + 1)?).ok_or(Abort)?;
+                    let v = pop!();
+                    if pop!() != V::This {
+                        return Err(why(format!("putfield {name} of another object")));
+                    }
+                    self.fields.insert(name.to_owned(), v);
+                    next = pc + 3;
+                }
+                0xBC => {
+                    let n = popi!();
+                    if !(0..=4096).contains(&n) {
+                        return Err(why("newarray size".into()));
+                    }
+                    self.arrays.push(vec![0.0; n as usize]);
+                    st.push(V::Arr(self.arrays.len() - 1));
+                    next = pc + 2;
+                }
+                0xBE => {
+                    let V::Arr(a) = pop!() else { return Err(Abort) };
+                    st.push(V::I(self.arrays[a].len() as i32));
+                }
+                0x5B => {
+                    let (v1, v2, v3) = (pop!(), pop!(), pop!());
+                    st.extend([v1.clone(), v3, v2, v1]);
+                }
+                0x5A => {
+                    let (v1, v2) = (pop!(), pop!());
+                    st.extend([v1.clone(), v2, v1]);
+                }
+                0x5F => {
+                    let (v1, v2) = (pop!(), pop!());
+                    st.extend([v1, v2]);
+                }
+                0x33 | 0x34 | 0x35 => {
+                    let i = popi!();
+                    let V::Arr(a) = pop!() else { return Err(Abort) };
+                    let v = *self.arrays[a].get(i as usize).ok_or(Abort)?;
+                    st.push(V::I(v as i32));
+                }
+                0x4F | 0x54 | 0x55 | 0x56 => {
+                    let v = popi!();
+                    let i = popi!();
+                    let V::Arr(a) = pop!() else { return Err(Abort) };
+                    *self.arrays[a].get_mut(i as usize).ok_or(Abort)? = v as f32;
+                }
+                0x84 => {
+                    let i = u8_at(pc + 1)? as usize;
+                    let c = u8_at(pc + 2)? as i8 as i32;
+                    let V::I(v) = locals.get(i).cloned().ok_or(Abort)? else { return Err(Abort) };
+                    locals[i] = V::I(v.wrapping_add(c));
+                    next = pc + 3;
+                }
+                0xBB if self.lenient => {
+                    st.push(V::Null);
                     next = pc + 3;
                 }
                 0xC1 => {
@@ -412,7 +523,7 @@ impl<'a> Machine<'a> {
                         st.push(r);
                     }
                 }
-                _ => return Err(Abort),
+                _ => return Err(why(format!("opcode 0x{op:02X}"))),
             }
             pc = next;
         }
@@ -437,7 +548,8 @@ impl<'a> Machine<'a> {
                 ("max", "(FF)F") => V::F(f(&args[0])?.max(f(&args[1])?)),
                 ("min", "(FF)F") => V::F(f(&args[0])?.min(f(&args[1])?)),
                 ("toRadians", "(D)D") => V::D(d(&args[0])?.to_radians()),
-                _ => return Err(Abort),
+                ("sqrt", "(D)D") => V::D(d(&args[0])?.sqrt()),
+                _ => return Err(why(format!("Math.{name}{desc}"))),
             };
             return Ok(Some(r));
         }
@@ -446,8 +558,29 @@ impl<'a> Machine<'a> {
             let v = x[0].max(x[1]).min(x[2]);
             return Ok(Some(V::F(x[3] + (x[4] - x[3]) * (v - x[1]) / (x[2] - x[1]))));
         }
-        let (cf, m) = self.resolve(Some(class), name, desc).ok_or(Abort)?;
+        let Some((cf, m)) = self.resolve(Some(class), name, desc) else {
+            if self.lenient {
+                let ret = &desc[desc.find(')').map_or(desc.len(), |i| i + 1)..];
+                return Ok((ret != "V").then(|| default_of(ret)));
+            }
+            return Err(why(format!("static {class}.{name}{desc}")));
+        };
         self.call(cf, m, args, depth + 1)
+    }
+
+    /// Runs a class's static initializer once, leniently; statics it sets before any failure are kept.
+    fn run_clinit(&mut self, class: &str, depth: usize) {
+        if !self.clinit_done.insert(class.to_owned()) {
+            return;
+        }
+        let Some(cf) = self.chain.iter().find(|c| c.this_class == class) else { return };
+        let Some(m) = cf.method("<clinit>", "()V") else { return };
+        let (was, budget) = (self.lenient, self.budget);
+        self.lenient = true;
+        self.budget = 200_000;
+        let _ = self.call(cf, m, Vec::new(), depth + 1);
+        self.lenient = was;
+        self.budget = budget;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -482,7 +615,9 @@ impl<'a> Machine<'a> {
                     ("chunkVisible", "(Ljava/lang/String;Z)V") => {
                         entry.visible = Some(matches!(args[1], V::I(v) if v != 0));
                     }
-                    _ => return Err(Abort),
+                    // Assume the named node exists.
+                    ("chunkFindCheck", "(Ljava/lang/String;)I") => return Ok(Some(V::I(0))),
+                    _ => return Err(why(format!("HierMesh.{name}{desc}"))),
                 }
                 Ok(None)
             }
@@ -496,12 +631,16 @@ impl<'a> Machine<'a> {
                     }
                     return Ok(None);
                 }
-                let (cf, m) = self.resolve(special.then_some(class), name, desc).ok_or(Abort)?;
+                let (cf, m) = self.resolve(special.then_some(class), name, desc).ok_or_else(|| why(format!("this.{name}{desc}")))?;
                 let mut full = vec![V::This];
                 full.extend(args);
                 self.call(cf, m, full, depth + 1)
             }
-            _ => Err(Abort),
+            _ if self.lenient => {
+                let ret = &desc[desc.find(')').map_or(desc.len(), |i| i + 1)..];
+                Ok((ret != "V").then(|| default_of(ret)))
+            }
+            _ => Err(why(format!("call {class}.{name}{desc} on {recv:?}"))),
         }
     }
 }
@@ -511,7 +650,16 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
     const HM: &str = "Lcom/maddox/il2/engine/HierMesh;";
     let (lo, hi) = ch.range();
     let inputs: Vec<f32> = (0..SAMPLES).map(|i| lo + (hi - lo) * i as f32 / (SAMPLES - 1) as f32).collect();
-    let mut m = Machine { chain, arrays: vec![vec![0.0; 3], vec![0.0; 3]], out: BTreeMap::new(), budget: 0 };
+    let mut m = Machine {
+        chain,
+        arrays: vec![vec![0.0; 3], vec![0.0; 3]],
+        out: BTreeMap::new(),
+        budget: 0,
+        statics: HashMap::new(),
+        fields: HashMap::new(),
+        clinit_done: HashSet::new(),
+        lenient: false,
+    };
     let mut frames: Vec<BTreeMap<String, NodeState>> = Vec::new();
     let virtual_name = match ch {
         Channel::Rudder => "moveRudder",
