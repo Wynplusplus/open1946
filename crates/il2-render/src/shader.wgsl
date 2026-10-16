@@ -2,6 +2,8 @@ struct Globals {
     view_proj: mat4x4<f32>,
     light_dir: vec4<f32>,
     fog: vec4<f32>, // rgb, density per metre
+    // rgb: sky colour at the zenith
+    zenith: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -78,5 +80,5 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     // Opaque surfaces must write alpha 1: skin alpha is a gloss map, not transparency.
     let a = select(1.0, c.a, material.params.y > 0.0);
     let f = 1.0 - exp(-globals.fog.w * length(i.view));
-    return vec4<f32>(mix(c.rgb * (0.35 + 0.65 * lambert), globals.fog.rgb, f), a);
+    return vec4<f32>(mix(c.rgb * (0.35 + 0.65 * lambert) * globals.light_dir.w, globals.fog.rgb, f), a);
 }

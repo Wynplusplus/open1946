@@ -7,12 +7,14 @@ Open items carried forward:
 - Name recovery for the remaining ~25% of entries (sounds, some map data, `cod/` entries).
 - `0xCA` archives beyond `filesserver.SFS`; the one unidentified protected directory in `vfs.md`.
 
-## M2: world (done except the items below)
+## M2: world (done)
 Done: land-type texturing, water, sky gradient and fog, map objects (`*.static` houses, tree lines, plates),
 mission start positions.
 Done since: forest canopy, roads and rails, bridges, mission `[NStationary]` and `[Buildings]` objects.
-Open: bridge ramps, sky cube, sun, effects (smoke, fires), free camera. Gear animation is not decoded for some
-classes (e.g. La-5FN).
+Also done: sun and sky colours from time, date and latitude; chase and free orbit cameras.
+Not shipped: the `[CUBE]` sky textures named in `load.ini` are not in the install.
+Moved on: bridge ramps (M4, with damage), smoke/fire effects (M4, with the effects system). Gear animation
+is not decoded for some classes (e.g. La-5FN): M3.
 
 ## M3: flight
 Flight-model tables (`krypto.md`: container `gui/game/buttons`), a generic flight model, joystick input,

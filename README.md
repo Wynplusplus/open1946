@@ -15,8 +15,9 @@ No game files, decompiled code or key material are part of this repository. Form
 | Section files, binary section files | Text and binary encodings |
 | Meshes `.msh`, hierarchies `.him`/`.sim`, materials `.mat` | 90,525 / 1,555 / 43,464 shipped files parse, 0 failures |
 | Images | IMF types 0–2, TGA including colour-mapped variants |
-| Maps | Height map, land-type texturing, water, sky and fog |
+| Maps | Height map, land-type texturing, water, forests, roads and railways, bridges, sun and sky by time and date |
 | Map objects | Houses, tree lines, runway and taxiway plates from `*.static` + `static.ini`, instanced; all 102 shipped maps load |
+| Mission objects | Stationary vehicles, guns, ships, parked aircraft, balloons, buildings; all 1,284 shipped missions resolve |
 | Flight (`il2-fm`, `il2-data`) | Flight models and engines decrypted from the install; Vmax within a few % of the `.fmd` figures (`docs/behavior/validation.md`); ground handling; control-surface and gear animation |
 | Game (`openil2`) | Fly any aircraft class over any map or from a mission's start (runway takeoff spots) |
 
@@ -35,10 +36,12 @@ target/release/il2 cat com/maddox/il2/objects/air.ini
 target/release/il2 names --out names.txt    # recover archive path names (~75%)
 target/release/il2 parse-all --names names.txt
 
-# Fly (arrows: stick, Z/X: rudder, PageUp/PageDown or 1-9/0/W: throttle, F/V: flaps, G: gear, B: brakes)
+# Fly (arrows: stick, Z/X: rudder, PageUp/PageDown or 1-9/0/W: throttle, F/V: flaps, G: gear, B: brakes,
+#      F1: chase view, F2: free orbit view with mouse drag and wheel)
 target/release/openil2 --aircraft air.BF_109G6 --map maps/Slovakia/load.ini --at 214500,86500 --agl 300
 target/release/openil2 --mission Missions/Single/SK/Bf-109F-4/Bf-109F-4_1.mis
 target/release/openil2 --test                                   # headless flight-model checks
+target/release/openil2 --at 214500,86500 --time 19.5              # dusk; --time overrides the mission's
 target/release/openil2 --at 214500,86500 --agl 150 --screenshot out.png --orbit 170,12,40
 
 # Viewer (drag to orbit, wheel to zoom)

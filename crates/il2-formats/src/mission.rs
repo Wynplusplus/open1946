@@ -57,6 +57,8 @@ pub struct Mission {
     /// Relative to `maps/`.
     pub map: String,
     pub time_hours: f64,
+    /// `[SEASON] Month`, `Day` if given.
+    pub date: Option<(u32, u32)>,
     pub player_wing: Option<String>,
     pub wings: Vec<Wing>,
 }
@@ -101,6 +103,10 @@ impl Mission {
             buildings: placed(&f, "Buildings"),
             map: get("MAP").unwrap_or_default().to_owned(),
             time_hours: get("TIME").and_then(atof).map_or(12.0, f64::from),
+            date: f.section_ci("SEASON").and_then(|s| {
+                let n = |k: &str| s.get_ci(k).and_then(atof).map(|v| v as u32);
+                Some((n("Month")?, n("Day").unwrap_or(15)))
+            }),
             player_wing: get("player").map(str::to_owned),
             wings,
         }

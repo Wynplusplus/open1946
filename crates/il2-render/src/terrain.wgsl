@@ -3,6 +3,8 @@ struct Globals {
     view_proj: mat4x4<f32>,
     light_dir: vec4<f32>,
     fog: vec4<f32>, // rgb, density per metre
+    // rgb: sky colour at the zenith
+    zenith: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -84,7 +86,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let d = field(ci + 1, ri + 1, i.world_xy);
     let col = mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
     let lambert = max(dot(normalize(i.normal), -globals.light_dir.xyz), 0.0);
-    var lit = col.rgb * (0.4 + 0.6 * lambert);
+    var lit = col.rgb * (0.4 + 0.6 * lambert) * globals.light_dir.w;
     // Water reflects the sky, more so at grazing angles.
     let v = normalize(-i.view);
     let fresnel = 0.1 + 0.9 * pow(1.0 - max(v.z, 0.0), 5.0);

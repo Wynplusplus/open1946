@@ -2,6 +2,7 @@ mod forest;
 mod mission_objects;
 mod objects;
 mod roads;
+mod sky;
 mod world;
 
 use clap::Parser;
@@ -40,6 +41,9 @@ struct Args {
     /// Start altitude above ground, metres (without a mission).
     #[arg(long, default_value_t = 1500.0)]
     agl: f64,
+    /// Time of day, hours (overrides the mission's).
+    #[arg(long)]
+    time: Option<f64>,
     /// Fly headless level-flight tests instead of opening a window.
     #[arg(long)]
     test: bool,
@@ -83,6 +87,7 @@ struct Game {
     terrain: Option<il2_render::GpuTerrain>,
     plane: Option<GpuMesh>,
     objects: objects::MapObjects,
+    env: il2_render::Environment,
     objects_gpu: Option<GpuMesh>,
     instances: Vec<InstanceRaw>,
     forest: Option<forest::Forest>,
@@ -96,6 +101,22 @@ struct Game {
     last: Instant,
     acc: f64,
     title_timer: f64,
+    /// Free orbit camera around the aircraft: (yaw, pitch, distance), relative to the heading.
+    orbit: Option<(f64, f64, f64)>,
+    dragging: bool,
+    cursor: Option<(f64, f64)>,
+}
+
+/// Orbit camera "yaw, pitch, distance" (radians relative to the aircraft heading, metres).
+fn orbit_camera(s: &Sim, field: &HeightField, aspect: f32, (yaw, pitch, dist): (f64, f64, f64)) -> (Mat4, DVec3) {
+    let fwd = s.ori * DVec3::X;
+    let heading = fwd.y.atan2(fwd.x);
+    let a = heading + yaw;
+    let mut eye = s.pos + DVec3::new(a.cos() * pitch.cos(), a.sin() * pitch.cos(), pitch.sin()) * dist;
+    eye.z = eye.z.max(field.height_at(eye.x, eye.y) + 1.0);
+    let view = DMat4::look_at_rh(DVec3::ZERO, s.pos - eye, DVec3::Z);
+    let proj = Mat4::perspective_rh(55f32.to_radians(), aspect, 0.3, 150_000.0);
+    (proj * view.as_mat4(), eye)
 }
 
 /// Keyboard stick: holds deflect at a fixed rate, release recenters.
@@ -159,7 +180,10 @@ impl Game {
 
         // Chase camera, rendered relative to the eye to keep precision far from the origin.
         let s = &self.sim;
-        let (vp, eye) = chase_camera(s, field, r.aspect());
+        let (vp, eye) = match self.orbit {
+            Some(o) => orbit_camera(s, field, r.aspect(), o),
+            None => chase_camera(s, field, r.aspect()),
+        };
         place(r, terrain, plane, s, eye);
         r.set_nodes(plane, &world::pose(&self.assets, &s.ct));
         let draws = match &self.objects_gpu {
@@ -214,7 +238,8 @@ impl ApplicationHandler for Game {
             return;
         }
         let window = Arc::new(el.create_window(winit::window::Window::default_attributes().with_title("OpenIL2")).expect("window"));
-        let r = Renderer::new(window);
+        let mut r = Renderer::new(window);
+        r.env = self.env;
         self.terrain = self.terrain_data.take().map(|d| r.upload_terrain(&d));
         self.plane = self.plane_data.take().map(|d| r.upload(&d));
         self.objects_gpu = self.objects.data.take().map(|d| r.upload(&d));
@@ -236,6 +261,8 @@ impl ApplicationHandler for Game {
                         self.keys.insert(code);
                         match code {
                             KeyCode::Escape => el.exit(),
+                            KeyCode::F1 => self.orbit = None,
+                            KeyCode::F2 => self.orbit = Some(self.orbit.unwrap_or((std::f64::consts::PI, 0.25, 25.0))),
                             KeyCode::KeyF => self.inputs.flaps = (self.inputs.flaps + 1.0 / 3.0).min(1.0),
                             KeyCode::KeyV => self.inputs.flaps = (self.inputs.flaps - 1.0 / 3.0).max(0.0),
                             KeyCode::KeyG => self.inputs.gear = if self.inputs.gear > 0.5 { 0.0 } else { 1.0 },
@@ -256,6 +283,25 @@ impl ApplicationHandler for Game {
                 }
             }
             WindowEvent::RedrawRequested => self.frame(),
+            WindowEvent::MouseInput { state, button: winit::event::MouseButton::Left, .. } => {
+                self.dragging = state == ElementState::Pressed;
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let (Some((x, y)), true, Some(o)) = (self.cursor, self.dragging, self.orbit.as_mut()) {
+                    o.0 -= (position.x - x) * 0.008;
+                    o.1 = (o.1 + (position.y - y) * 0.008).clamp(-1.5, 1.5);
+                }
+                self.cursor = Some((position.x, position.y));
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(o) = self.orbit.as_mut() {
+                    let steps = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y as f64,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
+                    };
+                    o.2 = (o.2 * 0.9f64.powf(steps)).clamp(3.0, 5000.0);
+                }
+            }
             _ => {}
         }
     }
@@ -439,6 +485,14 @@ fn main() {
         eprintln!("skipped classes: {:?}", map_objects.skipped);
     }
     eprintln!("map objects: {} placed in {:.1} s ({} classes skipped)", map_objects.len(), t0.elapsed().as_secs_f64(), map_objects.skipped.len());
+    let env = {
+        let ini = vfs.read(&args.map).map(|d| il2_formats::SectFile::parse(&d)).unwrap_or_default();
+        let wp = |k: &str| ini.section_ci("WORLDPOS").and_then(|s| s.get_ci(k)).and_then(|v| il2_formats::sectfile::atof(v.trim_start_matches(['=', ' '])));
+        let lat = wp("DECLIN").map_or(50.0, f64::from);
+        let (month, day) = mission.as_ref().and_then(|m| m.date).unwrap_or((wp("MONTH").map_or(6, |m| m as u32), 15));
+        let hours = args.time.or(mission.as_ref().map(|m| m.time_hours)).unwrap_or(12.0);
+        sky::environment(hours, sky::day_of_year(month, day), lat)
+    };
     let mut forest = forest::Forest::load(&vfs, &args.map, &terrain.types);
     let mut roads = roads::Roads::load(&vfs, &args.map, &terrain.types, terrain.water);
     let mut assets = assets;
@@ -483,6 +537,7 @@ fn main() {
         }
         let (w, h) = (1280, 720);
         let mut r = Renderer::headless(w, h);
+        r.env = env;
         let (terrain, plane) = (r.upload_terrain(&terrain), r.upload(&plane_mesh));
         let objects_gpu = map_objects.data.take().map(|d| r.upload(&d));
         let (mut vp, mut eye) = chase_camera(&sim, &field, w as f32 / h as f32);
@@ -546,6 +601,7 @@ fn main() {
         terrain: None,
         plane: None,
         objects: map_objects,
+        env,
         objects_gpu: None,
         instances: Vec::new(),
         forest,
@@ -558,6 +614,9 @@ fn main() {
         last: Instant::now(),
         acc: 0.0,
         title_timer: 0.0,
+        orbit: None,
+        dragging: false,
+        cursor: None,
     };
     let el = EventLoop::new().expect("event loop");
     el.run_app(&mut game).expect("run");

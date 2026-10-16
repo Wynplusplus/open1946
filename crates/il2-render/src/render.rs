@@ -61,6 +61,30 @@ struct Globals {
     view_proj: [[f32; 4]; 4],
     light_dir: [f32; 4],
     fog: [f32; 4],
+    zenith: [f32; 4],
+}
+
+/// Lighting and sky colours of the scene.
+#[derive(Clone, Copy, Debug)]
+pub struct Environment {
+    /// Unit vector towards the sun (world, z up).
+    pub sun: Vec3,
+    /// Brightness of lit surfaces, 0..1.
+    pub light: f32,
+    /// Horizon (and fog) colour.
+    pub horizon: [f32; 3],
+    pub zenith: [f32; 3],
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Environment {
+            sun: Vec3::new(0.4, 0.3, 1.0).normalize(),
+            light: 1.0,
+            horizon: [SKY[0] as f32, SKY[1] as f32, SKY[2] as f32],
+            zenith: [0.16, 0.30, 0.62],
+        }
+    }
 }
 
 /// Sky/fog colour (linear) and fog density per metre.
@@ -177,6 +201,7 @@ pub struct Renderer {
     /// Indexed by `instanced * 6 + BlendMode::index() * 2 + depth_offset`.
     pipelines: Vec<wgpu::RenderPipeline>,
     instances: wgpu::Buffer,
+    pub env: Environment,
     terrain_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     terrain_layout: wgpu::BindGroupLayout,
@@ -526,6 +551,7 @@ impl Renderer {
             depth,
             pipelines,
             instances,
+            env: Environment::default(),
             terrain_pipeline,
             sky_pipeline,
             terrain_layout,
@@ -760,11 +786,13 @@ impl Renderer {
         meshes: &[&GpuMesh],
         instanced: &[InstancedDraw],
     ) -> wgpu::CommandEncoder {
-        let light = Vec3::new(-0.4, -0.3, -1.0).normalize();
+        let e = &self.env;
+        let light = -e.sun;
         let g = Globals {
             view_proj: view_proj.to_cols_array_2d(),
-            light_dir: [light.x, light.y, light.z, 0.0],
-            fog: [SKY[0] as f32, SKY[1] as f32, SKY[2] as f32, FOG_DENSITY],
+            light_dir: [light.x, light.y, light.z, e.light],
+            fog: [e.horizon[0], e.horizon[1], e.horizon[2], FOG_DENSITY],
+            zenith: [e.zenith[0], e.zenith[1], e.zenith[2], 0.0],
         };
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -776,7 +804,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: SKY[0], g: SKY[1], b: SKY[2], a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: e.horizon[0] as f64, g: e.horizon[1] as f64, b: e.horizon[2] as f64, a: 1.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

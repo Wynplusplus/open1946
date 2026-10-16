@@ -3,6 +3,8 @@ struct Globals {
     view_proj: mat4x4<f32>,
     light_dir: vec4<f32>,
     fog: vec4<f32>,
+    // rgb: sky colour at the zenith
+    zenith: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -25,10 +27,10 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     // View direction from the inverse of the (camera-at-origin) view-projection.
     let inv = transpose_inverse_dir(i.ndc);
     let up = clamp(inv.z, -1.0, 1.0);
-    let zenith = vec3<f32>(0.16, 0.30, 0.62);
+    let zenith = globals.zenith.rgb;
     let t = pow(max(up, 0.0), 0.6);
     let sun = pow(max(dot(inv, -globals.light_dir.xyz), 0.0), 400.0);
-    return vec4<f32>(mix(globals.fog.rgb, zenith, t) + vec3<f32>(1.0, 0.95, 0.8) * sun, 1.0);
+    return vec4<f32>(mix(globals.fog.rgb, zenith, t) + vec3<f32>(1.0, 0.95, 0.8) * sun * step(-0.05, -globals.light_dir.z), 1.0);
 }
 
 // Direction through a screen point for a view-projection whose eye is at the origin.
