@@ -33,6 +33,15 @@ pub struct AircraftClass {
     pub meshes: Vec<String>,
 }
 
+/// Weapon slots of an aircraft: per slot a trigger group and a hook, and named loadouts that put a
+/// weapon class and ammunition count (or nothing) in each slot.
+#[derive(Clone, Debug, Default)]
+pub struct AircraftWeapons {
+    pub triggers: Vec<i32>,
+    pub hooks: Vec<String>,
+    pub loadouts: Vec<(String, Vec<Option<(String, i32)>>)>,
+}
+
 /// Reads runtime classes from the install, only to look up asset names (`docs/formats/mission.md`).
 pub struct Classes<'a> {
     vfs: &'a Vfs,
@@ -66,6 +75,88 @@ impl<'a> Classes<'a> {
             out.push(c);
         }
         out
+    }
+
+    /// A class with its superclasses, plus (transitively) every class their code refers to, as far as
+    /// they are stored in the install; the requested class comes first.
+    fn pool(&self, full: &str) -> Vec<classfile::ClassFile> {
+        let mut pool = self.chain(full);
+        let mut i = 0;
+        while i < pool.len() && pool.len() < 64 {
+            let refs: Vec<String> = pool[i]
+                .consts
+                .iter()
+                .filter_map(|c| match c {
+                    classfile::Const::Class(n) => pool[i].utf8(*n).map(|s| s.replace('/', ".")),
+                    _ => None,
+                })
+                .filter(|n| n.starts_with("com.maddox"))
+                .collect();
+            for r in refs {
+                if !pool.iter().any(|c| c.this_class.replace('/', ".") == r) {
+                    for c in self.chain(&r) {
+                        if !pool.iter().any(|p| p.this_class == c.this_class) {
+                            pool.push(c);
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        pool
+    }
+
+    /// An aircraft class's weapon slots and loadouts, from its static initializer
+    /// (`docs/behavior/weapons.md`).
+    pub fn aircraft_weapons(&self, class: &str) -> Option<AircraftWeapons> {
+        let full = if class.starts_with("com.") { class.to_owned() } else { format!("com.maddox.il2.objects.{class}") };
+        let pool = self.pool(&full);
+        if pool.is_empty() {
+            return None;
+        }
+        let calls = anim::record_clinit(&pool, &["weaponTriggersRegister", "weaponHooksRegister", "weaponsRegister"]);
+        let mut w = AircraftWeapons::default();
+        for (name, args) in calls {
+            match name.as_str() {
+                "weaponTriggersRegister" => {
+                    if let Some(anim::Value::List(l)) = args.get(1) {
+                        w.triggers = l.iter().map(|v| if let anim::Value::Num(n) = v { *n as i32 } else { 0 }).collect();
+                    }
+                }
+                "weaponHooksRegister" => {
+                    if let Some(anim::Value::List(l)) = args.get(1) {
+                        w.hooks = l.iter().map(|v| if let anim::Value::Str(s) = v { s.clone() } else { String::new() }).collect();
+                    }
+                }
+                _ => {
+                    let (Some(anim::Value::Str(lname)), Some(anim::Value::List(l))) = (args.get(1), args.get(2)) else { continue };
+                    let slots = l
+                        .iter()
+                        .map(|v| match v {
+                            anim::Value::Str(s) => {
+                                let mut t = s.split_whitespace();
+                                let gun = t.next()?.to_owned();
+                                let count = t.next().and_then(|c| c.parse().ok()).unwrap_or(0);
+                                Some((gun, count))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    w.loadouts.push((lname.clone(), slots));
+                }
+            }
+        }
+        Some(w)
+    }
+
+    /// Evaluates a weapon class's `createProperties()` (gun and bullet data), e.g. `MGunMG131si`.
+    pub fn gun_properties(&self, weapon: &str) -> Result<anim::Value, String> {
+        let full = format!("com.maddox.il2.objects.weapons.{weapon}");
+        let pool = self.pool(&full);
+        if pool.is_empty() {
+            return Err(format!("{weapon}: class not found"));
+        }
+        anim::evaluate(&pool, "createProperties", "()Lcom/maddox/il2/engine/GunProperties;")
     }
 
     /// Short names of the class and its superclasses, most derived first (`BF_109G6`, `BF_109`, …).

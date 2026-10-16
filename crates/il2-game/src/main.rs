@@ -1,9 +1,12 @@
+mod effects;
 mod forest;
 mod joystick;
 mod mission_objects;
 mod objects;
 mod roads;
 mod sky;
+mod view;
+mod weapons;
 mod world;
 
 use clap::Parser;
@@ -12,7 +15,7 @@ use gilrs::{Axis, Gilrs};
 use glam::{DMat4, DVec3, Mat4};
 use il2_fm::{Inputs, Sim, TICK};
 use il2_formats::map::HeightField;
-use il2_render::{GpuMesh, InstanceRaw, Renderer};
+use il2_render::{GpuMesh, Renderer};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,6 +65,9 @@ struct Args {
     /// Screenshot: orbit camera "yaw,pitch,distance" (degrees relative to the aircraft heading, metres).
     #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
     orbit: Option<Vec<f64>>,
+    /// Screenshot: hold the triggers (all guns) during the simulated seconds.
+    #[arg(long)]
+    fire: bool,
     /// Screenshot: hold these inputs (aileron, elevator, rudder, flaps, gear).
     #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
     hold: Option<Vec<f64>>,
@@ -84,6 +90,30 @@ fn place(r: &Renderer, terrain: &il2_render::GpuTerrain, plane: &GpuMesh, s: &Si
     r.set_transform(plane, DMat4::from_rotation_translation(s.ori, s.pos - eye).as_mat4());
 }
 
+/// The player's guns and the bullets in flight.
+struct Combat {
+    guns: Vec<weapons::Gun>,
+    bullets: Vec<weapons::Bullet>,
+    rng: weapons::Rng,
+    hits: Vec<(weapons::Bullet, weapons::Hit)>,
+}
+
+impl Combat {
+    fn new(guns: Vec<weapons::Gun>) -> Self {
+        Combat { guns, bullets: Vec::new(), rng: weapons::Rng::new(0x5EED), hits: Vec::new() }
+    }
+
+    fn step(&mut self, sim: &mut Sim, triggers: &[bool; 4], field: &HeightField) {
+        let recoil = weapons::fire(&mut self.guns, triggers, sim.pos, sim.ori, sim.vel, TICK, &mut self.rng, 0, &mut self.bullets);
+        if recoil != DVec3::ZERO {
+            // Gun recoil acts on the aircraft.
+            sim.vel += sim.ori * recoil / sim.mass();
+        }
+        self.hits.clear();
+        weapons::advance(&mut self.bullets, TICK, field, &mut self.hits);
+    }
+}
+
 struct Game {
     sim: Sim,
     assets: world::AircraftAssets,
@@ -93,14 +123,9 @@ struct Game {
     renderer: Option<Renderer>,
     terrain: Option<il2_render::GpuTerrain>,
     plane: Option<GpuMesh>,
-    objects: objects::MapObjects,
+    view: view::WorldView,
     env: il2_render::Environment,
-    objects_gpu: Option<GpuMesh>,
-    instances: Vec<InstanceRaw>,
-    forest: Option<forest::Forest>,
-    forest_gpu: Option<GpuMesh>,
-    roads: Option<roads::Roads>,
-    roads_gpu: Option<GpuMesh>,
+    combat: Combat,
     keys: HashSet<KeyCode>,
     #[cfg(feature = "gamepad")]
     gilrs: Option<Gilrs>,
@@ -200,8 +225,10 @@ impl Game {
         self.acc += dt;
         let field = &self.field;
         let ground = |x: f64, y: f64| field.height_at(x, y);
+        let triggers = [self.keys.contains(&KeyCode::Space), self.keys.contains(&KeyCode::Space) || self.keys.contains(&KeyCode::Enter), false, false];
         while self.acc >= TICK {
             self.sim.tick(&self.inputs, &ground);
+            self.combat.step(&mut self.sim, &triggers, field);
             self.acc -= TICK;
         }
         let (Some(r), Some(terrain), Some(plane)) = (self.renderer.as_mut(), &self.terrain, &self.plane) else { return };
@@ -214,31 +241,7 @@ impl Game {
         };
         place(r, terrain, plane, s, eye);
         r.set_nodes(plane, &world::pose(&self.assets, &s.ct));
-        let draws = match &self.objects_gpu {
-            Some(m) => self.objects.gather(m, eye, &mut self.instances),
-            None => Vec::new(),
-        };
-        r.set_instances(&self.instances);
-        if let Some(f) = self.forest.as_mut() {
-            if let Some(d) = f.update(field, eye) {
-                self.forest_gpu = Some(r.upload(&d));
-            }
-        }
-        if let Some(f) = self.roads.as_mut() {
-            if let Some(d) = f.update(field, eye) {
-                self.roads_gpu = Some(r.upload(&d));
-            }
-        }
-        let mut meshes = vec![plane];
-        if let (Some(f), Some(g)) = (&self.roads, &self.roads_gpu) {
-            r.set_transform(g, Mat4::from_translation((f.origin - eye).as_vec3()));
-            meshes.push(g);
-        }
-        if let (Some(f), Some(g)) = (&self.forest, &self.forest_gpu) {
-            r.set_transform(g, Mat4::from_translation((f.origin - eye).as_vec3()));
-            meshes.push(g);
-        }
-        r.render(vp, 22.0, Some(terrain), &meshes, &draws);
+        self.view.draw(r, field, terrain, vp, eye, &[plane], &self.combat.bullets, false);
 
         for (i, e) in self.sim.engines.iter_mut().enumerate() {
             for ev in e.events.drain(..) {
@@ -286,7 +289,7 @@ impl ApplicationHandler for Game {
         r.env = self.env;
         self.terrain = self.terrain_data.take().map(|d| r.upload_terrain(&d));
         self.plane = self.plane_data.take().map(|d| r.upload(&d));
-        self.objects_gpu = self.objects.data.take().map(|d| r.upload(&d));
+        self.view.upload(&r);
         self.renderer = Some(r);
         self.last = Instant::now();
     }
@@ -565,7 +568,7 @@ fn main() {
         t
     };
     let t0 = Instant::now();
-    let mut map_objects = {
+    let map_objects = {
         let statics_ini = objects::statics_ini(&vfs).unwrap_or_else(|e| fail(e));
         let mut b = objects::Builder::new(&vfs, &field, &objects::season(&vfs, &args.map));
         b.add_map(&vfs, &args.map, &statics_ini).unwrap_or_else(|e| fail(e));
@@ -586,8 +589,23 @@ fn main() {
         let hours = args.time.or(mission.as_ref().map(|m| m.time_hours)).unwrap_or(12.0);
         sky::environment(hours, sky::day_of_year(month, day), lat)
     };
-    let mut forest = forest::Forest::load(&vfs, &args.map, &terrain.types);
-    let mut roads = roads::Roads::load(&vfs, &args.map, &terrain.types, terrain.water);
+    let forest = forest::Forest::load(&vfs, &args.map, &terrain.types);
+    let roads = roads::Roads::load(&vfs, &args.map, &terrain.types, terrain.water);
+    // Guns of the chosen loadout and their tracers.
+    let guns = {
+        let classes = il2_data::Classes::new(&vfs, &fms.keys);
+        let loadout = mission.as_ref().and_then(|m| m.player()).map_or("default".to_owned(), |w| w.weapons.clone());
+        let mut armoury = weapons::Armoury::default();
+        let w = classes.aircraft_weapons(&args.aircraft).unwrap_or_default();
+        let guns = weapons::mount(&mut armoury, &classes, &w, &loadout, &assets.hook_frames);
+        eprintln!(
+            "loadout {loadout}: {}",
+            guns.iter().map(|g| format!("{} ({})", g.spec.name, g.ammo)).collect::<Vec<_>>().join(", ")
+        );
+        guns
+    };
+    let tracers = effects::Tracers::load(&vfs, guns.iter().flat_map(|g| g.spec.bullets.iter().filter_map(|b| b.trace_mesh.as_deref())));
+    let mut view = view::WorldView::new(map_objects, forest, roads, Some(tracers));
     let mut assets = assets;
     let plane_mesh = std::mem::take(&mut assets.mesh);
     let (h, pitch) = assets.parked;
@@ -625,14 +643,17 @@ fn main() {
             sim.ct = inputs;
         }
         let ground = |x: f64, y: f64| field.height_at(x, y);
+        let mut combat = Combat::new(guns);
+        let triggers = [args.fire, args.fire, false, false];
         for _ in 0..(args.seconds / TICK) as usize {
             sim.tick(&inputs, &ground);
+            combat.step(&mut sim, &triggers, &field);
         }
         let (w, h) = (1280, 720);
         let mut r = Renderer::headless(w, h);
         r.env = env;
         let (terrain, plane) = (r.upload_terrain(&terrain), r.upload(&plane_mesh));
-        let objects_gpu = map_objects.data.take().map(|d| r.upload(&d));
+        view.upload(&r);
         let (mut vp, mut eye) = chase_camera(&sim, &field, w as f32 / h as f32);
         if let Some(o) = &args.orbit {
             let fwd = sim.ori * DVec3::X;
@@ -654,32 +675,8 @@ fn main() {
             eprintln!("ct: {:?}", sim.ct);
         }
         r.set_nodes(&plane, &posed);
-        let mut instances = Vec::new();
-        let t0 = Instant::now();
-        let draws = match &objects_gpu {
-            Some(m) => map_objects.gather(m, eye, &mut instances),
-            None => Vec::new(),
-        };
-        eprintln!(
-            "drawing {} object instances in {} draws (gathered in {:.2} ms, radius {:.0} m)",
-            instances.len(),
-            draws.len(),
-            t0.elapsed().as_secs_f64() * 1e3,
-            map_objects.max_dist()
-        );
-        r.set_instances(&instances);
-        let mut meshes = vec![&plane];
-        let roads_gpu = roads.as_mut().and_then(|f| f.update(&field, eye)).map(|d| r.upload(&d));
-        if let (Some(f), Some(g)) = (&roads, &roads_gpu) {
-            r.set_transform(g, Mat4::from_translation((f.origin - eye).as_vec3()));
-            meshes.push(g);
-        }
-        let forest_gpu = forest.as_mut().and_then(|f| f.update(&field, eye)).map(|d| r.upload(&d));
-        if let (Some(f), Some(g)) = (&forest, &forest_gpu) {
-            r.set_transform(g, Mat4::from_translation((f.origin - eye).as_vec3()));
-            meshes.push(g);
-        }
-        let px = r.screenshot(vp, 22.0, Some(&terrain), &meshes, &draws);
+        eprintln!("{} bullets in flight", combat.bullets.len());
+        let px = view.draw(&mut r, &field, &terrain, vp, eye, &[&plane], &combat.bullets, true).unwrap_or_default();
         image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).unwrap_or_else(|e| fail(e));
         return;
     }
@@ -693,14 +690,9 @@ fn main() {
         renderer: None,
         terrain: None,
         plane: None,
-        objects: map_objects,
+        view,
         env,
-        objects_gpu: None,
-        instances: Vec::new(),
-        forest,
-        forest_gpu: None,
-        roads,
-        roads_gpu: None,
+        combat: Combat::new(guns),
         keys: HashSet::new(),
         #[cfg(feature = "gamepad")]
         gilrs: Gilrs::new().ok(),

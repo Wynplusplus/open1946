@@ -370,11 +370,6 @@ impl MapObjects {
         Ok(b.finish())
     }
 
-    /// Distance beyond which no object is drawn.
-    pub fn max_dist(&self) -> f32 {
-        self.max_dist
-    }
-
     pub fn len(&self) -> usize {
         self.objects.len()
     }

@@ -9,6 +9,10 @@ use il2_render::MeshData;
 use il2_vfs::Vfs;
 
 pub struct AircraftAssets {
+    /// The model's hierarchy file.
+    pub him: String,
+    /// Hook frames in body coordinates (rest pose): gun muzzles, wheel and airframe points, …
+    pub hook_frames: Vec<(String, glam::Mat4)>,
     pub mesh: MeshData,
     pub rig: il2_render::scene::Rig,
     pub tracks: Vec<il2_data::anim::Track>,
@@ -96,6 +100,8 @@ pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Re
     let rig = loader.hier_rig(&him)?;
     // Wheel hooks are taken with the gear extended (the meshes are modelled retracted).
     let mut assets_for_pose = AircraftAssets {
+        him: him.clone(),
+        hook_frames: Vec::new(),
         mesh: MeshData::default(),
         rig: rig.clone(),
         tracks: tracks.clone(),
@@ -155,7 +161,8 @@ pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Re
     };
     let mass = fm.mass_empty + fm.fuel_max + fm.nitro_max;
     let parked = if use_hooks { land_pose(&fm.gear, mass) } else { None }.unwrap_or((num("H", 2.0), num("Pitch", 10.0)));
-    Ok(AircraftAssets { mesh, rig, tracks, fm, parked })
+    let hook_frames = loader.hier_hook_frames(&him, &rest).unwrap_or_default();
+    Ok(AircraftAssets { him, hook_frames, mesh, rig, tracks, fm, parked })
 }
 
 /// Node transforms for the current control positions (`docs/behavior/animation.md`).

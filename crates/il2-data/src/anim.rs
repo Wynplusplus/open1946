@@ -94,6 +94,8 @@ enum V {
     Arr(usize),
     /// Array of references (e.g. `float[][]`), in `Machine::oarrays`.
     OArr(usize),
+    /// An object on the heap (`Machine::objects`).
+    Obj(usize),
     Null,
     /// Second slot of a long/double local.
     Top,
@@ -121,6 +123,8 @@ struct Machine<'a> {
     chain: &'a [ClassFile],
     arrays: Vec<Vec<f32>>,
     oarrays: Vec<Vec<V>>,
+    /// Heap objects: class and fields.
+    objects: Vec<(String, HashMap<String, V>)>,
     out: BTreeMap<String, NodeState>,
     budget: usize,
     /// Static fields (`class.name`), filled by the classes' static initializers.
@@ -130,6 +134,9 @@ struct Machine<'a> {
     clinit_done: HashSet<String>,
     /// Inside a static initializer: unknown calls yield defaults instead of aborting.
     lenient: bool,
+    /// Static methods whose calls are recorded (name and arguments) instead of run.
+    record: &'static [&'static str],
+    recorded: Vec<(String, Vec<Value>)>,
 }
 
 /// Zero value of a field or return descriptor.
@@ -180,8 +187,56 @@ fn desc_args(desc: &str) -> Vec<char> {
 impl<'a> Machine<'a> {
     /// Finds a method along the chain, starting at class `from` (or the most derived when `None`).
     fn resolve(&self, from: Option<&str>, name: &str, desc: &str) -> Option<(&'a ClassFile, &'a Method)> {
-        let start = from.map_or(0, |c| self.chain.iter().position(|cf| cf.this_class == c).unwrap_or(self.chain.len()));
-        self.chain[start.min(self.chain.len())..].iter().find_map(|cf| cf.method(name, desc).map(|m| (cf, m)))
+        let start = from.or_else(|| self.chain.first().map(|c| c.this_class.as_str()))?;
+        self.resolve_class(start, name, desc)
+    }
+
+    /// Finds a method in `class` or its superclasses, among the loaded classes.
+    fn resolve_class(&self, class: &str, name: &str, desc: &str) -> Option<(&'a ClassFile, &'a Method)> {
+        let chain: &'a [ClassFile] = self.chain;
+        let mut cur = Some(class.to_owned());
+        let mut guard = 0;
+        while let Some(c) = cur.take() {
+            guard += 1;
+            let cf = chain.iter().find(|cf| cf.this_class == c)?;
+            if let Some(m) = cf.method(name, desc) {
+                return Some((cf, m));
+            }
+            if guard > 32 {
+                return None;
+            }
+            cur = cf.super_class.clone();
+        }
+        None
+    }
+
+    fn class_of(&self, v: &V) -> Option<String> {
+        match v {
+            V::Obj(o) => Some(self.objects[*o].0.clone()),
+            V::This => self.chain.first().map(|c| c.this_class.clone()),
+            _ => None,
+        }
+    }
+
+    /// Converts a value to a plain tree (for property objects).
+    fn export(&self, v: &V, depth: usize) -> Value {
+        if depth > 8 {
+            return Value::Null;
+        }
+        match v {
+            V::I(i) => Value::Num(*i as f64),
+            V::L(l) => Value::Num(*l as f64),
+            V::F(f) => Value::Num(*f as f64),
+            V::D(d) => Value::Num(*d),
+            V::Str(s) => Value::Str(s.clone()),
+            V::Arr(a) => Value::List(self.arrays[*a].iter().map(|x| Value::Num(*x as f64)).collect()),
+            V::OArr(a) => Value::List(self.oarrays[*a].iter().map(|x| self.export(x, depth + 1)).collect()),
+            V::Obj(o) => Value::Obj(
+                self.objects[*o].0.clone(),
+                self.objects[*o].1.iter().map(|(k, x)| (k.clone(), self.export(x, depth + 1))).collect(),
+            ),
+            _ => Value::Null,
+        }
     }
 
     fn call(&mut self, cf: &'a ClassFile, m: &'a Method, args: Vec<V>, depth: usize) -> Result<Option<V>, Abort> {
@@ -459,19 +514,26 @@ impl<'a> Machine<'a> {
                 }
                 0xB4 => {
                     let (_, name, desc) = cf.member(u16_at(pc + 1)?).ok_or(Abort)?;
-                    if pop!() != V::This {
-                        return Err(why(format!("getfield {name} of another object")));
-                    }
-                    st.push(self.fields.get(name).cloned().unwrap_or_else(|| default_of(desc)));
+                    let v = match pop!() {
+                        V::This => self.fields.get(name).cloned(),
+                        V::Obj(o) => self.objects[o].1.get(name).cloned(),
+                        _ => return Err(why(format!("getfield {name} of another object"))),
+                    };
+                    st.push(v.unwrap_or_else(|| default_of(desc)));
                     next = pc + 3;
                 }
                 0xB5 => {
                     let (_, name, _) = cf.member(u16_at(pc + 1)?).ok_or(Abort)?;
                     let v = pop!();
-                    if pop!() != V::This {
-                        return Err(why(format!("putfield {name} of another object")));
+                    match pop!() {
+                        V::This => {
+                            self.fields.insert(name.to_owned(), v);
+                        }
+                        V::Obj(o) => {
+                            self.objects[o].1.insert(name.to_owned(), v);
+                        }
+                        _ => return Err(why(format!("putfield {name} of another object"))),
                     }
-                    self.fields.insert(name.to_owned(), v);
                     next = pc + 3;
                 }
                 0xBC => {
@@ -515,6 +577,11 @@ impl<'a> Machine<'a> {
                     let V::Arr(a) = pop!() else { return Err(Abort) };
                     *self.arrays[a].get_mut(i as usize).ok_or(Abort)? = v as f32;
                 }
+                // checkcast: the reference stays.
+                0xC0 => next = pc + 3,
+                0xC2 | 0xC3 => {
+                    pop!();
+                }
                 0x84 => {
                     let i = u8_at(pc + 1)? as usize;
                     let c = u8_at(pc + 2)? as i8 as i32;
@@ -522,8 +589,10 @@ impl<'a> Machine<'a> {
                     locals[i] = V::I(v.wrapping_add(c));
                     next = pc + 3;
                 }
-                0xBB if self.lenient => {
-                    st.push(V::Null);
+                0xBB => {
+                    let class = cf.class_name(u16_at(pc + 1)?).ok_or(Abort)?.to_owned();
+                    self.objects.push((class, HashMap::new()));
+                    st.push(V::Obj(self.objects.len() - 1));
                     next = pc + 3;
                 }
                 0xC1 => {
@@ -580,6 +649,11 @@ impl<'a> Machine<'a> {
             };
             return Ok(Some(r));
         }
+        if self.record.contains(&name) {
+            let vals = args.iter().map(|a| self.export(a, 0)).collect();
+            self.recorded.push((name.to_owned(), vals));
+            return Ok(None);
+        }
         if name == "cvt" && desc == "(FFFFF)F" {
             let x: Vec<f32> = args.iter().map(f).collect::<Result<_, _>>()?;
             let v = x[0].max(x[1]).min(x[2]);
@@ -604,8 +678,11 @@ impl<'a> Machine<'a> {
         let Some(m) = cf.method("<clinit>", "()V") else { return };
         let (was, budget) = (self.lenient, self.budget);
         self.lenient = true;
-        self.budget = 200_000;
-        let _ = self.call(cf, m, Vec::new(), depth + 1);
+        self.budget = 2_000_000;
+        let r = self.call(cf, m, Vec::new(), depth + 1);
+        if r.is_err() && std::env::var_os("IL2_TRACE_CLINIT").is_some() {
+            eprintln!("clinit {class}: {}", last_abort());
+        }
         self.lenient = was;
         self.budget = budget;
     }
@@ -663,6 +740,24 @@ impl<'a> Machine<'a> {
                 full.extend(args);
                 self.call(cf, m, full, depth + 1)
             }
+            V::Obj(_) => {
+                // Constructors and `super.` calls resolve from the referenced class, others from the object's.
+                let start = if special { class.to_owned() } else { self.class_of(&recv).unwrap_or_else(|| class.to_owned()) };
+                match self.resolve_class(&start, name, desc) {
+                    Some((cf, m)) => {
+                        let mut full = vec![recv];
+                        full.extend(args);
+                        self.call(cf, m, full, depth + 1)
+                    }
+                    // Unknown library classes (java/lang/Object, vectors): constructors do nothing.
+                    None if name == "<init>" => Ok(None),
+                    None if self.lenient => {
+                        let ret = &desc[desc.find(')').map_or(desc.len(), |i| i + 1)..];
+                        Ok((ret != "V").then(|| default_of(ret)))
+                    }
+                    None => Err(why(format!("call {start}.{name}{desc}"))),
+                }
+            }
             _ if self.lenient => {
                 let ret = &desc[desc.find(')').map_or(desc.len(), |i| i + 1)..];
                 Ok((ret != "V").then(|| default_of(ret)))
@@ -670,6 +765,92 @@ impl<'a> Machine<'a> {
             _ => Err(why(format!("call {class}.{name}{desc} on {recv:?}"))),
         }
     }
+}
+
+/// A plain value produced by evaluating property code.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value {
+    Null,
+    Num(f64),
+    Str(String),
+    List(Vec<Value>),
+    Obj(String, BTreeMap<String, Value>),
+}
+
+impl Value {
+    pub fn get(&self, field: &str) -> Option<&Value> {
+        match self {
+            Value::Obj(_, f) => f.get(field),
+            _ => None,
+        }
+    }
+    pub fn num(&self, field: &str) -> Option<f64> {
+        match self.get(field)? {
+            Value::Num(n) => Some(*n),
+            _ => None,
+        }
+    }
+    pub fn str(&self, field: &str) -> Option<&str> {
+        match self.get(field)? {
+            Value::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+    pub fn list(&self, field: &str) -> &[Value] {
+        match self.get(field) {
+            Some(Value::List(l)) => l,
+            _ => &[],
+        }
+    }
+}
+
+/// Runs the instance method `name desc` (no arguments) of `classes[0]` and returns its result.
+/// `classes` holds the class, its superclasses and every other class the code may create.
+pub fn evaluate(classes: &[ClassFile], name: &str, desc: &str) -> Result<Value, String> {
+    let mut m = Machine {
+        chain: classes,
+        arrays: vec![vec![0.0; 3], vec![0.0; 3]],
+        oarrays: Vec::new(),
+        objects: Vec::new(),
+        out: BTreeMap::new(),
+        budget: 500_000,
+        statics: HashMap::new(),
+        fields: HashMap::new(),
+        clinit_done: HashSet::new(),
+        lenient: false,
+        record: &[],
+        recorded: Vec::new(),
+    };
+    let (cf, meth) = m.resolve(None, name, desc).ok_or_else(|| format!("no method {name}{desc}"))?;
+    match m.call(cf, meth, vec![V::This], 0) {
+        Ok(Some(v)) => Ok(m.export(&v, 0)),
+        Ok(None) => Ok(Value::Null),
+        Err(_) => Err(last_abort()),
+    }
+}
+
+/// Runs the static initializer of `classes[0]` leniently and returns the recorded calls to the
+/// static methods named in `record`.
+pub fn record_clinit(classes: &[ClassFile], record: &'static [&'static str]) -> Vec<(String, Vec<Value>)> {
+    let mut m = Machine {
+        chain: classes,
+        arrays: vec![vec![0.0; 3], vec![0.0; 3]],
+        oarrays: Vec::new(),
+        objects: Vec::new(),
+        out: BTreeMap::new(),
+        budget: 2_000_000,
+        statics: HashMap::new(),
+        fields: HashMap::new(),
+        clinit_done: HashSet::new(),
+        lenient: true,
+        record,
+        recorded: Vec::new(),
+    };
+    if let Some(c) = classes.first() {
+        let name = c.this_class.clone();
+        m.run_clinit(&name, 0);
+    }
+    m.recorded
 }
 
 /// Samples one channel of an aircraft; `None` if its methods cannot be evaluated.
@@ -681,12 +862,15 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
         chain,
         arrays: vec![vec![0.0; 3], vec![0.0; 3]],
         oarrays: Vec::new(),
+        objects: Vec::new(),
         out: BTreeMap::new(),
         budget: 0,
         statics: HashMap::new(),
         fields: HashMap::new(),
         clinit_done: HashSet::new(),
         lenient: false,
+        record: &[],
+        recorded: Vec::new(),
     };
     let mut frames: Vec<BTreeMap<String, NodeState>> = Vec::new();
     let virtual_name = match ch {

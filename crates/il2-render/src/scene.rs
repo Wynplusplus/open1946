@@ -217,6 +217,24 @@ impl<'a> Loader<'a> {
         Ok(out)
     }
 
+    /// Hook frames (object coordinates, nodes posed by `world`): origin and the hook's local axes.
+    pub fn hier_hook_frames(&self, him_path: &str, world: &[Mat4]) -> Result<Vec<(String, Mat4)>, String> {
+        let data = self.vfs.read(him_path).map_err(|e| e.to_string())?;
+        let hier = Hier::parse(&data).map_err(|e| e.to_string())?;
+        let dir = dir_of(him_path).to_owned();
+        let mut out = Vec::new();
+        for (i, n) in hier.nodes.iter().enumerate() {
+            let Some(mesh) = &n.mesh else { continue };
+            let Ok(d) = self.vfs.read(&format!("{dir}{mesh}.msh")) else { continue };
+            let Ok(m) = Mesh::parse(&d) else { continue };
+            let node = world.get(i).copied().unwrap_or(Mat4::IDENTITY);
+            for h in &m.hooks {
+                out.push((h.name.clone(), node * attaching_to_mat4(&h.matrix)));
+            }
+        }
+        Ok(out)
+    }
+
     /// The node tree of a hierarchical mesh.
     pub fn hier_rig(&self, him_path: &str) -> Result<Rig, String> {
         let data = self.vfs.read(him_path).map_err(|e| e.to_string())?;

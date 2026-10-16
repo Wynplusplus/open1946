@@ -18,6 +18,8 @@ pub struct Wing {
     pub class: String,
     pub planes: u32,
     pub fuel_percent: f64,
+    /// Loadout name (`weapons`), e.g. `default`.
+    pub weapons: String,
     pub waypoints: Vec<Waypoint>,
 }
 
@@ -93,6 +95,7 @@ impl Mission {
                     class: s.get_ci("Class")?.trim().to_owned(),
                     planes: num("Planes", 1.0) as u32,
                     fuel_percent: num("Fuel", 100.0),
+                    weapons: s.get_ci("weapons").map_or("default".to_owned(), |w| w.trim().to_owned()),
                     waypoints,
                     name,
                 })
