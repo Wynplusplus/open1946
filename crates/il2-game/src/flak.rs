@@ -106,9 +106,13 @@ pub fn step(
             .iter()
             .filter(|a| a.2 != b.army && a.2 != 0)
             .filter(|a| {
-                (a.0 - b.pos).length() < b.reach
-                    && a.0.z - b.pos.z < b.ceiling
-                    && a.0.z > b.pos.z + 20.0
+                let rel = a.0 - b.pos;
+                // Up in the sky: more than 50 m above the gun and 8° over the horizon, so the
+                // rounds don't sweep the ground around it.
+                rel.length() < b.reach
+                    && rel.z < b.ceiling
+                    && rel.z > 50.0
+                    && rel.z > rel.truncate().length() * 0.14
             })
             .min_by(|x, y| (x.0 - b.pos).length().total_cmp(&(y.0 - b.pos).length()));
         let Some(&(tp, tv, _)) = target else {

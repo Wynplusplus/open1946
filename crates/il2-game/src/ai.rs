@@ -61,6 +61,7 @@ pub struct AiPilot {
     pub landing_runway: Option<(DVec3, f64)>,
     on_final: bool,
     ev_i: f64,
+    hdg_i: f64,
 }
 
 impl AiPilot {
@@ -86,6 +87,7 @@ impl AiPilot {
             landing_runway: None,
             on_final: false,
             ev_i: 0.0,
+            hdg_i: 0.0,
         }
     }
 
@@ -428,7 +430,13 @@ impl AiPilot {
         // Ailerons turn towards the waypoint.
         let max_bank = (((speed - vmin) * 3.6 + s.vel.z * 40.0) * 0.25).clamp(15.0, 65.0);
         let err = wrap(azimut(s) - self.stab_dir).clamp(-max_bank, max_bank);
-        let ail = (-0.01 * (err + wrap(kren) + 3.0 * wv.x + 0.5 * aw.x)).clamp(-1.0, 1.0);
+        // OpenIL2: a slow integral of small heading errors removes the standing offset the bank
+        // needed against engine torque would leave.
+        if err.abs() < 10.0 {
+            self.hdg_i = (self.hdg_i + 0.5 * err * dt).clamp(-6.0, 6.0);
+        }
+        let ail =
+            (-0.01 * (err + self.hdg_i + wrap(kren) + 3.0 * wv.x + 0.5 * aw.x)).clamp(-1.0, 1.0);
         let local = s.ori.inverse() * (wp - s.pos);
         self.ct.aileron = if local.y.abs() < 25.0 && local.x.abs() < 150.0 {
             -0.01 * kren

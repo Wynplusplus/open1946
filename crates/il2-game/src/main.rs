@@ -72,6 +72,10 @@ struct Args {
     /// Leave out the mission's AI aircraft.
     #[arg(long)]
     no_ai: bool,
+    /// AI level bombing test: `class,loadout`; the bomber starts 8 km before a target on flat
+    /// ground at 1500 m and attacks it.
+    #[arg(long, value_delimiter = ',')]
+    bomb_test: Option<Vec<String>>,
     /// Fly the aircraft by the AI around a square of waypoints and print its track.
     #[arg(long)]
     ai_test: bool,
@@ -236,6 +240,28 @@ fn aircraft_blasts(
             }
         }
     }
+}
+
+/// Where the mission's named ground targets are now: columns (their lead unit still alive) and
+/// stationary objects.
+fn target_names(
+    m: Option<&il2_formats::mission::Mission>,
+    g: Option<&ground::Ground>,
+) -> std::collections::HashMap<String, DVec3> {
+    let mut out = std::collections::HashMap::new();
+    if let Some(m) = m {
+        for s in &m.stationary {
+            out.insert(s.name.clone(), DVec3::new(s.x, s.y, 0.0));
+        }
+    }
+    if let Some(g) = g {
+        for c in &g.columns {
+            if let Some(u) = c.units.iter().find(|u| u.alive) {
+                out.insert(c.name.clone(), u.pos);
+            }
+        }
+    }
+    out
 }
 
 /// Gunfire and blasts on ground units; destroyed ones burst into flames.
@@ -463,6 +489,7 @@ struct Game {
     ground: Option<ground::Ground>,
     flak: Vec<flak::Battery>,
     player_army: u8,
+    mission: Option<il2_formats::mission::Mission>,
     assets: world::AircraftAssets,
     field: HeightField,
     terrain_data: Option<il2_render::TerrainData>,
@@ -730,12 +757,15 @@ impl Game {
                     t.player_army,
                     !self.sim.structure.destroyed,
                 );
+                let names = target_names(self.mission.as_ref(), self.ground.as_ref());
                 t.step(
                     field,
                     TICK,
                     pl,
                     &mut self.combat.rng,
                     &mut self.combat.bullets,
+                    &mut self.combat.projectiles,
+                    &|n| names.get(n).copied(),
                 );
             }
             self.acc -= TICK;
@@ -1226,6 +1256,18 @@ fn main() {
         survey(&vfs, &fms);
         return;
     }
+    if let Some(bt) = &args.bomb_test {
+        print!(
+            "{}",
+            bomb_test(
+                &vfs,
+                &fms,
+                &bt[0],
+                bt.get(1).map_or("default", |s| s.as_str())
+            )
+        );
+        return;
+    }
     if args.ai_test {
         let assets = world::load_aircraft_with(&vfs, &fms, &args.aircraft, false)
             .unwrap_or_else(|e| fail(e));
@@ -1549,7 +1591,16 @@ fn main() {
             }
             if let Some(t) = traffic.as_mut() {
                 let pl = (sim.pos, sim.vel, t.player_army, !sim.structure.destroyed);
-                t.step(&field, TICK, pl, &mut combat.rng, &mut combat.bullets);
+                let names = target_names(mission.as_ref(), columns.as_ref());
+                t.step(
+                    &field,
+                    TICK,
+                    pl,
+                    &mut combat.rng,
+                    &mut combat.bullets,
+                    &mut combat.projectiles,
+                    &|n| names.get(n).copied(),
+                );
             }
             max_g = (max_g.0.max(sim.overload), max_g.1.min(sim.overload));
         }
@@ -1693,6 +1744,7 @@ fn main() {
         ground: columns,
         flak: batteries,
         player_army,
+        mission: mission.clone(),
         inputs: Inputs {
             throttle: throttle0,
             gear: gear0,
@@ -1741,6 +1793,68 @@ fn main() {
     };
     let el = EventLoop::new().expect("event loop");
     el.run_app(&mut game).expect("run");
+}
+
+fn bomb_test(
+    vfs: &il2_vfs::Vfs,
+    fms: &il2_data::FlightModels,
+    class: &str,
+    loadout: &str,
+) -> String {
+    use il2_formats::mission::Waypoint;
+    let field = HeightField::from_raw(2, 2, &[0; 4]);
+    let target = DVec3::new(8000.0, 0.0, 0.0);
+    let wp = |kind: &str, x: f64| Waypoint {
+        kind: kind.into(),
+        x,
+        y: 0.0,
+        z: 1500.0,
+        speed: 330.0,
+        target: None,
+    };
+    let Some(mut t) = traffic::Traffic::with_route(
+        vfs,
+        fms,
+        class,
+        loadout,
+        DVec3::new(0.0, 0.0, 1500.0),
+        90.0,
+        vec![wp("GATTACK", target.x), wp("NORMFLY", 30_000.0)],
+    ) else {
+        return "no aircraft\n".into();
+    };
+    let bombs: i32 = t.planes[0]
+        .stores
+        .iter()
+        .filter(|s| s.trigger == 3)
+        .map(|s| s.count)
+        .sum();
+    let mut out = format!("{class} with {loadout}: {bombs} bombs\n");
+    let mut rng = weapons::Rng::new(7);
+    let (mut bullets, mut projectiles) = (Vec::new(), Vec::new());
+    let mut objects = objects::Builder::new(vfs, &field, "summer").finish();
+    let mut time = 0.0;
+    while time < 200.0 {
+        t.step(
+            &field,
+            TICK,
+            (DVec3::new(0.0, 0.0, -1000.0), DVec3::ZERO, 0, false),
+            &mut rng,
+            &mut bullets,
+            &mut projectiles,
+            &|_| None,
+        );
+        for (at, power, _) in weapons::fly(&mut projectiles, TICK, &field, &mut objects, &mut rng) {
+            out += &format!(
+                "t {time:5.1}  explosion {power:.1} kg at {:.0} {:.0}: {:.0} m from the target\n",
+                at.x,
+                at.y,
+                (at - target).truncate().length()
+            );
+        }
+        time += TICK;
+    }
+    out
 }
 
 /// The AI lands from 8 km out at 600 m, abeam the runway, on flat ground.

@@ -3,7 +3,7 @@
 
 use crate::ai::{AiPilot, Contact, Phase};
 use crate::airframe::Airframe;
-use crate::weapons::{self, Bullet, Gun, Rng};
+use crate::weapons::{self, Bullet, Gun, Projectile, Rng, Store};
 use crate::world::{self, AircraftAssets};
 use glam::{DMat4, DVec3};
 use il2_fm::Sim;
@@ -29,6 +29,8 @@ pub struct AiPlane {
     gpu: Option<GpuMesh>,
     trace_t: f64,
     pub guns: Vec<Gun>,
+    /// Bombs and rockets.
+    pub stores: Vec<Store>,
     /// Its flight and whether the player leads that flight.
     wing: String,
     player_leads: bool,
@@ -148,6 +150,10 @@ impl Traffic {
                     gpu: None,
                     trace_t: 0.0,
                     guns: Self::guns(&mut armoury, &classes_db, &wing.class, &wing.weapons, a),
+                    stores: {
+                        let w = classes_db.aircraft_weapons(&wing.class).unwrap_or_default();
+                        weapons::mount_stores(&classes_db, &w, &wing.weapons, &a.hook_frames)
+                    },
                     wing: wing.name.clone(),
                     player_leads: is_player && m.player_num == 0,
                     engaged: None,
@@ -222,6 +228,7 @@ impl Traffic {
                 gpu: None,
                 trace_t: 0.0,
                 guns,
+                stores: Vec::new(),
                 wing: "target".into(),
                 player_leads: false,
                 engaged: None,
@@ -247,6 +254,31 @@ impl Traffic {
             .iter()
             .flat_map(|p| p.guns.iter().map(|g| g.spec.clone()))
             .collect()
+    }
+
+    /// One AI aircraft with a loadout flying a route from `pos` (tests).
+    pub fn with_route(
+        vfs: &Vfs,
+        fms: &il2_data::FlightModels,
+        class: &str,
+        loadout: &str,
+        pos: DVec3,
+        speed: f64,
+        way: Vec<il2_formats::mission::Waypoint>,
+    ) -> Option<Traffic> {
+        let toward = way
+            .first()
+            .map_or(pos + DVec3::X, |w| DVec3::new(w.x, w.y, pos.z));
+        let mut t = Self::single(vfs, fms, class, pos, toward, speed)?;
+        let classes_db = il2_data::Classes::new(vfs, &fms.keys);
+        let w = classes_db.aircraft_weapons(class).unwrap_or_default();
+        let a = &t.classes[0].assets;
+        let p = &mut t.planes[0];
+        p.stores = weapons::mount_stores(&classes_db, &w, loadout, &a.hook_frames);
+        p.pilot.way = way;
+        p.pilot.cur = 0;
+        p.name = "test".into();
+        Some(t)
     }
 
     /// One line per aircraft: where it is and what it does (diagnostics).
@@ -310,6 +342,7 @@ impl Traffic {
 
     /// One simulation tick for every AI aircraft: choose whom to fight, fly, shoot.
     /// `player` is the player's aircraft (position, velocity, army, still flying).
+    #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
         field: &HeightField,
@@ -317,6 +350,8 @@ impl Traffic {
         player: (DVec3, DVec3, u8, bool),
         rng: &mut Rng,
         bullets: &mut Vec<Bullet>,
+        projectiles: &mut Vec<Projectile>,
+        target_of: &dyn Fn(&str) -> Option<DVec3>,
     ) {
         let ground = |x: f64, y: f64| field.height_at(x, y);
         // Everyone the pilots can see: id, position, velocity, army.
@@ -421,6 +456,57 @@ impl Traffic {
                     1 + n,
                     bullets,
                 );
+                // Level bombing at a ground-attack waypoint: release when the bombs' fall carries them onto
+                // the target.
+                let mut bomb = false;
+                if p.engaged.is_none() && p.pilot.phase == Phase::Cruise {
+                    if let Some(w) = p
+                        .pilot
+                        .way
+                        .get(p.pilot.cur)
+                        .filter(|w| w.kind.starts_with("GATTACK"))
+                    {
+                        let t = w
+                            .target
+                            .as_ref()
+                            .and_then(|(name, _)| target_of(name))
+                            .unwrap_or_else(|| DVec3::new(w.x, w.y, 0.0));
+                        let t = DVec3::new(t.x, t.y, field.height_at(t.x, t.y));
+                        let h = (p.sim.pos.z - t.z).max(0.0);
+                        let fall = (2.0 * h / 9.81).sqrt() * 1.05;
+                        // Drag shortens the bombs' travel by about 3.5 %.
+                        let impact = p.sim.pos.truncate() + p.sim.vel.truncate() * fall * 0.965;
+                        let toward =
+                            (t.truncate() - p.sim.pos.truncate()).dot(p.sim.vel.truncate()) > 0.0;
+                        let has_bombs = p.stores.iter().any(|s| s.trigger == 3 && s.count > 0);
+                        // Release as the predicted impact passes the target, if not too far to the side.
+                        let vh = p.sim.vel.truncate().normalize_or_zero();
+                        let rel = t.truncate() - impact;
+                        let (along, cross) = (rel.dot(vh), rel.perp_dot(vh).abs());
+                        if has_bombs && toward && along < 15.0 && along > -80.0 && cross < 200.0 {
+                            bomb = true;
+                        }
+                        if std::env::var("IL2_TRACE_AI").is_ok_and(|n| n == p.name) && bomb {
+                            eprintln!("{}: bombs away, predicted miss {along:.0} m along, {cross:.0} m across", p.name);
+                        }
+                        if !has_bombs
+                            && p.pilot.cur + 1 < p.pilot.way.len()
+                            && (p.sim.pos.truncate() - t.truncate()).length() < 1500.0
+                        {
+                            p.pilot.cur += 1;
+                        }
+                    }
+                }
+                weapons::release(
+                    &mut p.stores,
+                    &[false, false, false, bomb],
+                    p.sim.pos,
+                    p.sim.ori,
+                    p.sim.vel,
+                    dt,
+                    rng,
+                    projectiles,
+                );
                 let t = [fire, fire, false, false];
                 let recoil = weapons::fire(
                     &mut p.guns,
@@ -439,6 +525,9 @@ impl Traffic {
                 }
             }
             p.airframe.update(&mut p.sim, field, dt);
+            if !std::env::var("IL2_TRACE_AI").is_ok_and(|n| n == p.name) {
+                p.airframe.messages.clear();
+            }
             if std::env::var("IL2_TRACE_AI").is_ok_and(|n| n == p.name) {
                 p.trace_t += dt;
                 if p.trace_t >= 2.0 {

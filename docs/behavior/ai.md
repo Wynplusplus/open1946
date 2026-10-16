@@ -132,3 +132,15 @@ OpenIL2's gunner (own design): each step every turret gun picks the nearest enem
 500/600/700/800 m (rookie to ace) whose lead point lies inside its arc. The lead point is
 `target + relative velocity × time of flight`, raised by the drop. The gun fires at its own rate
 with a gaussian scatter of 2/1.4/1/0.7°. The player's aircraft has AI gunners of veteran skill.
+
+## Ground attack
+OpenIL2's own level-bombing pilot, until the runtime's `GATTACK` maneuvers (dive bombing,
+strafing, rockets, torpedoes) are ported. At a `GATTACK` waypoint the target is the mission
+object the waypoint names (a column's lead unit still alive, or a stationary object), else the
+waypoint itself, on the ground. The bombs' fall time is `1.05·√(2h/g)`. The predicted impact is
+the current position plus the horizontal velocity times the fall time times 0.965 (drag). Bombs
+(trigger group 3) release as the predicted impact passes the target, within 200 m to the side.
+Once they're gone, the pilot moves on to the next waypoint within 1.5 km of the target.
+
+The waypoint autopilot also has a slow integral of heading errors below 10° (`0.5·error·dt`,
+at most 6°) so tracks have no standing offset (OpenIL2).
