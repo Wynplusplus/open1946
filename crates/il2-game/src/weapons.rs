@@ -6,6 +6,8 @@ use il2_formats::map::HeightField;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// All of a round's data; not every field is used yet.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct BulletType {
     pub mass: f64,
@@ -24,6 +26,7 @@ pub struct BulletType {
     pub kv: f64,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct GunSpec {
     pub name: String,
@@ -34,6 +37,8 @@ pub struct GunSpec {
     pub cannon: bool,
     pub trace_freq: u32,
     pub bullets: Vec<BulletType>,
+    /// Sound preset while firing (`weapon.mgun_13_800`).
+    pub sound: Option<String>,
 }
 
 impl GunSpec {
@@ -69,6 +74,7 @@ impl GunSpec {
             cannon: v.num("bCannon").unwrap_or(0.0) != 0.0,
             trace_freq: (v.num("traceFreq").unwrap_or(1.0) as u32).max(1),
             bullets,
+            sound: v.str("sound").map(str::to_owned),
         })
     }
 }
@@ -77,6 +83,8 @@ impl GunSpec {
 #[derive(Clone, Debug)]
 pub struct Gun {
     pub spec: Arc<GunSpec>,
+    /// Fired during the last step.
+    pub firing: bool,
     /// Hook frame in body coordinates (fires along its +x).
     pub frame: Mat4,
     pub trigger: i32,
@@ -158,7 +166,7 @@ pub fn mount(
         let Some(spec) = armoury.gun(classes, gun) else { continue };
         let hook = weapons.hooks.get(i).cloned().unwrap_or_default();
         let Some((_, frame)) = hooks.iter().find(|(n, _)| n.eq_ignore_ascii_case(&hook)) else { continue };
-        out.push(Gun { spec, frame: *frame, trigger: weapons.triggers.get(i).copied().unwrap_or(0), ammo: *count, next_shot: 0.0, index: 0, count: 0 });
+        out.push(Gun { spec, firing: false, frame: *frame, trigger: weapons.triggers.get(i).copied().unwrap_or(0), ammo: *count, next_shot: 0.0, index: 0, count: 0 });
     }
     out
 }
@@ -199,6 +207,7 @@ pub fn fire(
     for g in guns.iter_mut() {
         let pressed = triggers.get(g.trigger as usize).copied().unwrap_or(false);
         g.next_shot = (g.next_shot - dt).max(if pressed { -dt } else { 0.0 });
+        g.firing = pressed && g.ammo > 0;
         if !pressed {
             continue;
         }

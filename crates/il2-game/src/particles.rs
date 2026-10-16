@@ -279,7 +279,7 @@ pub enum Impact {
 /// Starts the runtime's effects for an impact on land, water or an object.
 pub fn impact(fx: &mut Effects, at: DVec3, what: Impact, water: bool, object: bool, rng: &mut Rng) {
     let up = DVec3::Z;
-    let mut run = |fx: &mut Effects, dir: &str, files: &[&str], life: f64| {
+    let run = |fx: &mut Effects, dir: &str, files: &[&str], life: f64| {
         for f in files {
             fx.spawn(&format!("{dir}/{f}.eff"), at, up, 1.0, life);
         }
@@ -313,7 +313,7 @@ pub fn impact(fx: &mut Effects, at: DVec3, what: Impact, water: bool, object: bo
 
 fn blast(fx: &mut Effects, at: DVec3, power: f64, water: bool, rng: &mut Rng) {
     let up = DVec3::Z;
-    let mut run = |fx: &mut Effects, dir: &str, files: &[&str], life: f64| {
+    let run = |fx: &mut Effects, dir: &str, files: &[&str], life: f64| {
         for f in files {
             fx.spawn(&format!("{dir}/{f}.eff"), at, up, 1.0, life);
         }

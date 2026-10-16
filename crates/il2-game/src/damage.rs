@@ -121,6 +121,7 @@ pub fn received_power_realistic(power: f64, d: f64, r: f64) -> f64 {
 
 /// TNT reaching an object of collision radius `r` at distance `d` from a blast of `power` kg and
 /// `radius` m without realistic bomb sights: `(1 − (d − r)/radius)²·power`.
+#[allow(dead_code)]
 pub fn received_power(power: f64, radius: f64, d: f64, r: f64) -> f64 {
     let x = d - r;
     if x >= radius {

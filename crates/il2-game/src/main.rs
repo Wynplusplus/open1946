@@ -1,3 +1,4 @@
+mod audio;
 mod damage;
 mod effects;
 mod forest;
@@ -111,11 +112,13 @@ struct Combat {
     bullets: Vec<weapons::Bullet>,
     rng: weapons::Rng,
     hits: Vec<(weapons::Bullet, weapons::Hit)>,
+    /// Explosions of the last steps (point, kg TNT), for sound.
+    booms: Vec<(DVec3, f64)>,
 }
 
 impl Combat {
     fn new(guns: Vec<weapons::Gun>, stores: Vec<weapons::Store>) -> Self {
-        Combat { guns, stores, projectiles: Vec::new(), bullets: Vec::new(), rng: weapons::Rng::new(0x5EED), hits: Vec::new() }
+        Combat { guns, stores, projectiles: Vec::new(), bullets: Vec::new(), rng: weapons::Rng::new(0x5EED), hits: Vec::new(), booms: Vec::new() }
     }
 
     fn step(&mut self, sim: &mut Sim, triggers: &[bool; 4], field: &HeightField, view: &mut view::WorldView) {
@@ -134,6 +137,7 @@ impl Combat {
         weapons::advance(&mut self.bullets, TICK, field, objects, &mut self.rng, &mut self.hits);
         let fx = &mut view.effects;
         for &(at, power, _) in &booms {
+            self.booms.push((at, power));
             particles::impact(fx, at, particles::Impact::Blast { power }, at.z < 0.5, false, &mut self.rng);
         }
         for (b, h) in &self.hits {
@@ -167,6 +171,8 @@ struct Game {
     view: view::WorldView,
     env: il2_render::Environment,
     combat: Combat,
+    vfs: Arc<il2_vfs::Vfs>,
+    audio: audio::Audio,
     keys: HashSet<KeyCode>,
     #[cfg(feature = "gamepad")]
     gilrs: Option<Gilrs>,
@@ -283,6 +289,34 @@ impl Game {
         };
         place(r, terrain, plane, s, eye);
         r.set_nodes(plane, &world::pose(&self.assets, &s.ct));
+        // Sound: engines, guns, explosions (heard from the camera).
+        let level = (1.0 / (1.0 + (s.pos - eye).length() / 40.0)) as f32;
+        for (i, (p, e)) in s.ac.engines.iter().zip(&s.engines).enumerate() {
+            let name = format!("motor.{}", p.sound_name.as_deref().unwrap_or("db605"));
+            let preset = self.audio.preset(&self.vfs, &name).or_else(|| self.audio.preset(&self.vfs, "motor.db605"));
+            if let Some(pr) = preset {
+                let rpm = if e.stage == 0 || e.stage >= 7 { 0.0 } else { e.rpm() as f32 };
+                self.audio.drive(&self.vfs, 1 + i as u64, &pr, &[("rpm", rpm)], audio::ENV_OUTSIDE, level);
+            }
+        }
+        for (i, g) in self.combat.guns.iter().enumerate() {
+            let key = 100 + i as u64;
+            match (g.firing, g.spec.sound.as_deref()) {
+                (true, Some(snd)) => {
+                    if let Some(pr) = self.audio.preset(&self.vfs, snd) {
+                        self.audio.drive(&self.vfs, key, &pr, &[], audio::ENV_OUTSIDE, level * 0.5);
+                    }
+                }
+                _ => self.audio.stop(key),
+            }
+        }
+        for (at, power) in std::mem::take(&mut self.combat.booms) {
+            let name = if power >= 50.0 { "explode.big" } else if power >= 1.0 { "explode.middle" } else { "explode.bullet" };
+            if let Some(pr) = self.audio.preset(&self.vfs, name) {
+                let d = (at - eye).length() as f32;
+                self.audio.play(&self.vfs, &pr, 1.0 / (1.0 + d / 300.0));
+            }
+        }
         self.view.draw(r, field, terrain, vp, eye, &[plane], &self.combat.bullets, &self.combat.projectiles, false);
 
         for (i, e) in self.sim.engines.iter_mut().enumerate() {
@@ -757,6 +791,8 @@ fn main() {
         view,
         env,
         combat: Combat::new(guns.clone(), stores.clone()),
+        audio: audio::Audio::start(),
+        vfs: Arc::new(vfs),
         keys: HashSet::new(),
         #[cfg(feature = "gamepad")]
         gilrs: Gilrs::new().ok(),

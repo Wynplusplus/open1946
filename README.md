@@ -22,8 +22,9 @@ No game files, decompiled code or key material are part of this repository. Form
 | Game (`openil2`) | Fly any aircraft class over any map or from a mission's start (runway takeoff spots) |
 
 | Weapons | Loadouts and gun, bomb and rocket data from the install; ballistics, tracers, house destruction |
+| Effects and sound | Particle effects from `.eff` files for impacts and explosions; engine, gun and explosion sounds from the game's presets (ALSA) |
 
-Not yet: cockpits, aircraft damage, AI, ground units, sound, menus (see `docs/roadmap.md`).
+Not yet: cockpits, aircraft damage, AI, ground units, menus (see `docs/roadmap.md`).
 
 ## Usage
 

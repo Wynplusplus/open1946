@@ -63,6 +63,8 @@ pub struct EngineParams {
     /// `Autonomous 0`: needs ground equipment (near an airfield, on the ground) to start.
     pub autonomous: bool,
     pub radiator_mode: RadiatorMode,
+    /// `SoundName`: the engine's sound preset is `motor.<SoundName>`.
+    pub sound_name: Option<String>,
     /// `[Params] Vmin`, `Vmax` (m/s), for the speed-scheduled governor type 5.
     pub v_schedule: (f64, f64),
     /// `WEPBoostFactor`: torque factor with boost engaged (1).
@@ -227,6 +229,7 @@ impl EngineParams {
             t_oil_min: num("TOILMIN", 0.0),
             autonomous: num("Autonomous", 1.0) != 0.0,
             radiator_mode: RadiatorMode::Governor,
+            sound_name: raw("SoundName").map(str::to_owned),
             v_schedule: (50.0, 150.0),
             wep_boost: num("WEPBoostFactor", 1.0),
             wep_compressor,

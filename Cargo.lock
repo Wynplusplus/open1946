@@ -863,6 +863,7 @@ dependencies = [
  "il2-render",
  "il2-vfs",
  "image",
+ "libloading",
  "winit",
 ]
 
