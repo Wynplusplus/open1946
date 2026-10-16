@@ -19,6 +19,10 @@ arrestor hooks.
 - **Mass coefficient** `k = min(1, 4·10⁻⁴·mass)` scales the wheel forces and the airframe springs.
 - **Moments** use the point shifted by `[Arm] GC_Gear_Shift` in x.
 - **Retracted gear.** Wheels count only with the gear lever above 0.01.
+- *OpenIL2:* the hooks are used only when they give a plausible stance (nose-wheel aircraft within ±6°;
+  tail-draggers 3–25° and within 4° of `[Gear] Pitch`); otherwise the `H/Pitch` solution applies. This
+  guards against partly imported gear animations. With it, 382 of 404 aircraft park within 3° of
+  `[Gear] Pitch` or plausibly level (nose-wheel aircraft).
 
 ## Wheels
 - **Roughness.** It is reset from the surface every other tick (0 on concrete plates, 0.8 on "ground"

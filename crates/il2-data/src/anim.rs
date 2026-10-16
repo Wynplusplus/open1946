@@ -92,6 +92,8 @@ enum V {
     Hier,
     Str(String),
     Arr(usize),
+    /// Array of references (e.g. `float[][]`), in `Machine::oarrays`.
+    OArr(usize),
     Null,
     /// Second slot of a long/double local.
     Top,
@@ -118,6 +120,7 @@ pub fn last_abort() -> String {
 struct Machine<'a> {
     chain: &'a [ClassFile],
     arrays: Vec<Vec<f32>>,
+    oarrays: Vec<Vec<V>>,
     out: BTreeMap<String, NodeState>,
     budget: usize,
     /// Static fields (`class.name`), filled by the classes' static initializers.
@@ -271,7 +274,27 @@ impl<'a> Machine<'a> {
                     next = pc + 2;
                 }
                 0x1A..=0x2D => st.push(locals.get(((op - 0x1A) % 4) as usize).cloned().ok_or(Abort)?),
-                0x2E | 0x30 | 0x32 => {
+                0x32 => {
+                    let i = popi!();
+                    let V::OArr(a) = pop!() else { return Err(why("aaload".into())) };
+                    st.push(self.oarrays[a].get(i as usize).cloned().ok_or(Abort)?);
+                }
+                0x53 => {
+                    let v = pop!();
+                    let i = popi!();
+                    let V::OArr(a) = pop!() else { return Err(why("aastore".into())) };
+                    *self.oarrays[a].get_mut(i as usize).ok_or(Abort)? = v;
+                }
+                0xBD => {
+                    let n = popi!();
+                    if !(0..=4096).contains(&n) {
+                        return Err(why("anewarray size".into()));
+                    }
+                    self.oarrays.push(vec![V::Null; n as usize]);
+                    st.push(V::OArr(self.oarrays.len() - 1));
+                    next = pc + 3;
+                }
+                0x2E | 0x30 => {
                     let i = popi!();
                     let V::Arr(a) = pop!() else { return Err(Abort) };
                     let v = *self.arrays[a].get(i as usize).ok_or(Abort)?;
@@ -461,8 +484,12 @@ impl<'a> Machine<'a> {
                     next = pc + 2;
                 }
                 0xBE => {
-                    let V::Arr(a) = pop!() else { return Err(Abort) };
-                    st.push(V::I(self.arrays[a].len() as i32));
+                    let n = match pop!() {
+                        V::Arr(a) => self.arrays[a].len(),
+                        V::OArr(a) => self.oarrays[a].len(),
+                        _ => return Err(Abort),
+                    };
+                    st.push(V::I(n as i32));
                 }
                 0x5B => {
                     let (v1, v2, v3) = (pop!(), pop!(), pop!());
@@ -653,6 +680,7 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
     let mut m = Machine {
         chain,
         arrays: vec![vec![0.0; 3], vec![0.0; 3]],
+        oarrays: Vec::new(),
         out: BTreeMap::new(),
         budget: 0,
         statics: HashMap::new(),

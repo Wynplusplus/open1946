@@ -465,11 +465,11 @@ fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
 }
 
 /// Drops the aircraft from 0.5 m onto flat ground at its parked attitude, brakes on, engine off.
-fn parked_test(mut sim: Sim) -> (f64, f64, f64) {
+fn parked_test(mut sim: Sim, (h, pitch_deg): (f64, f64)) -> (f64, f64, f64) {
     let ground = |_: f64, _: f64| 0.0;
-    let pitch0 = 12.0f64.to_radians();
-    sim.ori = glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2) * glam::DQuat::from_rotation_y(-pitch0);
-    sim.pos.z = 2.2;
+    // Dropped from 10 cm above its parked stance.
+    sim.ori = glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2) * glam::DQuat::from_rotation_y(-pitch_deg.to_radians());
+    sim.pos.z = h + 0.1;
     sim.vel = DVec3::ZERO;
     sim.set_engines_idle(true);
     let inputs = Inputs { brakes: 1.0, gear: 1.0, ..Default::default() };
@@ -540,7 +540,7 @@ fn main() {
             println!("level flight at {alt:5.0} m: {kmh:5.1} km/h (held {z:5.0} m)");
         }
         println!("flight model reference: Vmax {} km/h at sea level, VmaxH {} km/h at {} m", p("Vmax"), p("VmaxH"), p("HofVmax"));
-        let (pitch, z, v) = parked_test(world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0));
+        let (pitch, z, v) = parked_test(world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0), assets.parked);
         println!("parked on flat ground: pitch {pitch:.2} deg, origin {z:.3} m above ground, drift {v:.3} m/s (reference: Pitch {}, H {})",
             fmd.get("Gear", "Pitch").unwrap_or("?"), fmd.get("Gear", "H").unwrap_or("?"));
         println!("{}", engine_test(world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0)));
@@ -775,7 +775,7 @@ fn survey(vfs: &il2_vfs::Vfs, fms: &il2_data::FlightModels) {
         let hv: f64 = p("HofVmax").parse().unwrap_or(6000.0);
         let (v0, _) = level_flight_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 120.0), 500.0);
         let (vh, _) = level_flight_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 120.0), hv);
-        let (pitch, _, _) = parked_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 0.0));
+        let (pitch, _, _) = parked_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 0.0), assets.parked);
         let g = fmd.as_ref().and_then(|f| f.get("Gear", "Pitch")).unwrap_or("?").to_owned();
         let e0 = assets.fm.engines.first();
         if std::env::var_os("IL2_ANIM").is_some() {

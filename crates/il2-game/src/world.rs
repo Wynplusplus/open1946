@@ -110,7 +110,24 @@ pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Re
     let rest = assets_for_pose.rig.pose(&[]);
     let gear_moves = down.iter().zip(&rest).any(|(a, b)| !a.abs_diff_eq(*b, 1e-4));
     let from_ini = fmd.section_ci("Gear").and_then(|s| s.get_ci("FromIni")).and_then(il2_formats::sectfile::atof).unwrap_or(0.0) != 0.0;
-    let gear = gear_points(&hooks, &fmd, gear_moves && !from_ini);
+    // Use the hooks only if they give a plausible stance: some classes' gear animations import only in
+    // part (docs/behavior/gear.md, "Contact points").
+    let fmd_pitch = fmd.section_ci("Gear").and_then(|s| s.get_ci("Pitch")).and_then(il2_formats::sectfile::atof).map_or(10.0, f64::from);
+    let hook_points = gear_points(&hooks, &fmd, true);
+    let plausible = land_pose(&hook_points, 0.0).is_some_and(|(_, p)| {
+        let nose = hook_points.iter().any(|g| g.kind == ContactKind::Castor && g.pos.x > -1.0);
+        if nose { p.abs() <= 6.0 } else { (3.0..=25.0).contains(&p) && (p - fmd_pitch).abs() <= 4.0 }
+    });
+    let use_hooks = gear_moves && !from_ini && plausible;
+    let gear = if use_hooks { hook_points } else { gear_points(&hooks, &fmd, false) };
+    if std::env::var_os("IL2_GEAR").is_some() {
+        eprintln!("gear {class}: moves {gear_moves} from_ini {from_ini} plausible {plausible} use_hooks {use_hooks}");
+        for g in &gear {
+            if g.kind != ContactKind::Body {
+                eprintln!("  {:?} {:.2?}", g.kind, g.pos);
+            }
+        }
+    }
     let mut fm = Aircraft::load(&fmd, |fam| fms.sect_file(&format!("FlightModels/{fam}.emd")).ok(), gear).map_err(|e| e.to_string())?;
     // The runtime picks these rocket burn rates by aircraft class (docs/behavior/engine.md).
     let short = class.rsplit('.').next().unwrap_or(class);
@@ -137,7 +154,7 @@ pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Re
         fmd.section_ci("Gear").and_then(|s| s.get_ci(k)).and_then(il2_formats::sectfile::atof).map_or(d, f64::from)
     };
     let mass = fm.mass_empty + fm.fuel_max + fm.nitro_max;
-    let parked = if gear_moves && !from_ini { land_pose(&fm.gear, mass) } else { None }.unwrap_or((num("H", 2.0), num("Pitch", 10.0)));
+    let parked = if use_hooks { land_pose(&fm.gear, mass) } else { None }.unwrap_or((num("H", 2.0), num("Pitch", 10.0)));
     Ok(AircraftAssets { mesh, rig, tracks, fm, parked })
 }
 
