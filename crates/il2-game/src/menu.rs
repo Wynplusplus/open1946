@@ -232,6 +232,24 @@ enum Screen {
     Quick,
     Career,
     Tracks,
+    Dynamic,
+}
+
+/// The dynamic campaign's choices and progress.
+#[derive(Default)]
+struct Dynamic {
+    theaters: Vec<String>,
+    sel: usize,
+    loaded: Option<crate::dgen::Theater>,
+    red: bool,
+    plane: usize,
+    sorties: u32,
+    won: u32,
+    last: String,
+}
+
+fn dgen_path() -> PathBuf {
+    data_dir().join("dynamic.ini")
 }
 
 fn data_dir() -> PathBuf {
@@ -255,15 +273,6 @@ fn tracks() -> Vec<PathBuf> {
     v.sort();
     v.reverse();
     v
-}
-
-/// A static campaign (`Missions/Campaign/<country>/<name>/campaign.ini`): stages from `[list]`,
-/// each line listing alternatives.
-struct Campaign {
-    dir: String,
-    name: String,
-    description: String,
-    stages: Vec<Vec<String>>,
 }
 
 fn campaigns(root: &Path, lang: &Option<String>) -> Vec<Group> {
@@ -406,6 +415,10 @@ pub struct Menu {
     career: Career,
     /// The result file of the running flight, and whether it is a career mission.
     pending: Option<(PathBuf, bool)>,
+    dynamic: Dynamic,
+    /// Per aircraft class: side, fighter, a loadout with bombs.
+    plane_info: std::cell::RefCell<HashMap<String, (u8, bool, Option<String>)>>,
+    fms: Option<il2_data::FlightModels>,
 }
 
 impl Menu {
@@ -455,6 +468,25 @@ impl Menu {
             campaigns: campaigns(&root_for_campaigns, &lang),
             career: load_career(),
             pending: None,
+            dynamic: {
+                let mut d = Dynamic {
+                    theaters: crate::dgen::theaters(&root_for_campaigns),
+                    ..Default::default()
+                };
+                if let Ok(t) = std::fs::read_to_string(dgen_path()) {
+                    for l in t.lines() {
+                        let (k, v) = l.split_once(' ').unwrap_or((l, ""));
+                        match k {
+                            "sorties" => d.sorties = v.parse().unwrap_or(0),
+                            "won" => d.won = v.parse().unwrap_or(0),
+                            _ => {}
+                        }
+                    }
+                }
+                d
+            },
+            plane_info: Default::default(),
+            fms: None,
         }
     }
 
@@ -615,6 +647,7 @@ impl Menu {
             Screen::Quick => self.s("quick.info", "Quick Mission Builder"),
             Screen::Career => self.s("main.PilotCareer", "Pilot Career"),
             Screen::Tracks => self.s("main.PlayTrack", "Play Track"),
+            Screen::Dynamic => "Dynamic Campaign".to_owned(),
         };
         self.hud.text(
             24.0,
@@ -628,6 +661,7 @@ impl Menu {
             Screen::Quick => self.draw_quick(w, h),
             Screen::Career => self.draw_career(w, h),
             Screen::Tracks => self.draw_tracks(w, h),
+            Screen::Dynamic => self.draw_dynamic(w, h),
         }
         if !self.status.is_empty() {
             let s = self.status.clone();
@@ -639,6 +673,7 @@ impl Menu {
         let items = [
             ("main.SingleMissions", "Single Missions"),
             ("main.PilotCareer", "Pilot Career"),
+            ("main.DynamicCampaign", "Dynamic Campaign"),
             ("main.Quick", "Quick Mission Builder"),
             ("main.PlayTrack", "Play Track"),
             ("main.Quit", "Quit"),
@@ -654,8 +689,12 @@ impl Menu {
                         self.sel = [0; 3];
                         self.scroll = [0; 3];
                     }
-                    2 => self.screen = Screen::Quick,
-                    3 => {
+                    2 => {
+                        self.screen = Screen::Dynamic;
+                        self.scroll = [0; 3];
+                    }
+                    3 => self.screen = Screen::Quick,
+                    4 => {
                         self.screen = Screen::Tracks;
                         self.sel = [0; 3];
                         self.scroll = [0; 3];
@@ -787,6 +826,172 @@ impl Menu {
                 % alts.len().max(1);
             let mission = format!("{dir}/{}", alts[pick]);
             self.launch_with(&["--mission".into(), mission], true);
+        }
+    }
+
+    /// Side, fighter, bomb loadout of an aircraft class (cached; needs the flight models' keys).
+    fn info(&mut self, class: &str) -> (u8, bool, Option<String>) {
+        if let Some(i) = self.plane_info.borrow().get(class) {
+            return i.clone();
+        }
+        if self.fms.is_none() {
+            self.fms = il2_data::FlightModels::open(&self.vfs).ok();
+        }
+        let army = self
+            .planes
+            .iter()
+            .find(|p| p.class.eq_ignore_ascii_case(class))
+            .map_or(0, |p| p.army);
+        let (fighter, bombs) = match &self.fms {
+            Some(f) => {
+                let c = il2_data::Classes::new(&self.vfs, &f.keys);
+                let ifs = c.interfaces(class);
+                let bombs = c.aircraft_weapons(class).and_then(|w| {
+                    w.loadouts
+                        .iter()
+                        .find(|(_, slots)| {
+                            slots
+                                .iter()
+                                .flatten()
+                                .any(|(g, _)| g.starts_with("BombGun"))
+                        })
+                        .map(|(n, _)| n.clone())
+                });
+                (ifs.iter().any(|i| i == "TypeFighter"), bombs)
+            }
+            None => (true, None),
+        };
+        let i = (army, fighter, bombs);
+        self.plane_info
+            .borrow_mut()
+            .insert(class.to_owned(), i.clone());
+        i
+    }
+
+    fn draw_dynamic(&mut self, w: f32, h: f32) {
+        let rows = ((h - 200.0) / (self.hud.line_height() + 4.0)) as usize;
+        let names = self.dynamic.theaters.clone();
+        if let Some(i) = self.list(24.0, 80.0, 220.0, rows, &names, self.dynamic.sel, 0) {
+            self.dynamic.sel = i;
+            self.dynamic.loaded = None;
+            self.dynamic.plane = 0;
+        }
+        let Some(name) = names.get(self.dynamic.sel).cloned() else {
+            return;
+        };
+        if self.dynamic.loaded.as_ref().is_none_or(|t| t.name != name) {
+            match crate::dgen::load(&self.root, &name) {
+                Ok(t) => self.dynamic.loaded = Some(t),
+                Err(e) => {
+                    self.status = e;
+                    return;
+                }
+            }
+        }
+        let army = if self.dynamic.red { 1 } else { 2 };
+        let classes: Vec<String> = self
+            .dynamic
+            .loaded
+            .as_ref()
+            .map(|t| t.planes.iter().map(|p| format!("air.{}", p.1)).collect())
+            .unwrap_or_default();
+        let ours: Vec<String> = classes
+            .into_iter()
+            .filter(|c| {
+                self.planes
+                    .iter()
+                    .any(|p| p.class.eq_ignore_ascii_case(c) && p.army == army)
+            })
+            .collect();
+        let x = 270.0;
+        let side = if self.dynamic.red {
+            self.s("quick.SEL_Allies:", "Allies")
+        } else {
+            self.s("quick.SEL_Axis:", "Axis")
+        };
+        if self.selector(x, 80.0, &self.s("quick.SEL:", "Side:"), &side) != 0 {
+            self.dynamic.red = !self.dynamic.red;
+            self.dynamic.plane = 0;
+        }
+        let shown: Vec<String> = ours
+            .iter()
+            .map(|c| {
+                self.planes
+                    .iter()
+                    .find(|p| p.class.eq_ignore_ascii_case(c))
+                    .map_or(c.clone(), |p| p.name.clone())
+            })
+            .collect();
+        if let Some(i) = self.list(
+            x,
+            130.0,
+            420.0,
+            rows.saturating_sub(3),
+            &shown,
+            self.dynamic.plane,
+            1,
+        ) {
+            self.dynamic.plane = i;
+        }
+        let map = self
+            .dynamic
+            .loaded
+            .as_ref()
+            .map_or(String::new(), |t| t.map.clone());
+        let lines = [
+            format!("Map: {map}"),
+            format!(
+                "Sorties flown: {}   successful: {}",
+                self.dynamic.sorties, self.dynamic.won
+            ),
+            self.dynamic.last.clone(),
+        ];
+        let mut y = 130.0;
+        for l in lines {
+            self.hud.text(x + 440.0, y, &l, [0.9, 0.9, 0.82, 1.0]);
+            y += self.hud.line_height() * 1.4;
+        }
+        let by = h - 80.0;
+        if self.button(24.0, by, 200.0, &self.s("quick.BAC", "Back")) {
+            self.screen = Screen::Main;
+        }
+        let Some(class) = ours.get(self.dynamic.plane).cloned() else {
+            return;
+        };
+        if self.button(w - 224.0, by, 200.0, &self.s("quick.FLY", "Fly")) {
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(7, |d| d.as_nanos() as u64);
+            // Look the aircraft data up before generating (the generator asks for it).
+            if let Some(t) = &self.dynamic.loaded {
+                let all: Vec<String> = t.planes.iter().map(|p| format!("air.{}", p.1)).collect();
+                for c in all {
+                    self.info(&c);
+                }
+            }
+            self.info(&class);
+            let infos = self.plane_info.borrow().clone();
+            let lookup = move |c: &str| infos.get(c).cloned().unwrap_or((0, true, None));
+            let world = crate::dgen::World {
+                vfs: &self.vfs,
+                root: &self.root,
+                plane_info: &lookup,
+            };
+            let t = self.dynamic.loaded.as_ref().expect("loaded");
+            match crate::dgen::generate(&world, t, army, &class, self.dynamic.sorties, seed) {
+                Ok((text, summary)) => {
+                    let path = std::env::temp_dir().join("openil2_dynamic.mis");
+                    let bytes: Vec<u8> = text.chars().map(|c| c as u32 as u8).collect();
+                    match std::fs::write(&path, bytes) {
+                        Ok(()) => {
+                            self.dynamic.last = summary;
+                            self.launch(&["--mission".into(), path.to_string_lossy().into_owned()]);
+                        }
+                        Err(e) => self.status = e.to_string(),
+                    }
+                }
+                Err(e) => self.status = e,
+            }
         }
     }
 
@@ -1190,6 +1395,18 @@ impl Menu {
         } else {
             self.s("single.Failed", "Mission Failed")
         };
+        if self.screen == Screen::Dynamic {
+            self.dynamic.sorties += 1;
+            self.dynamic.won += success as u32;
+            let _ = std::fs::create_dir_all(data_dir());
+            let _ = std::fs::write(
+                dgen_path(),
+                format!(
+                    "sorties {}\nwon {}\n",
+                    self.dynamic.sorties, self.dynamic.won
+                ),
+            );
+        }
         if career {
             self.career.flown += 1;
             if success {
@@ -1226,6 +1443,52 @@ pub fn screenshot(root: PathBuf, screen: &str, out: &Path) {
         std::process::exit(1)
     });
     let mut menu = Menu::new(root, vfs);
+    if let Some(spec) = screen.strip_prefix("write-dynamic:") {
+        // `write-dynamic:Theater,red|blue,air.CLASS`: generates a sortie and prints its path.
+        let mut it = spec.split(',');
+        let (th, side, class) = (
+            it.next().unwrap_or("Bagration"),
+            it.next().unwrap_or("red"),
+            it.next().unwrap_or("air.YAK_9D"),
+        );
+        let t = crate::dgen::load(&menu.root, th).expect("theater");
+        let classes: Vec<String> = t
+            .planes
+            .iter()
+            .map(|p| format!("air.{}", p.1))
+            .chain([class.to_owned()])
+            .collect();
+        for c in classes {
+            menu.info(&c);
+        }
+        let infos = menu.plane_info.borrow().clone();
+        let lookup = move |c: &str| infos.get(c).cloned().unwrap_or((0, true, None));
+        let world = crate::dgen::World {
+            vfs: &menu.vfs,
+            root: &menu.root,
+            plane_info: &lookup,
+        };
+        match crate::dgen::generate(
+            &world,
+            &t,
+            if side == "red" { 1 } else { 2 },
+            class,
+            0,
+            12345,
+        ) {
+            Ok((text, summary)) => {
+                let path = std::env::temp_dir().join("openil2_dynamic.mis");
+                std::fs::write(
+                    &path,
+                    text.chars().map(|c| c as u32 as u8).collect::<Vec<u8>>(),
+                )
+                .expect("write");
+                println!("{}\n{summary}", path.display());
+            }
+            Err(e) => eprintln!("{e}"),
+        }
+        return;
+    }
     if screen == "write-quick" {
         // Writes the default quick mission and prints its path.
         let t = menu.templates_for();
@@ -1239,6 +1502,7 @@ pub fn screenshot(root: PathBuf, screen: &str, out: &Path) {
         "single" => Screen::Single,
         "quick" => Screen::Quick,
         "career" => Screen::Career,
+        "dynamic" => Screen::Dynamic,
         _ => Screen::Main,
     };
     let (w, h) = (1280, 720);

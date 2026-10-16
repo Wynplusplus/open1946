@@ -4,6 +4,7 @@ mod audio;
 mod cockpit;
 mod damage;
 mod devicelink;
+mod dgen;
 mod effects;
 mod flak;
 mod forest;
