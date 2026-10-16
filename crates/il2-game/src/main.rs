@@ -1,4 +1,5 @@
 mod audio;
+mod cockpit;
 mod damage;
 mod effects;
 mod forest;
@@ -253,9 +254,10 @@ struct Game {
     renderer: Option<Renderer>,
     terrain: Option<il2_render::GpuTerrain>,
     plane: Option<GpuMesh>,
-    cockpit_data: Option<il2_render::MeshData>,
-    cockpit_eye: Option<glam::Vec3>,
+    cockpit_state: Option<cockpit::Cockpit>,
     cockpit: Option<GpuMesh>,
+    /// Hours since midnight.
+    time_of_day: f64,
     /// In the cockpit (F1), head turned by (yaw, pitch).
     in_cockpit: bool,
     head: (f64, f64),
@@ -445,7 +447,9 @@ impl Game {
         // Chase camera, rendered relative to the eye to keep precision far from the origin.
         let s = &self.sim;
         let cam = self
-            .cockpit_eye
+            .cockpit_state
+            .as_ref()
+            .map(|c| c.eye)
             .filter(|_| self.in_cockpit && self.orbit.is_none() && self.cockpit.is_some());
         let (vp, eye, fg_vp) = match (self.orbit, cam) {
             (Some(o), _) => {
@@ -462,11 +466,13 @@ impl Game {
             }
         };
         place(r, terrain, plane, s, eye);
-        if let (Some(c), Some(_)) = (&self.cockpit, fg_vp) {
+        self.time_of_day = (self.time_of_day + dt / 3600.0).rem_euclid(24.0);
+        if let (Some(c), Some(cs), Some(_)) = (&self.cockpit, self.cockpit_state.as_mut(), fg_vp) {
             r.set_transform(
                 c,
                 DMat4::from_rotation_translation(s.ori, s.pos - eye).as_mat4(),
             );
+            r.set_nodes(c, &cs.pose(s, &self.combat.guns, self.time_of_day, dt));
         }
         r.set_nodes(plane, &world::pose(&self.assets, &s.ct));
         // Sound: engines, guns, explosions (heard from the camera).
@@ -566,7 +572,11 @@ impl ApplicationHandler for Game {
         r.env = self.env;
         self.terrain = self.terrain_data.take().map(|d| r.upload_terrain(&d));
         self.plane = self.plane_data.take().map(|d| r.upload(&d));
-        self.cockpit = self.cockpit_data.take().map(|d| r.upload(&d));
+        self.cockpit = self
+            .cockpit_state
+            .as_mut()
+            .and_then(|c| c.mesh.take())
+            .map(|d| r.upload(&d));
         self.view.upload(&r);
         if let Some(a) = &self.hud.atlas {
             r.set_overlay_atlas(a);
@@ -997,7 +1007,7 @@ fn main() {
         t0.elapsed().as_secs_f64(),
         map_objects.skipped.len()
     );
-    let env = {
+    let (env, time_of_day) = {
         let ini = vfs
             .read(&args.map)
             .map(|d| il2_formats::SectFile::parse(&d))
@@ -1016,7 +1026,10 @@ fn main() {
             .time
             .or(mission.as_ref().map(|m| m.time_hours))
             .unwrap_or(12.0);
-        sky::environment(hours, sky::day_of_year(month, day), lat)
+        (
+            sky::environment(hours, sky::day_of_year(month, day), lat),
+            hours,
+        )
     };
     let forest = forest::Forest::load(&vfs, &args.map, &terrain.types);
     let roads = roads::Roads::load(&vfs, &args.map, &terrain.types, terrain.water);
@@ -1151,17 +1164,25 @@ fn main() {
                 * view.as_mat4();
         }
         let mut fg_vp = None;
-        let cockpit_gpu = match (&args.cockpit, &assets.cockpit) {
-            (Some(head), Some((mesh, cam))) => {
+        let cockpit_gpu = match (&args.cockpit, assets.cockpit.as_mut()) {
+            (Some(head), Some(cp)) => {
                 let g = |i: usize| head.get(i).copied().unwrap_or(0.0).to_radians();
                 let (world, near, e) =
-                    cockpit_camera(&sim, *cam, (g(0), g(1)), w as f32 / h as f32);
+                    cockpit_camera(&sim, cp.eye, (g(0), g(1)), w as f32 / h as f32);
                 (vp, eye, fg_vp) = (world, e, Some(near));
-                let c = r.upload(mesh);
+                let c = r.upload(&cp.mesh.take().unwrap_or_default());
                 r.set_transform(
                     &c,
                     DMat4::from_rotation_translation(sim.ori, sim.pos - eye).as_mat4(),
                 );
+                // Let the needles settle.
+                for _ in 0..60 {
+                    cp.pose(&sim, &combat.guns, time_of_day, TICK);
+                }
+                r.set_nodes(&c, &cp.pose(&sim, &combat.guns, time_of_day, TICK));
+                if std::env::var_os("IL2_TRACE").is_some() {
+                    eprintln!("cockpit reads without values: {:?}", cp.missing());
+                }
                 Some(c)
             }
             (Some(_), None) => fail("this aircraft has no cockpit"),
@@ -1233,8 +1254,8 @@ fn main() {
         renderer: None,
         terrain: None,
         plane: None,
-        cockpit_eye: cockpit.as_ref().map(|(_, c)| *c),
-        cockpit_data: cockpit.map(|(m, _)| m),
+        cockpit_state: cockpit,
+        time_of_day,
         cockpit: None,
         in_cockpit: true,
         head: (0.0, 0.0),

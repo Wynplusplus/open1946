@@ -239,6 +239,46 @@ impl<'a> Classes<'a> {
         Some((cockpit, him.to_owned()))
     }
 
+    /// The classes a cockpit's instrument code runs on: the cockpit class and its superclasses,
+    /// their inner classes, and the few world helpers it computes with (`anim::Instruments`).
+    pub fn cockpit_pool(&self, cockpit: &str) -> Vec<classfile::ClassFile> {
+        let mut pool = self.chain(cockpit);
+        for helper in [
+            "com.maddox.il2.ai.AnglesFork",
+            "com.maddox.il2.fm.Pitot",
+            "com.maddox.il2.fm.Atmosphere",
+        ] {
+            pool.extend(self.chain(helper).into_iter().take(1));
+        }
+        let mut i = 0;
+        while i < pool.len() && pool.len() < 96 {
+            let outer = pool[i]
+                .this_class
+                .split('$')
+                .next()
+                .unwrap_or("")
+                .to_owned();
+            let inner: Vec<String> = pool[i]
+                .consts
+                .iter()
+                .filter_map(|c| match c {
+                    classfile::Const::Class(n) => pool[i].utf8(*n).map(str::to_owned),
+                    _ => None,
+                })
+                .filter(|n| n.starts_with(&format!("{outer}$")))
+                .collect();
+            for n in inner {
+                if !pool.iter().any(|c| c.this_class == n) {
+                    if let Some(c) = self.load(&n.replace('/', ".")) {
+                        pool.push(c);
+                    }
+                }
+            }
+            i += 1;
+        }
+        pool
+    }
+
     /// Evaluates a weapon class's `createProperties()` (gun and bullet data), e.g. `MGunMG131si`.
     pub fn gun_properties(&self, weapon: &str) -> Result<anim::Value, String> {
         let full = format!("com.maddox.il2.objects.weapons.{weapon}");

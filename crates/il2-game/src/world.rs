@@ -13,8 +13,8 @@ pub struct AircraftAssets {
     pub him: String,
     /// Hook frames in body coordinates (rest pose): gun muzzles, wheel and airframe points, …
     pub hook_frames: Vec<(String, glam::Mat4)>,
-    /// The pilot's cockpit: mesh (in body coordinates) and the eye point (`CAMERA` hook).
-    pub cockpit: Option<(MeshData, glam::Vec3)>,
+    /// The pilot's cockpit, in body coordinates.
+    pub cockpit: Option<crate::cockpit::Cockpit>,
     pub mesh: MeshData,
     pub rig: il2_render::scene::Rig,
     pub tracks: Vec<il2_data::anim::Track>,
@@ -255,23 +255,7 @@ pub fn load_aircraft(
     }
     .unwrap_or((num("H", 2.0), num("Pitch", 10.0)));
     let hook_frames = loader.hier_hook_frames(&him, &rest).unwrap_or_default();
-    let cockpit = classes.cockpit(class).and_then(|(_, cpath)| {
-        let mut cl = Loader::new(vfs);
-        let mut m = cl.load_hier(&cpath, false).ok()?;
-        m.textures = cl.take_images();
-        if std::env::var_os("IL2_TRACE").is_some() {
-            for w in &cl.warnings {
-                eprintln!("cockpit {cpath}: {w}");
-            }
-        }
-        let eye = cl
-            .hier_hooks(&cpath)
-            .ok()?
-            .into_iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case("CAMERA"))
-            .map(|(_, p)| p)?;
-        Some((m, eye))
-    });
+    let cockpit = crate::cockpit::Cockpit::load(vfs, &classes, class);
     Ok(AircraftAssets {
         him,
         hook_frames,

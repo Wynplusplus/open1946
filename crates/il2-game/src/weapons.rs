@@ -83,6 +83,8 @@ impl GunSpec {
 #[derive(Clone, Debug)]
 pub struct Gun {
     pub spec: Arc<GunSpec>,
+    /// The aircraft hook the gun sits on (`_MGUN01`, …).
+    pub hook: Option<String>,
     /// Fired during the last step.
     pub firing: bool,
     /// Hook frame in body coordinates (fires along its +x).
@@ -177,6 +179,7 @@ pub fn mount(
             trigger: weapons.triggers.get(i).copied().unwrap_or(0),
             ammo: *count,
             next_shot: 0.0,
+            hook: Some(hook.clone()),
             index: 0,
             count: 0,
         });

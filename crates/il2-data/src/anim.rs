@@ -130,6 +130,9 @@ enum V {
     Null,
     /// Second slot of a long/double local.
     Top,
+    /// A value of the running simulation, named by its access path (`fm.EI.engines[0]`); see
+    /// `Instruments`.
+    Sym(String),
 }
 
 struct Abort;
@@ -168,6 +171,16 @@ struct Machine<'a> {
     /// Static methods whose calls are recorded (name and arguments) instead of run.
     record: &'static [&'static str],
     recorded: Vec<(String, Vec<Value>)>,
+    /// Values of the simulation by access path; `Some` when running cockpit code.
+    world: Option<HashMap<String, f64>>,
+    /// Interpolators the code registered with `interpPut`.
+    interps: Vec<V>,
+    /// Paths read from `world` that it did not have.
+    missing: HashSet<String>,
+    /// Position of the instruction being run (diagnostics).
+    pc: usize,
+    /// The first failure inside a helper that cockpit code recovered from.
+    soft_error: Option<String>,
 }
 
 /// Zero value of a field or return descriptor.
@@ -215,7 +228,55 @@ fn desc_args(desc: &str) -> Vec<char> {
     out
 }
 
+/// A number of the type a descriptor names.
+fn typed(desc: &str, x: f64) -> V {
+    match desc.chars().next() {
+        Some('F') => V::F(x as f32),
+        Some('D') => V::D(x),
+        Some('J') => V::L(x as i64),
+        _ => V::I(x as i32),
+    }
+}
+
+/// The return descriptor of a method descriptor.
+fn ret_of(desc: &str) -> &str {
+    &desc[desc.find(')').map_or(desc.len(), |i| i + 1)..]
+}
+
+/// `com/maddox/il2/ai/World` -> `World`.
+fn short(class: &str) -> &str {
+    class.rsplit('/').next().unwrap_or(class)
+}
+
 impl<'a> Machine<'a> {
+    /// The simulation's value at `path`, typed by `desc`: objects stay symbolic, numbers come from
+    /// `world` (0 when unknown).
+    fn world_value(&mut self, path: String, desc: &str) -> Option<V> {
+        // The player's flight model, however the code reaches it.
+        let path = match path.strip_prefix("World.getPlayerFM()") {
+            Some(rest) => format!("fm{rest}"),
+            None => path.replacen("fm.actor.FM.", "fm.", 1),
+        };
+        match desc.chars().next() {
+            Some('V') => None,
+            Some('L' | '[') => Some(V::Sym(path)),
+            _ => {
+                let x = match self.world.as_ref().and_then(|w| w.get(&path)) {
+                    Some(&x) => x,
+                    // The engine's answers when nothing more is known: the aircraft's parts
+                    // are all there, and cockpit materials have no night variants.
+                    None if path.contains(".isChunkVisible(") => 1.0,
+                    None if path.contains(".materialFind(") => -1.0,
+                    None => {
+                        self.missing.insert(path);
+                        0.0
+                    }
+                };
+                Some(typed(desc, x))
+            }
+        }
+    }
+
     /// Finds a method along the chain, starting at class `from` (or the most derived when `None`).
     fn resolve(
         &self,
@@ -301,6 +362,40 @@ impl<'a> Machine<'a> {
         args: Vec<V>,
         depth: usize,
     ) -> Result<Option<V>, Abort> {
+        if depth == 0 {
+            WHY.with(|w| w.borrow_mut().clear());
+        }
+        let r = self.call_inner(cf, m, args, depth);
+        if r.is_err() && WHY.with(|w| w.borrow().is_empty()) {
+            let op = m.code.get(self.pc).copied().unwrap_or(0);
+            let at = format!(
+                "in {}.{} at pc {} (op 0x{op:02X})",
+                short(&cf.this_class),
+                m.name,
+                self.pc
+            );
+            WHY.with(|w| *w.borrow_mut() = at);
+        }
+        // Cockpit code: a failing helper returns its default, so one unsupported call doesn't
+        // stop the remaining instruments.
+        if r.is_err() && self.world.is_some() && depth > 0 && self.budget > 0 {
+            if self.soft_error.is_none() {
+                self.soft_error = Some(last_abort());
+            }
+            WHY.with(|w| w.borrow_mut().clear());
+            let ret = ret_of(&m.desc);
+            return Ok((ret != "V").then(|| default_of(ret)));
+        }
+        r
+    }
+
+    fn call_inner(
+        &mut self,
+        cf: &'a ClassFile,
+        m: &'a Method,
+        args: Vec<V>,
+        depth: usize,
+    ) -> Result<Option<V>, Abort> {
         if depth > 8 || m.code.is_empty() {
             return Err(Abort);
         }
@@ -347,6 +442,15 @@ impl<'a> Machine<'a> {
                 }
             };
         }
+        macro_rules! popl {
+            () => {
+                match pop!() {
+                    V::L(l) => l,
+                    V::I(i) => i as i64,
+                    _ => return Err(Abort),
+                }
+            };
+        }
         macro_rules! popi {
             () => {
                 match pop!() {
@@ -356,7 +460,11 @@ impl<'a> Machine<'a> {
             };
         }
         loop {
-            self.budget = self.budget.checked_sub(1).ok_or(Abort)?;
+            self.budget = self
+                .budget
+                .checked_sub(1)
+                .ok_or_else(|| why("budget".into()))?;
+            self.pc = pc;
             let op = u8_at(pc)?;
             let mut next = pc + 1;
             match op {
@@ -402,18 +510,23 @@ impl<'a> Machine<'a> {
                 ),
                 0x32 => {
                     let i = popi!();
-                    let V::OArr(a) = pop!() else {
-                        return Err(why("aaload".into()));
-                    };
-                    st.push(self.oarrays[a].get(i as usize).cloned().ok_or(Abort)?);
+                    match pop!() {
+                        V::OArr(a) => {
+                            st.push(self.oarrays[a].get(i as usize).cloned().ok_or(Abort)?)
+                        }
+                        V::Sym(p) => st.push(V::Sym(format!("{p}[{i}]"))),
+                        V::Null if self.lenient => st.push(V::Null),
+                        _ => return Err(why("aaload".into())),
+                    }
                 }
                 0x53 => {
                     let v = pop!();
                     let i = popi!();
-                    let V::OArr(a) = pop!() else {
-                        return Err(why("aastore".into()));
-                    };
-                    *self.oarrays[a].get_mut(i as usize).ok_or(Abort)? = v;
+                    match pop!() {
+                        V::OArr(a) => *self.oarrays[a].get_mut(i as usize).ok_or(Abort)? = v,
+                        V::Sym(_) | V::Null if self.lenient => {}
+                        _ => return Err(why("aastore".into())),
+                    }
                 }
                 0xBD => {
                     let n = popi!();
@@ -424,11 +537,20 @@ impl<'a> Machine<'a> {
                     st.push(V::OArr(self.oarrays.len() - 1));
                     next = pc + 3;
                 }
-                0x2E | 0x30 => {
+                0x2E..=0x31 => {
                     let i = popi!();
-                    let V::Arr(a) = pop!() else { return Err(Abort) };
-                    let v = *self.arrays[a].get(i as usize).ok_or(Abort)?;
-                    st.push(if op == 0x30 { V::F(v) } else { V::I(v as i32) });
+                    let desc = ["I", "J", "F", "D"][(op - 0x2E) as usize];
+                    match pop!() {
+                        V::Arr(a) => {
+                            let v = *self.arrays[a].get(i as usize).ok_or(Abort)?;
+                            st.push(typed(desc, v as f64));
+                        }
+                        V::Sym(p) => {
+                            st.push(self.world_value(format!("{p}[{i}]"), desc).ok_or(Abort)?)
+                        }
+                        V::Null if self.lenient => st.push(typed(desc, 0.0)),
+                        _ => return Err(Abort),
+                    }
                 }
                 0x36..=0x3A => {
                     let v = pop!();
@@ -571,7 +693,7 @@ impl<'a> Machine<'a> {
                     };
                 }
                 0xA7 => next = (pc as i64 + i16_at(pc + 1)? as i64) as usize,
-                0xAC | 0xAE | 0xAF | 0xB0 => return Ok(Some(pop!())),
+                0xAC..=0xB0 => return Ok(Some(pop!())),
                 0xB1 => return Ok(None),
                 0xB2 => {
                     let (class, name, desc) = cf.member(u16_at(pc + 1)?).ok_or(Abort)?;
@@ -583,10 +705,16 @@ impl<'a> Machine<'a> {
                             if !self.statics.contains_key(&key) {
                                 self.run_clinit(class, depth);
                             }
-                            self.statics
-                                .get(&key)
-                                .cloned()
-                                .unwrap_or_else(|| default_of(desc))
+                            match self.statics.get(&key) {
+                                Some(v) => v.clone(),
+                                None if self.world.is_some()
+                                    && !self.chain.iter().any(|c| c.this_class == class) =>
+                                {
+                                    self.world_value(format!("{}.{name}", short(class)), desc)
+                                        .unwrap_or(V::Null)
+                                }
+                                None => default_of(desc),
+                            }
                         }
                     };
                     st.push(v);
@@ -603,6 +731,8 @@ impl<'a> Machine<'a> {
                     let v = match pop!() {
                         V::This => self.fields.get(name).cloned(),
                         V::Obj(o) => self.objects[o].1.get(name).cloned(),
+                        V::Sym(p) => self.world_value(format!("{p}.{name}"), desc),
+                        _ if self.lenient => None,
                         _ => return Err(why(format!("getfield {name} of another object"))),
                     };
                     st.push(v.unwrap_or_else(|| default_of(desc)));
@@ -618,6 +748,7 @@ impl<'a> Machine<'a> {
                         V::Obj(o) => {
                             self.objects[o].1.insert(name.to_owned(), v);
                         }
+                        _ if self.lenient => {}
                         _ => return Err(why(format!("putfield {name} of another object"))),
                     }
                     next = pc + 3;
@@ -635,6 +766,11 @@ impl<'a> Machine<'a> {
                     let n = match pop!() {
                         V::Arr(a) => self.arrays[a].len(),
                         V::OArr(a) => self.oarrays[a].len(),
+                        V::Sym(p) => match self.world_value(format!("{p}.length"), "I") {
+                            Some(V::I(n)) => n.max(0) as usize,
+                            _ => 0,
+                        },
+                        V::Null if self.lenient => 0,
                         _ => return Err(Abort),
                     };
                     st.push(V::I(n as i32));
@@ -653,9 +789,17 @@ impl<'a> Machine<'a> {
                 }
                 0x33 | 0x34 | 0x35 => {
                     let i = popi!();
-                    let V::Arr(a) = pop!() else { return Err(Abort) };
-                    let v = *self.arrays[a].get(i as usize).ok_or(Abort)?;
-                    st.push(V::I(v as i32));
+                    match pop!() {
+                        V::Arr(a) => {
+                            let v = *self.arrays[a].get(i as usize).ok_or(Abort)?;
+                            st.push(V::I(v as i32));
+                        }
+                        V::Sym(p) => {
+                            st.push(self.world_value(format!("{p}[{i}]"), "I").ok_or(Abort)?)
+                        }
+                        V::Null if self.lenient => st.push(V::I(0)),
+                        _ => return Err(Abort),
+                    }
                 }
                 0x4F | 0x54 | 0x55 | 0x56 => {
                     let v = popi!();
@@ -687,18 +831,19 @@ impl<'a> Machine<'a> {
                     let target = cf.class_name(u16_at(pc + 1)?).ok_or(Abort)?;
                     let v = pop!();
                     st.push(V::I(
-                        (v == V::This && self.chain.iter().any(|c| c.this_class == target)) as i32,
+                        ((v == V::This && self.chain.iter().any(|c| c.this_class == target))
+                            || matches!(v, V::Sym(_))) as i32,
                     ));
                     next = pc + 3;
                 }
-                0xB6..=0xB8 => {
+                0xB6..=0xB9 => {
                     let (class, name, desc) = cf.member(u16_at(pc + 1)?).ok_or(Abort)?;
                     let nargs = desc_args(desc).len();
                     if st.len() < nargs {
                         return Err(Abort);
                     }
                     let args = st.split_off(st.len() - nargs);
-                    next = pc + 3;
+                    next = pc + if op == 0xB9 { 5 } else { 3 };
                     let ret = if op == 0xB8 {
                         self.static_call(class, name, desc, args, depth)?
                     } else {
@@ -709,6 +854,144 @@ impl<'a> Machine<'a> {
                         st.push(r);
                     }
                 }
+                0x58 => {
+                    if !matches!(pop!(), V::L(_) | V::D(_)) {
+                        pop!();
+                    }
+                }
+                0x5C => {
+                    let a = pop!();
+                    if matches!(a, V::L(_) | V::D(_)) {
+                        st.extend([a.clone(), a]);
+                    } else {
+                        let b = pop!();
+                        st.extend([b.clone(), a.clone(), b, a]);
+                    }
+                }
+                0x61 | 0x65 | 0x69 | 0x6D | 0x71 | 0x7F | 0x81 | 0x83 => {
+                    let (b, a) = (popl!(), popl!());
+                    st.push(V::L(match op {
+                        0x61 => a.wrapping_add(b),
+                        0x65 => a.wrapping_sub(b),
+                        0x69 => a.wrapping_mul(b),
+                        0x6D => a.checked_div(b).ok_or(Abort)?,
+                        0x71 => a.checked_rem(b).ok_or(Abort)?,
+                        0x7F => a & b,
+                        0x81 => a | b,
+                        _ => a ^ b,
+                    }));
+                }
+                0x70 | 0x78 | 0x7A | 0x7C | 0x7E | 0x80 | 0x82 => {
+                    let (b, a) = (popi!(), popi!());
+                    st.push(V::I(match op {
+                        0x70 => a.checked_rem(b).ok_or(Abort)?,
+                        0x78 => a.wrapping_shl(b as u32 & 31),
+                        0x7A => a >> (b & 31),
+                        0x7C => ((a as u32) >> (b & 31)) as i32,
+                        0x7E => a & b,
+                        0x80 => a | b,
+                        _ => a ^ b,
+                    }));
+                }
+                0x79 | 0x7B | 0x7D => {
+                    let b = popi!();
+                    let a = popl!();
+                    st.push(V::L(match op {
+                        0x79 => a.wrapping_shl(b as u32 & 63),
+                        0x7B => a >> (b & 63),
+                        _ => ((a as u64) >> (b & 63)) as i64,
+                    }));
+                }
+                0x73 => {
+                    let (b, a) = (popd!(), popd!());
+                    st.push(V::D(a % b));
+                }
+                0x75 => {
+                    let a = popl!();
+                    st.push(V::L(-a));
+                }
+                0x85 => {
+                    let a = popi!();
+                    st.push(V::L(a as i64));
+                }
+                0x88 => {
+                    let a = popl!();
+                    st.push(V::I(a as i32));
+                }
+                0x89 => {
+                    let a = popl!();
+                    st.push(V::F(a as f32));
+                }
+                0x8A => {
+                    let a = popl!();
+                    st.push(V::D(a as f64));
+                }
+                0x8C => {
+                    let a = popf!();
+                    st.push(V::L(a as i64));
+                }
+                0x8F => {
+                    let a = popd!();
+                    st.push(V::L(a as i64));
+                }
+                0x91 => {
+                    let a = popi!();
+                    st.push(V::I(a as i8 as i32));
+                }
+                0x92 => {
+                    let a = popi!();
+                    st.push(V::I(a as u16 as i32));
+                }
+                0x93 => {
+                    let a = popi!();
+                    st.push(V::I(a as i16 as i32));
+                }
+                0x94 => {
+                    let (b, a) = (popl!(), popl!());
+                    st.push(V::I((a > b) as i32 - (a < b) as i32));
+                }
+                0xA5 | 0xA6 => {
+                    let (b, a) = (pop!(), pop!());
+                    let take = (a == b) == (op == 0xA5);
+                    next = if take {
+                        (pc as i64 + i16_at(pc + 1)? as i64) as usize
+                    } else {
+                        pc + 3
+                    };
+                }
+                0xAA | 0xAB => {
+                    let key = popi!();
+                    let base = (pc + 4) & !3;
+                    let i32_at = |p: usize| -> Result<i32, Abort> {
+                        Ok(i32::from_be_bytes([
+                            u8_at(p)?,
+                            u8_at(p + 1)?,
+                            u8_at(p + 2)?,
+                            u8_at(p + 3)?,
+                        ]))
+                    };
+                    let default = i32_at(base)?;
+                    let off = if op == 0xAA {
+                        let (lo, hi) = (i32_at(base + 4)?, i32_at(base + 8)?);
+                        if key < lo || key > hi {
+                            default
+                        } else {
+                            i32_at(base + 12 + 4 * (key - lo) as usize)?
+                        }
+                    } else {
+                        let n = i32_at(base + 4)?.max(0) as usize;
+                        let mut off = default;
+                        for k in 0..n {
+                            if i32_at(base + 8 + 8 * k)? == key {
+                                off = i32_at(base + 12 + 8 * k)?;
+                                break;
+                            }
+                        }
+                        off
+                    };
+                    next = (pc as i64 + off as i64) as usize;
+                }
+                0xBF => return Err(why("athrow".into())),
                 _ => return Err(why(format!("opcode 0x{op:02X}"))),
             }
             pc = next;
@@ -742,6 +1025,37 @@ impl<'a> Machine<'a> {
                 ("min", "(FF)F") => V::F(f(&args[0])?.min(f(&args[1])?)),
                 ("toRadians", "(D)D") => V::D(d(&args[0])?.to_radians()),
                 ("sqrt", "(D)D") => V::D(d(&args[0])?.sqrt()),
+                ("toDegrees", "(D)D") => V::D(d(&args[0])?.to_degrees()),
+                ("tan", "(D)D") => V::D(d(&args[0])?.tan()),
+                ("asin", "(D)D") => V::D(d(&args[0])?.asin()),
+                ("acos", "(D)D") => V::D(d(&args[0])?.acos()),
+                ("atan", "(D)D") => V::D(d(&args[0])?.atan()),
+                ("atan2", "(DD)D") => V::D(d(&args[0])?.atan2(d(&args[1])?)),
+                ("pow", "(DD)D") => V::D(d(&args[0])?.powf(d(&args[1])?)),
+                ("exp", "(D)D") => V::D(d(&args[0])?.exp()),
+                ("log", "(D)D") => V::D(d(&args[0])?.ln()),
+                ("log10", "(D)D") => V::D(d(&args[0])?.log10()),
+                ("floor", "(D)D") => V::D(d(&args[0])?.floor()),
+                ("ceil", "(D)D") => V::D(d(&args[0])?.ceil()),
+                ("rint", "(D)D") => V::D(d(&args[0])?.round_ties_even()),
+                ("round", "(F)I") => V::I(f(&args[0])?.round() as i32),
+                ("round", "(D)J") => V::L(d(&args[0])?.round() as i64),
+                ("signum", "(F)F") => V::F(f(&args[0])?.signum()),
+                ("signum", "(D)D") => V::D(d(&args[0])?.signum()),
+                ("max", "(DD)D") => V::D(d(&args[0])?.max(d(&args[1])?)),
+                ("min", "(DD)D") => V::D(d(&args[0])?.min(d(&args[1])?)),
+                ("max", "(II)I") | ("min", "(II)I") | ("abs", "(I)I") => {
+                    let i = |v: &V| match v {
+                        V::I(x) => Ok(*x),
+                        _ => Err(Abort),
+                    };
+                    match name {
+                        "max" => V::I(i(&args[0])?.max(i(&args[1])?)),
+                        "min" => V::I(i(&args[0])?.min(i(&args[1])?)),
+                        _ => V::I(i(&args[0])?.abs()),
+                    }
+                }
+                ("random", "()D") => V::D(0.5),
                 _ => return Err(why(format!("Math.{name}{desc}"))),
             };
             return Ok(Some(r));
@@ -765,6 +1079,9 @@ impl<'a> Machine<'a> {
             )));
         }
         let Some((cf, m)) = self.resolve(Some(class), name, desc) else {
+            if self.world.is_some() {
+                return Ok(self.world_value(format!("{}.{name}()", short(class)), ret_of(desc)));
+            }
             if self.lenient {
                 let ret = &desc[desc.find(')').map_or(desc.len(), |i| i + 1)..];
                 return Ok((ret != "V").then(|| default_of(ret)));
@@ -808,9 +1125,36 @@ impl<'a> Machine<'a> {
         depth: usize,
     ) -> Result<Option<V>, Abort> {
         match recv {
+            V::Sym(p) => {
+                let strs: Vec<String> = args
+                    .iter()
+                    .filter_map(|a| match a {
+                        V::Str(s) => Some(format!("{s:?}")),
+                        _ => None,
+                    })
+                    .collect();
+                Ok(self.world_value(format!("{p}.{name}({})", strs.join(",")), ret_of(desc)))
+            }
+            V::This if self.world.is_some() && name == "interpPut" => {
+                if let Some(a) = args.first() {
+                    self.interps.push(a.clone());
+                }
+                Ok((ret_of(desc) != "V").then(|| default_of(ret_of(desc))))
+            }
+            // Cockpit code: the engine base classes' constructors are not run.
+            V::This
+                if self.world.is_some()
+                    && name == "<init>"
+                    && self.chain.first().is_some_and(|c| c.this_class != class) =>
+            {
+                Ok(None)
+            }
             V::Hier => {
                 let node = match args.first() {
                     Some(V::Str(s)) => s.clone(),
+                    _ if self.lenient => {
+                        return Ok((ret_of(desc) != "V").then(|| default_of(ret_of(desc))));
+                    }
                     _ => return Err(Abort),
                 };
                 let f = |v: &V| match v {
@@ -843,6 +1187,9 @@ impl<'a> Machine<'a> {
                     }
                     // Assume the named node exists.
                     ("chunkFindCheck", "(Ljava/lang/String;)I") => return Ok(Some(V::I(0))),
+                    _ if self.lenient => {
+                        return Ok((ret_of(desc) != "V").then(|| default_of(ret_of(desc))))
+                    }
                     _ => return Err(why(format!("HierMesh.{name}{desc}"))),
                 }
                 Ok(None)
@@ -863,6 +1210,53 @@ impl<'a> Machine<'a> {
                 let mut full = vec![V::This];
                 full.extend(args);
                 self.call(cf, m, full, depth + 1)
+            }
+            V::Obj(o)
+                if matches!(
+                    self.objects[o].0.as_str(),
+                    "java/lang/StringBuffer" | "java/lang/StringBuilder"
+                ) =>
+            {
+                let text = |m: &Self, v: &V| match v {
+                    V::Str(s) => s.clone(),
+                    V::I(i) if desc.contains("(C)") => char::from_u32(*i as u32)
+                        .map(String::from)
+                        .unwrap_or_default(),
+                    V::I(i) if desc.contains("(Z)") => (*i != 0).to_string(),
+                    V::I(i) => i.to_string(),
+                    V::L(l) => l.to_string(),
+                    V::F(f) => format!("{f:?}"),
+                    V::D(d) => format!("{d:?}"),
+                    V::Sym(p) => p.clone(),
+                    V::Obj(x) => match m.objects[*x].1.get("$s") {
+                        Some(V::Str(s)) => s.clone(),
+                        _ => String::new(),
+                    },
+                    _ => "null".into(),
+                };
+                let cur = match self.objects[o].1.get("$s") {
+                    Some(V::Str(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                match name {
+                    "<init>" => {
+                        let init = args
+                            .first()
+                            .filter(|_| desc.contains("String"))
+                            .map(|a| text(self, a))
+                            .unwrap_or_default();
+                        self.objects[o].1.insert("$s".into(), V::Str(init));
+                        Ok(None)
+                    }
+                    "append" => {
+                        let add = args.first().map(|a| text(self, a)).unwrap_or_default();
+                        self.objects[o].1.insert("$s".into(), V::Str(cur + &add));
+                        Ok(Some(recv))
+                    }
+                    "toString" => Ok(Some(V::Str(cur))),
+                    "length" => Ok(Some(V::I(cur.chars().count() as i32))),
+                    _ => Err(why(format!("StringBuffer.{name}"))),
+                }
             }
             V::Obj(_) => {
                 // Constructors and `super.` calls resolve from the referenced class, others from the object's.
@@ -948,6 +1342,11 @@ pub fn evaluate(classes: &[ClassFile], name: &str, desc: &str) -> Result<Value, 
         lenient: false,
         record: &[],
         recorded: Vec::new(),
+        world: None,
+        interps: Vec::new(),
+        missing: HashSet::new(),
+        pc: 0,
+        soft_error: None,
     };
     let (cf, meth) = m
         .resolve(None, name, desc)
@@ -978,6 +1377,11 @@ pub fn record_clinit(
         lenient: true,
         record,
         recorded: Vec::new(),
+        world: None,
+        interps: Vec::new(),
+        missing: HashSet::new(),
+        pc: 0,
+        soft_error: None,
     };
     if let Some(c) = classes.first() {
         let name = c.this_class.clone();
@@ -1006,6 +1410,11 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
         lenient: false,
         record: &[],
         recorded: Vec::new(),
+        world: None,
+        interps: Vec::new(),
+        missing: HashSet::new(),
+        pc: 0,
+        soft_error: None,
     };
     let mut frames: Vec<BTreeMap<String, NodeState>> = Vec::new();
     let virtual_name = match ch {
@@ -1078,6 +1487,111 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
         nodes,
         imported: true,
     })
+}
+
+/// A cockpit's instrument code, run against the simulation (`docs/behavior/cockpit.md`,
+/// "Instruments").
+///
+/// The cockpit object is constructed once (its own constructor and field initializers; the
+/// engine's base constructors are skipped). Each update runs the interpolators it registered and
+/// then `reflectWorldToInstruments`. Everything the code reads from the flight model or the world
+/// is symbolic: a read of `this.fm.EI.engines[0].getRPM()` yields the number stored under that
+/// path in the table passed to `update`.
+pub struct Instruments {
+    m: Machine<'static>,
+    reflect: Option<(&'static ClassFile, &'static Method)>,
+    /// Why the last update stopped early, if it did.
+    pub error: Option<String>,
+}
+
+impl Instruments {
+    /// `pool` holds the cockpit class and its superclasses first, then any helper classes.
+    pub fn new(pool: Vec<ClassFile>) -> Option<Self> {
+        // The machine borrows its classes for its whole life; cockpits are few, so leak them.
+        let chain: &'static [ClassFile] = Box::leak(pool.into_boxed_slice());
+        let mut m = Machine {
+            chain,
+            arrays: vec![vec![0.0; 3], vec![0.0; 3]],
+            oarrays: Vec::new(),
+            objects: Vec::new(),
+            out: BTreeMap::new(),
+            budget: 2_000_000,
+            statics: HashMap::new(),
+            fields: HashMap::from([
+                ("fm".to_owned(), V::Sym("fm".into())),
+                ("mesh".to_owned(), V::Hier),
+            ]),
+            clinit_done: HashSet::new(),
+            lenient: true,
+            record: &[],
+            recorded: Vec::new(),
+            world: Some(HashMap::new()),
+            interps: Vec::new(),
+            missing: HashSet::new(),
+            pc: 0,
+            soft_error: None,
+        };
+        let first = chain.first()?;
+        m.run_clinit(&first.this_class, 0);
+        let error = match first.method("<init>", "()V") {
+            Some(init) => m
+                .call(first, init, vec![V::This], 0)
+                .err()
+                .map(|_| last_abort()),
+            None => Some("no constructor".into()),
+        };
+        // Whatever the constructor did, these are the flight model and the cockpit mesh.
+        m.fields.insert("fm".into(), V::Sym("fm".into()));
+        m.fields.insert("mesh".into(), V::Hier);
+        m.out.clear();
+        let reflect = m.resolve(None, "reflectWorldToInstruments", "(F)V");
+        Some(Instruments { m, reflect, error })
+    }
+
+    /// Runs `ticks` interpolator steps and one instrument update against `world`, and returns the
+    /// state of every node the cockpit code has set so far.
+    pub fn update(
+        &mut self,
+        world: HashMap<String, f64>,
+        ticks: usize,
+    ) -> &BTreeMap<String, NodeState> {
+        let m = &mut self.m;
+        m.world = Some(world);
+        self.error = None;
+        for _ in 0..ticks {
+            for k in 0..m.interps.len() {
+                let obj = m.interps[k].clone();
+                let Some(class) = m.class_of(&obj) else {
+                    continue;
+                };
+                if let Some((cf, meth)) = m.resolve_class(&class, "tick", "()Z") {
+                    m.budget = 200_000;
+                    if m.call(cf, meth, vec![obj], 0).is_err() {
+                        self.error = Some(format!("{class}.tick: {}", last_abort()));
+                    }
+                }
+            }
+        }
+        if let Some((cf, meth)) = self.reflect {
+            m.budget = 400_000;
+            if m.call(cf, meth, vec![V::This, V::F(1.0)], 0).is_err() {
+                self.error = Some(format!("reflectWorldToInstruments: {}", last_abort()));
+            }
+        }
+        &m.out
+    }
+
+    /// The first failure inside a helper call that was skipped.
+    pub fn soft_error(&self) -> Option<&str> {
+        self.m.soft_error.as_deref()
+    }
+
+    /// Paths the code read that the last tables did not have (for wiring up new values).
+    pub fn missing(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.m.missing.iter().cloned().collect();
+        v.sort();
+        v
+    }
 }
 
 #[cfg(test)]
