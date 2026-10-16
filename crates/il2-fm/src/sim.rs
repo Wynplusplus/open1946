@@ -94,6 +94,12 @@ pub struct Sim {
     pub aoa: f64,
     pub ias: f64,
     pub thrust: f64,
+    /// Lifting and control areas left by damage.
+    pub sq: crate::damage::Squares,
+    /// Load limits, fatigue and the parts still attached.
+    pub structure: crate::damage::Structure,
+    /// Aerodynamic and thrust load factor along body z of the last step.
+    pub overload: f64,
 }
 
 fn deg(r: f64) -> f64 {
@@ -174,6 +180,8 @@ impl Sim {
         let fuel = ac.fuel_max;
         let nitro = ac.nitro_max;
         let ac_trim = ac.controls.default_trim;
+        let sq = crate::damage::Squares::new(&ac);
+        let structure = crate::damage::Structure::new(&ac);
         // In flight, blades start at their working pitch for the airspeed (no windmilling overspeed).
         let engines = ac
             .engines
@@ -220,6 +228,9 @@ impl Sim {
             aoa: 0.0,
             ias: 0.0,
             thrust: 0.0,
+            sq,
+            structure,
+            overload: 1.0,
         }
     }
 
@@ -263,7 +274,12 @@ impl Sim {
         for i in 0..3 {
             self.trim[i] = filter(dt, self.trim_target[i], self.trim[i], 999.9, 0.25);
         }
-        let ail = trimmed(input.aileron, self.trim[0], ail_lim);
+        let ail_in = if self.structure.ailerons_failed {
+            0.0
+        } else {
+            input.aileron
+        };
+        let ail = trimmed(ail_in, self.trim[0], ail_lim);
         self.ct.aileron = filter(
             dt,
             ail,
@@ -297,7 +313,7 @@ impl Sim {
             .fold(1.0, f64::max);
         // The player's throttle acts directly.
         self.ct.throttle = input.throttle.clamp(0.0, max_throttle);
-        let flaps_target = if c.flaps {
+        let flaps_target = if c.flaps && !self.structure.flaps_failed {
             input.flaps.clamp(0.0, 1.0)
         } else {
             0.0
@@ -406,7 +422,7 @@ impl Sim {
 
         // Wing halves.
         let delta = ac.wing_v * aos.to_radians().sin()
-            + ac.sens_roll * (1.0 - 0.1 * flap) * 14.0 * self.ct.aileron;
+            + ac.sens_roll * self.sq.sens[0] * (1.0 - 0.1 * flap) * 14.0 * self.ct.aileron;
         let half = |side: f64| {
             let p = DVec3::new(-ac.gcenter, side * 0.85 * ac.arm_wing_out, -0.5);
             let mut vn = w.cross(p) + vflow;
@@ -444,7 +460,7 @@ impl Sim {
         let mut rudder_infl = 1.0;
         if al > crit || ar > crit {
             self.spin_coeff += 0.2 * dt;
-            if ac.rudder_area > 0.0 && self.ct.rudder.abs() > 0.5 && self.ct.rudder * w.z > 0.0 {
+            if self.sq.rudders > 0.0 && self.ct.rudder.abs() > 0.5 && self.ct.rudder * w.z > 0.0 {
                 self.spin_coeff -= 0.3 * dt;
             }
             let amax = al.max(ar);
@@ -495,8 +511,12 @@ impl Sim {
         }
         let qt = q(vn);
         let defl_e = self.ct.elevator * if self.ct.elevator > 0.0 { 28.0 } else { 20.0 };
-        let tail_a =
-            |dz: f64| -deg((vn.z + dz).atan2(vn.x)) - 2.0 - 0.002 * v - ac.sens_pitch * defl_e;
+        let tail_a = |dz: f64| {
+            -deg((vn.z + dz).atan2(vn.x))
+                - 2.0
+                - 0.002 * v
+                - ac.sens_pitch * self.sq.sens[1] * defl_e
+        };
         let (al_t, ar_t) = if single_prop {
             (
                 tail_a(-0.36 * side * prop_sign),
@@ -507,32 +527,33 @@ impl Sim {
         };
         let tail_force = |a: f64| {
             let (cx, cy) = self.tail.coeffs(a);
-            DVec3::new(-qt * cx, 0.0, qt * cy) * ((ac.stab_area + ac.elevator_area) * 0.5)
+            DVec3::new(-qt * cx, 0.0, qt * cy) * ((self.sq.stab + self.sq.elevators) * 0.5)
         };
         let fhl = tail_force(al_t);
         let fhr = tail_force(ar_t);
-        let defl_r = if ac.rudder_area < 0.05 {
+        let defl_r = if self.sq.rudders < 0.05 {
             0.0
         } else {
             28.0 * self.ct.rudder
         };
-        let fin_a =
-            -deg((vn.y - 0.5 * side * prop_sign).atan2(vn.x)) + ac.sens_yaw * rudder_infl * defl_r;
+        let fin_a = -deg((vn.y - 0.5 * side * prop_sign).atan2(vn.x))
+            + ac.sens_yaw * self.sq.sens[2] * rudder_infl * defl_r;
         let (cx, cy) = self.tail.coeffs(fin_a);
-        let fv = DVec3::new(-qt * cx, qt * cy, 0.0) * (0.2 + 1.5 * ac.keel_area + ac.rudder_area);
+        let fv = DVec3::new(-qt * cx, qt * cy, 0.0) * (0.2 + 1.5 * self.sq.keel + self.sq.rudders);
 
         // Wing forces and drag.
-        let half_area: f64 = ac.wing_sections.iter().sum();
-        let mut fwl = cwl * half_area;
-        let mut fwr = cwr * half_area;
-        let parasite = 0.0;
+        let mut fwl = cwl * self.sq.wing_l.iter().sum::<f64>();
+        let mut fwr = cwr * self.sq.wing_r.iter().sum::<f64>();
+        let parasite = self.sq.drag_produced;
         fwl.x -= q(vflow) * parasite * 0.5;
         fwr.x -= q(vflow) * parasite * 0.5;
         let mut af = fwl + fwr;
+        let mut excessive_force = false;
         if !af.is_finite() {
             af = DVec3::ZERO;
         } else if af.length() > gravity * 50.0 {
             af = af.normalize() * gravity * 50.0;
+            excessive_force = true;
         }
 
         // Moments.
@@ -561,6 +582,7 @@ impl Sim {
         am += DVec3::new(-ac.arm_stab, 1.0, 0.0).cross(fhl);
         am += DVec3::new(-ac.arm_stab, -1.0, 0.0).cross(fhr);
         am += DVec3::new(-ac.arm_keel, 0.0, 1.0).cross(fv);
+        am += self.tail_moments(vflow.x, prop_sign);
         if !am.is_finite() {
             am = DVec3::ZERO;
         } else if am.length() > gravity * 150.0 {
@@ -643,6 +665,18 @@ impl Sim {
         self.aoa = aoa;
         self.ias = ias;
         self.thrust = thrust;
+        self.overload = (af.z + gear_f.0.z) / gravity;
+        let checks = crate::damage::StructureInputs {
+            dt,
+            mass,
+            overload: self.overload,
+            excessive_force,
+            ias,
+            on_ground: self.on_ground,
+            flaps_lever: input.flaps,
+            flaps: self.ct.flaps,
+        };
+        self.check_structure(&checks);
     }
 
     fn gear_forces(&mut self, ground: &impl Ground, mass: f64) -> (DVec3, DVec3) {

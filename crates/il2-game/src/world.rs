@@ -21,6 +21,12 @@ pub struct AircraftAssets {
     pub fm: Aircraft,
     /// `[Gear] H` and `Pitch` (degrees): parked origin height and attitude.
     pub parked: (f64, f64),
+    /// Nodes hidden at the start (`Hidden` in the hierarchy): damage states, caps, …
+    pub hidden: Vec<bool>,
+    /// The chunk each of `fm.gear`'s contact points belongs to.
+    pub gear_chunks: Vec<String>,
+    /// Twin-fin layout (`Scheme2a`, `Scheme5`, `Scheme7`).
+    pub twin_fin: bool,
 }
 
 /// Loads the height field of a map's `load.ini`.
@@ -94,6 +100,24 @@ fn gear_points(hooks: &[(String, glam::Vec3)], fmd: &SectFile, gear_moves: bool)
     out
 }
 
+/// The hooks `gear_points` takes its points from, in the same order.
+fn gear_hook_names(hooks: &[(String, glam::Vec3)]) -> Vec<String> {
+    let mut out: Vec<String> = ["_ClipLGear", "_ClipRGear", "_ClipCGear"]
+        .iter()
+        .filter(|n| hooks.iter().any(|(h, _)| h.eq_ignore_ascii_case(n)))
+        .map(|n| n.to_string())
+        .collect();
+    for (name, _) in hooks {
+        if name.len() > 5
+            && name[..5].eq_ignore_ascii_case("_clip")
+            && name[5..].chars().all(|c| c.is_ascii_digit())
+        {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
 /// Parked origin height and nose-up pitch (degrees) from the wheel points, like the runtime's land
 /// pose: the line through the main-wheel mid-point and the third wheel is level; the height is
 /// lowered by the springs' sink `m·g/2 700 000`.
@@ -138,8 +162,15 @@ pub fn load_aircraft(
     let tracks = classes.animations(class);
     let mut loader = Loader::new(vfs);
     loader.season = Some("summer".into());
-    let mut mesh = loader.load_hier(&him, false)?;
+    // Every node is loaded, hidden damage states too; `hidden` says which show at first.
+    let mut mesh = loader.load_hier(&him, true)?;
     let rig = loader.hier_rig(&him)?;
+    let hidden = il2_formats::him::Hier::parse(&vfs.read(&him).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?
+        .nodes
+        .iter()
+        .map(|n| n.hidden)
+        .collect();
     // Wheel hooks are taken with the gear extended (the meshes are modelled retracted).
     let mut assets_for_pose = AircraftAssets {
         him: him.clone(),
@@ -150,6 +181,9 @@ pub fn load_aircraft(
         tracks: tracks.clone(),
         fm: Aircraft::empty(),
         parked: (0.0, 0.0),
+        hidden: Vec::new(),
+        gear_chunks: Vec::new(),
+        twin_fin: false,
     };
     let down = pose(
         &assets_for_pose,
@@ -256,6 +290,17 @@ pub fn load_aircraft(
     .unwrap_or((num("H", 2.0), num("Pitch", 10.0)));
     let hook_frames = loader.hier_hook_frames(&him, &rest).unwrap_or_default();
     let cockpit = crate::cockpit::Cockpit::load(vfs, &classes, class, &him);
+    let owners = loader.hier_hook_owners(&him).unwrap_or_default();
+    let gear_chunks = gear_hook_names(&hooks)
+        .iter()
+        .map(|h| {
+            owners
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(h))
+                .map_or_else(|| "CF_D0".to_owned(), |(_, node)| node.clone())
+        })
+        .collect();
+    let twin_fin = is(&["Scheme2a", "Scheme5", "Scheme7"]);
     Ok(AircraftAssets {
         him,
         hook_frames,
@@ -265,6 +310,9 @@ pub fn load_aircraft(
         tracks,
         fm,
         parked,
+        hidden,
+        gear_chunks,
+        twin_fin,
     })
 }
 

@@ -54,3 +54,87 @@ for `n` hits it becomes `1 − (1 − p)ⁿ`.
   and upwards by `U(0, 1.2)³·|v|`, then scaled to `(dir·v̂)²·|v|`.
 - High-explosive rounds explode at the impact point.
 - OpenIL2 hit-tests objects against their LOD-0 bounding spheres.
+
+## Aircraft
+
+### Parts and damage levels
+An aircraft mesh splits into chunks named after parts with a damage level: `WingLIn_D0`,
+`WingLIn_D1`, … (the `_D0` chunk is intact, higher levels are hidden at the start). A chunk
+belongs to the first entry of the runtime's part list its name starts with: `AroneL`, `AroneR`,
+`CF`, `Engine1`–`Engine4`, `GearC2`, `FlapR`, `GearL2`, `GearR2`, `Keel1`, `Keel2`, `Nose`, `Oil`,
+`Rudder1`, `Rudder2`, `StabL`, `StabR`, `Tail1`, `Tail2`, `Tank1`–`Tank4`, `Turret1B`–`Turret6B`,
+`VatorL`, `VatorR`, `WingLIn`, `WingLMid`, `WingLOut`, `WingRIn`, `WingRMid`, `WingROut`,
+`Flap01`–`Flap04`, `NullPart` (indices 0–43 in this order).
+
+- **Next damage level.** The visible `_Dn` chunk is hidden and `_Dn+1` shown, and the flight model
+  takes a hit to that part (below). Without a further level, the part is cut off.
+- **Cut.** All `Name_D*` chunks with their whole subtrees leave the aircraft as wreckage carrying
+  the aircraft's velocity. An outer wing section and its aileron go with the middle section, and
+  `Name_CAP` (the broken stub), if present, is shown. Then the flight model loses the part.
+- A hard **collision** (`msgCollision`) applies four damage levels at once. Structural failure
+  and ground strikes use it.
+
+### Flight-model effects
+The runtime keeps per-part areas: six wing sections (the `.fmd` sections, mirrored), stabilizer,
+elevators, keel, rudders. It also keeps roll/pitch/yaw sensitivity factors and an added drag
+coefficient `ΔCx` that applies at the wing halves like parasite drag. Each half wing's force is
+its coefficient times the sum of its three sections.
+
+A **hit** (one damage level):
+
+| part | effect |
+|---|---|
+| aileron | outer section of that side × 0.95, roll sensitivity × 0.68 |
+| keel | keel × 0.68, ΔCx + 0.12 |
+| rudder | rudders × 0.5, yaw sensitivity × 0.68 |
+| stabilizer | stabilizer × 0.68, ΔCx + 0.12 |
+| elevator | elevators × 0.68, pitch sensitivity × 0.68 |
+| tail | load limit damage (slot 6) |
+| wing section | section − 0.8 m² (OpenIL2 stops at 0), ΔCx + 0.12, load limit damage (slots: L out 0, L mid 1, L in 2, R in 3, R mid 4, R out 5) |
+
+A **cut**:
+
+| part | effect |
+|---|---|
+| fuselage (`CF`) | aircraft destroyed, engines stop, then as tail |
+| tail | centre of gravity moves to 0, random ±0.1 rad/s pitch and yaw rate, pitch inertia halved, both stabilizers and keels cut; from then on extra moments `(0, 8·S·Vx, 200·S·prop sign)` tumble the aircraft |
+| engine | engine dead |
+| gear leg | that wheel no longer rolls (its contact point scrapes like the airframe) |
+| keel | keel area 0, rudder cut (twin-fin layouts, `Scheme2a/5/7`: keel × 0.25 if the other fin remains) |
+| rudder | rudders 0 and yaw sensitivity 0 (twin fin: × 0.5 and × 0.25) |
+| stabilizer | stabilizer × (0.5·other + 0.1), ΔCx + 0.12, that side's mid and outer wing × 0.9, the other's × 1.1; with both gone, aileron trim ∓0.25 and one half × 0.95, the other × 0.75 at random; then the elevator on that side is cut |
+| elevator | elevators and pitch sensitivity × 0.5·(other elevator intact) |
+| wing root | root × 0.25, gear leg on that side cut, then as middle |
+| wing middle / outer | the sections outboard are cut too; the whole half loses all lift (as the runtime does), ailerons stop working, then the aileron is cut |
+| aileron | aileron area × 0.5, roll sensitivity × 0.5·(other aileron intact) |
+
+### Structural limits
+`LimitLoad = G_CLASS / 1.5` (12 without `G_CLASS`). The reference force is
+`LimitLoad·(empty + fuel + nitro + ReferenceWeight)`. Every step the current limit is
+`reference force / mass`, the negative limit is half of it, negated, and the ultimate load is
+`limit × SafetyFactor` (starting at 1.5). With the load factor `n` (aerodynamic and gear forces
+along body z over weight):
+
+- `n > ultimate + U(2, 4)` or `n < negative limit − U(1, 2.5)`, airborne, with a 2/101 chance
+  per step: a wing or the tail breaks. It is the most recently damaged section if any (slots
+  above, slot 6 the tail); otherwise `Tail1` 1/9, right mid 2/9, left mid 2/9, left root 2/9,
+  right root 2/9.
+- Beyond the limits for more than 0.85 s at a time (the second such cycle onward), the safety
+  factor drops by `((n_max − limit)/limit)²`. The flutter speed becomes
+  `VmaxAllowed·(0.3·SafetyFactor + 0.55)`, and a random draw may weaken a control
+  sensitivity, fail the flaps or reduce an outer wing section.
+- Flaps fail (retract and stop working) above 81 m/s IAS when `(IAS − 81)·flaps > 8` with the
+  lever beyond 0.21.
+- Above `VmaxAllowed` (default 1.3 `VmaxH`), with a 2 % chance per step when
+  `U(0, 16) < IAS − VmaxAllowed`, flutter tears off a part: an aileron 5/30 each, an elevator
+  4/30 each, one wing section 1/30 each, a rudder 3/30 each.
+- Above 310 m/s IAS, or when the aerodynamic force exceeds 50 g, the fuselage fails.
+
+### Ground strikes
+Contact points report strikes (`docs/behavior/gear.md`). A broken main or third wheel strikes
+its gear leg (`GearL2_D0`, `GearR2_D0`, `GearC2_D0`). An airframe point (`_Clip00`…, on the chunk
+whose mesh carries the hook) strikes its chunk when the aircraft moves at 13 m/s or more. The
+fuselage needs a severity above 2 and `Tail1` above 1.3.
+
+OpenIL2 models the wreckage as a tumbling body with quadratic drag (`0.004·v²` per unit mass) that
+rests where it lands. The design is its own.

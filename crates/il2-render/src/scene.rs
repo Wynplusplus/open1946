@@ -303,6 +303,23 @@ impl<'a> Loader<'a> {
         self.hooks_with(him_path, &hier, &world)
     }
 
+    /// Which node's mesh each hook belongs to: (hook, node name).
+    pub fn hier_hook_owners(&self, him_path: &str) -> Result<Vec<(String, String)>, String> {
+        let data = self.vfs.read(him_path).map_err(|e| e.to_string())?;
+        let hier = Hier::parse(&data).map_err(|e| e.to_string())?;
+        let dir = dir_of(him_path).to_owned();
+        let mut out = Vec::new();
+        for n in &hier.nodes {
+            let Some(mesh) = &n.mesh else { continue };
+            let Ok(d) = self.vfs.read(&format!("{dir}{mesh}.msh")) else {
+                continue;
+            };
+            let Ok(m) = Mesh::parse(&d) else { continue };
+            out.extend(m.hooks.iter().map(|h| (h.name.clone(), n.name.clone())));
+        }
+        Ok(out)
+    }
+
     /// Hook positions with the nodes posed by `world` (e.g. from `Rig::pose`).
     pub fn hier_hooks_posed(
         &self,

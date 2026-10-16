@@ -139,6 +139,12 @@ pub struct Aircraft {
     pub controls: Controls,
     /// `[Params] VmaxH`, m/s.
     pub vmax_h: f64,
+    /// `[Params] G_CLASS`: ultimate load factor at the reference weight.
+    pub g_class: f64,
+    /// `[Params] ReferenceWeight`: added to the full take-off mass for the load limit, kg.
+    pub reference_weight: f64,
+    /// `[Params] VmaxAllowed` (default 1.3 `VmaxH`): flutter speed, m/s indicated.
+    pub vmax_allowed: f64,
     /// `[Arm] GC_Gear_Shift`: moment arm shift of the gear forces.
     pub gc_gear_shift: f64,
 }
@@ -209,6 +215,9 @@ impl Aircraft {
             gear: Vec::new(),
             controls: Controls::default(),
             vmax_h: 150.0,
+            g_class: 12.0,
+            reference_weight: 0.0,
+            vmax_allowed: 195.0,
             gc_gear_shift: 0.0,
         }
     }
@@ -371,6 +380,15 @@ impl Aircraft {
             gear,
             controls: Controls::load(fmd),
             vmax_h: num_or(fmd, "Params", "VmaxH", 540.0) / 3.6,
+            // Without `G_CLASS` the limit load is 12 g, as if `G_CLASS` were 18.
+            g_class: num(fmd, "Params", "G_CLASS").map_or(18.0, |g| g.clamp(0.0, 15.0)),
+            reference_weight: num_or(fmd, "Params", "ReferenceWeight", 0.0).clamp(-2000.0, 2000.0),
+            vmax_allowed: num_or(
+                fmd,
+                "Params",
+                "VmaxAllowed",
+                1.3 * num_or(fmd, "Params", "VmaxH", 540.0),
+            ) / 3.6,
             gc_gear_shift: num_or(fmd, "Arm", "GC_Gear_Shift", 0.0),
         })
     }

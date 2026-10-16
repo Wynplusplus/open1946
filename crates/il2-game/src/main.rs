@@ -1,3 +1,4 @@
+mod airframe;
 mod audio;
 mod cockpit;
 mod damage;
@@ -90,6 +91,9 @@ struct Args {
     /// Screenshot: from the cockpit, looking "yaw,pitch" degrees off the nose.
     #[arg(long, value_delimiter = ',', allow_hyphen_values = true, num_args = 0..)]
     cockpit: Option<Vec<f64>>,
+    /// Screenshot: strike these chunks at the start (e.g. `WingLOut_D0,StabL_D0`).
+    #[arg(long, value_delimiter = ',')]
+    damage: Option<Vec<String>>,
 }
 
 /// Chase-camera view-projection and the eye position (scene is drawn relative to the eye).
@@ -131,6 +135,37 @@ fn gun_readings(guns: &[weapons::Gun]) -> Vec<cockpit::GunReading<'_>> {
             trigger: g.trigger,
         })
         .collect()
+}
+
+/// Structural failures, ground strikes and wreckage for one tick, with their dust and fire.
+fn airframe_step(
+    af: &mut airframe::Airframe,
+    sim: &mut Sim,
+    field: &HeightField,
+    combat: &mut Combat,
+    view: &mut view::WorldView,
+) {
+    af.update(sim, field, TICK);
+    for (at, power) in std::mem::take(&mut af.crashes) {
+        let what = if power > 0.0 {
+            particles::Impact::Blast { power }
+        } else {
+            particles::Impact::Shot { mass: 1.0 }
+        };
+        particles::impact(&mut view.effects, at, what, false, true, &mut combat.rng);
+        if power > 0.0 {
+            combat.booms.push((at, power));
+        }
+    }
+}
+
+fn new_airframe(a: &world::AircraftAssets) -> airframe::Airframe {
+    airframe::Airframe::new(
+        a.rig.names.clone(),
+        a.rig.parents.clone(),
+        &a.hidden,
+        a.gear_chunks.clone(),
+    )
 }
 
 fn place(r: &Renderer, terrain: &il2_render::GpuTerrain, plane: &GpuMesh, s: &Sim, eye: DVec3) {
@@ -258,6 +293,7 @@ impl Combat {
 
 struct Game {
     sim: Sim,
+    airframe: airframe::Airframe,
     assets: world::AircraftAssets,
     field: HeightField,
     terrain_data: Option<il2_render::TerrainData>,
@@ -447,6 +483,13 @@ impl Game {
             self.sim.tick(&self.inputs, &ground);
             self.combat
                 .step(&mut self.sim, &triggers, field, &mut self.view);
+            airframe_step(
+                &mut self.airframe,
+                &mut self.sim,
+                field,
+                &mut self.combat,
+                &mut self.view,
+            );
             self.acc -= TICK;
         }
         let (Some(r), Some(terrain), Some(plane)) =
@@ -488,7 +531,9 @@ impl Game {
                 &cs.pose(s, &gun_readings(&self.combat.guns), self.time_of_day, dt),
             );
         }
-        r.set_nodes(plane, &world::pose(&self.assets, &s.ct));
+        let mut nodes = world::pose(&self.assets, &s.ct);
+        self.airframe.apply(&mut nodes, s);
+        r.set_nodes(plane, &nodes);
         // Sound: engines, guns, explosions (heard from the camera).
         let level = (1.0 / (1.0 + (s.pos - eye).length() / 40.0)) as f32;
         for (i, (p, e)) in s.ac.engines.iter().zip(&s.engines).enumerate() {
@@ -568,6 +613,9 @@ impl Game {
             for ev in e.events.drain(..) {
                 self.hud.message(format!("Engine {}: {ev}", i + 1));
             }
+        }
+        for m in self.airframe.messages.drain(..) {
+            self.hud.message(m);
         }
         r.window.as_ref().unwrap().request_redraw();
     }
@@ -1142,9 +1190,23 @@ fn main() {
         let ground = |x: f64, y: f64| field.height_at(x, y);
         let mut combat = Combat::new(guns, stores);
         let triggers = [args.fire, args.fire, args.fire, args.fire];
+        let mut af = new_airframe(&assets);
+        for c in args.damage.iter().flatten() {
+            af.collision(&mut sim, c);
+        }
+        let mut max_g = (0.0f64, 0.0f64);
         for _ in 0..(args.seconds / TICK) as usize {
             sim.tick(&inputs, &ground);
             combat.step(&mut sim, &triggers, &field, &mut view);
+            airframe_step(&mut af, &mut sim, &field, &mut combat, &mut view);
+            max_g = (max_g.0.max(sim.overload), max_g.1.min(sim.overload));
+        }
+        eprintln!(
+            "load factor {:+.1} .. {:+.1} g (limit {:.1}, ultimate {:.1})",
+            max_g.1, max_g.0, sim.structure.limit_load, sim.structure.ultimate_load
+        );
+        for m in af.messages.drain(..) {
+            eprintln!("{m}");
         }
         let (w, h) = (1280, 720);
         let mut r = Renderer::headless(w, h);
@@ -1206,7 +1268,8 @@ fn main() {
             _ => None,
         };
         place(&r, &terrain, &plane, &sim, eye);
-        let posed = world::pose(&assets, &sim.ct);
+        let mut posed = world::pose(&assets, &sim.ct);
+        af.apply(&mut posed, &sim);
         if std::env::var_os("IL2_TRACE").is_some() {
             let rest = assets.rig.pose(&[]);
             for (i, (a, b)) in posed.iter().zip(&rest).enumerate() {
@@ -1257,7 +1320,10 @@ fn main() {
         return;
     }
     let cockpit = assets.cockpit.take();
+    sim.structure.twin_fin = assets.twin_fin;
+    let airframe = new_airframe(&assets);
     let mut game = Game {
+        airframe,
         inputs: Inputs {
             throttle: throttle0,
             gear: gear0,

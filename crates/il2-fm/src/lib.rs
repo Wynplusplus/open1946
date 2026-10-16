@@ -2,6 +2,7 @@
 
 pub mod aircraft;
 pub mod atmosphere;
+pub mod damage;
 pub mod engine;
 pub mod gear;
 pub mod polar;
