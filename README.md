@@ -21,7 +21,9 @@ No game files, decompiled code or key material are part of this repository. Form
 | Flight (`il2-fm`, `il2-data`) | All 404 aircraft fly: piston engines with boost, jets, rockets, gliders; median speed error 0 % low / −1.6 % high against the `.fmd` figures (`docs/behavior/validation.md`); engine start-up, temperatures, radiators; trim, flaps, dive brakes; the runtime's gear model; joystick |
 | Game (`openil2`) | Fly any aircraft class over any map or from a mission's start (runway takeoff spots) |
 
-Not yet: cockpits, weapons, damage, AI, ground units, sound, menus (see `docs/roadmap.md`).
+| Weapons | Loadouts and gun, bomb and rocket data from the install; ballistics, tracers, house destruction |
+
+Not yet: cockpits, aircraft damage, AI, ground units, sound, menus (see `docs/roadmap.md`).
 
 ## Usage
 
@@ -38,6 +40,7 @@ target/release/il2 parse-all --names names.txt
 
 # Fly (arrows: stick, Z/X: rudder, PageUp/PageDown or 1-9/0/W: throttle, F/V: flaps, G: gear, B: brakes,
 #      I: start/stop engines, R: radiator (auto / 33 / 67 / 100 %), W: emergency boost, ,/.: elevator trim, [/]: aileron trim, ;/': rudder trim, N: dive brake, L: tail wheel lock, O: prop pitch auto/manual, Q/E: prop lever,
+#      Space: guns, Enter: cannons, U: rockets, K: bombs,
 #      F1: chase view, F2: free orbit view with mouse drag and wheel)
 target/release/openil2 --aircraft air.BF_109G6 --map maps/Slovakia/load.ini --at 214500,86500 --agl 300
 target/release/openil2 --mission Missions/Single/SK/Bf-109F-4/Bf-109F-4_1.mis

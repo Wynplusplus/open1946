@@ -4,7 +4,7 @@ use crate::effects::Tracers;
 use crate::forest::Forest;
 use crate::objects::MapObjects;
 use crate::roads::Roads;
-use crate::weapons::Bullet;
+use crate::weapons::{Bullet, Projectile};
 use glam::{DVec3, Mat4};
 use il2_formats::map::HeightField;
 use il2_render::{GpuMesh, GpuTerrain, InstanceRaw, Renderer};
@@ -58,6 +58,7 @@ impl WorldView {
         eye: DVec3,
         extra: &[&GpuMesh],
         bullets: &[Bullet],
+        projectiles: &[Projectile],
         capture: bool,
     ) -> Option<Vec<u8>> {
         if let Some(f) = self.forest.as_mut() {
@@ -79,6 +80,10 @@ impl WorldView {
         };
         if let (Some(t), Some(m)) = (&self.tracers, &self.tracers_gpu) {
             draws.extend(t.gather(m, bullets, eye, &mut self.instances));
+            let items = projectiles.iter().filter_map(|p| {
+                Some((p.spec.mesh.as_deref()?, glam::DQuat::from_rotation_arc(DVec3::X, p.dir), p.pos))
+            });
+            draws.extend(t.gather_meshes(m, items, eye, &mut self.instances));
         }
         r.set_instances(&self.instances);
         let mut meshes: Vec<&GpuMesh> = extra.to_vec();

@@ -43,6 +43,30 @@ impl Tracers {
         Tracers { data: Some(mesh), classes }
     }
 
+    /// Appends instances of arbitrary meshes from this set: `(path, rotation, world position)`.
+    pub fn gather_meshes<'a, 'b>(
+        &self,
+        mesh: &'a GpuMesh,
+        items: impl Iterator<Item = (&'b str, DQuat, DVec3)>,
+        eye: DVec3,
+        out: &mut Vec<InstanceRaw>,
+    ) -> Vec<InstancedDraw<'a>> {
+        let mut by_class: HashMap<&str, Vec<InstanceRaw>> = HashMap::new();
+        for (path, rot, pos) in items {
+            let Some((name, _)) = self.classes.get_key_value(path) else { continue };
+            let m = Mat4::from_rotation_translation(rot.as_quat(), (pos - eye).as_vec3());
+            by_class.entry(name.as_str()).or_default().push(InstanceRaw::from_mat4(m));
+        }
+        let mut draws = Vec::new();
+        for (path, inst) in by_class {
+            let (batches, _) = &self.classes[path];
+            let start = out.len() as u32;
+            out.extend(inst);
+            draws.push(InstancedDraw { mesh, batches: batches.clone(), level: 0, instances: start..out.len() as u32 });
+        }
+        draws
+    }
+
     /// Appends tracer instances (positions relative to `eye`) and returns their draws.
     pub fn gather<'a>(&self, mesh: &'a GpuMesh, bullets: &[Bullet], eye: DVec3, out: &mut Vec<InstanceRaw>) -> Vec<InstancedDraw<'a>> {
         let mut by_class: HashMap<&str, Vec<InstanceRaw>> = HashMap::new();

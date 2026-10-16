@@ -10,8 +10,8 @@ Status: **specified from the runtime** for houses; aircraft and vehicles: TODO.
   - 2 plain.
 - **Explosions.** High-explosive rounds also explode with `power + 0.03·massa` kg TNT over `powerRadius`.
   An object of collision radius `r` at distance `d` receives `(1 − (d − r)/radius)²·power` (all of it when
-  that factor is ≥ 1, none beyond the radius). With "realistic bomb sights" the runtime uses
-  `power/((d − 0.7r)/2)^1.5` instead.
+  that factor is ≥ 1, none beyond the radius). With "realistic bomb sights" (the full-realism setting,
+  which OpenIL2 uses) it is `power/((d − 0.7r)/2)^1.5` instead, all of it when `(d − 0.7r)/2 < 1`.
 
 ## Houses (`static.ini` `Body`, `Panzer`)
 | Body | material | MIN_TNT | MAX_TNT | death probability at MIN |
@@ -32,7 +32,8 @@ Status: **specified from the runtime** for houses; aircraft and vehicles: TODO.
   - Otherwise the kill probability comes from the penetration tables (below).
 - **Explosions** (high explosive): with `R` received kg TNT, no kill at or below `MIN_TNT`, certain at or
   above `MAX_TNT`, else probability `p + (1 − p)·(R − MIN)/(MAX − MIN)`.
-- A killed house shows its `MeshDead` (or disappears without one) and no longer collides.
+- A killed house shows its `MeshDead` (or disappears without one), standing on that mesh's own ground
+  offset and `AddHeightDead`, and no longer collides.
 
 **Penetration tables.** Per material, two thickness anchors `T0, T1` and per anchor three energies
 `E0 < E1 < E2` (10 %, 30 %, 100 % kill):

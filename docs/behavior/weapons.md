@@ -1,6 +1,6 @@
 # Weapons
 
-Status: **specified from the runtime** for guns; bombs, rockets, turrets: TODO.
+Status: **specified from the runtime** for guns, bombs and rockets; turrets, torpedoes, fuzes: TODO.
 
 ## Data
 - **Loadouts.** An aircraft class's static initializer calls `Aircraft.weaponTriggersRegister(cls, int[])`
@@ -35,3 +35,33 @@ gunnery"; without it there is neither drag nor gravity). A round lives `timeLife
   velocity.
 - **Far.** Beyond that, a line of `traceColor` the mesh's length. Rounds are not drawn in their first tick.
 - *OpenIL2:* tracer meshes are widened by `max(1, distance/50)` across their axis instead of drawing lines.
+
+## Bombs and rockets
+- **Data.** Bomb and rocket weapons (`BombGun*`, `RocketGun*`) set class properties in their static
+  initializers (`Property.set(cls, key, value)`): `bulletClass` (the round's class), `bullets`, `shotFreq`,
+  `external`, `cassette`. The round class sets:
+  - `mesh`, `massa`, `kalibr` (m), `power` (kg TNT), `powerType`;
+  - `radius` (bombs default `7.07·√massa`, rockets 0);
+  - rockets also `force` (N, default 500), `timeFire` (4 s), `massaEnd` (2.52 kg), `timeLife` (45 s),
+    `maxDeltaAngle`.
+- **Release.** One round per press per slot, at most every `1/shotFreq` s.
+- **Bombs.**
+  - Start with the aircraft's velocity and its axis plus `U(±0.04)` per component, with mass
+    `massa·U(1, 1.06)`.
+  - The initial spin axis is random, with an angle of `±U(2°, 35°)`, scaled above 60 m/s by
+    `(1 − (V − 60)/290)·0.95 + 0.05` (0.05 from 350 m/s).
+- **Rockets.** Launch along the aircraft axis at the aircraft's velocity plus 200 m/s along it, keeping a
+  third of the vertical body speed. Thrust `force` acts for `timeFire` while the mass falls linearly to
+  `massaEnd`. A rocket explodes after `timeLife`.
+- **Drag.** With `S = π·kalibr²/4` and `KD(z) = 1 − 9.59387·10⁻⁵z + 3.53118·10⁻⁹z² − 5.83556·10⁻¹⁴z³`: above
+  330 m/s `D = KF(v)·KD·S` with `KF(v) = (608.5 − 1.81327v + 0.00165114v²)·v`; below it `D = c·S·1.225·KD·v²/2`
+  with `c = 0.06` for bombs and 0.2 for rockets.
+  - Bombs: `v += (6·cos α·nose − 7·wind)·D/m·dt`, where `cos α = nose·wind` and `wind` is the airflow
+    direction.
+  - Rockets: `v += nose·(thrust − D)/m·dt`.
+  - Both: `v_z −= g·dt`.
+- **Bomb stability.** From 0.35 s: `F = −0.07·D·sin α·wind` (`sin α` taken as 0.08 at `cos α ≤ −0.996`) acts
+  at `−0.2·kalibr` along the nose. The spin axis gains `(arm × F)/J·dt` with `J = 0.1·m·kalibr⁴`, is
+  multiplied by 0.96 per step, and turns the nose.
+- **Impact.** Rounds explode on the ground, on an object, or (rockets) at the end of their life; fuze delays:
+  TODO.

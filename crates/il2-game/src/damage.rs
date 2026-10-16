@@ -108,8 +108,19 @@ impl HouseDamage {
     }
 }
 
+/// TNT reaching an object of collision radius `r` at distance `d` (realistic bomb sights, the full
+/// realism setting): `power / ((d − 0.7r)/2)^1.5`, all of it within 2 m.
+pub fn received_power_realistic(power: f64, d: f64, r: f64) -> f64 {
+    let x = 0.5 * (d - 0.7 * r);
+    if x < 1.0 {
+        power
+    } else {
+        power / (x * x * x).sqrt()
+    }
+}
+
 /// TNT reaching an object of collision radius `r` at distance `d` from a blast of `power` kg and
-/// `radius` m: `(1 − (d − r)/radius)²·power`.
+/// `radius` m without realistic bomb sights: `(1 − (d − r)/radius)²·power`.
 pub fn received_power(power: f64, radius: f64, d: f64, r: f64) -> f64 {
     let x = d - r;
     if x >= radius {

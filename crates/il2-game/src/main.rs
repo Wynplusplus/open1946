@@ -66,6 +66,9 @@ struct Args {
     /// Screenshot: orbit camera "yaw,pitch,distance" (degrees relative to the aircraft heading, metres).
     #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
     orbit: Option<Vec<f64>>,
+    /// Weapon loadout (overrides the mission's), e.g. R1-SC500.
+    #[arg(long)]
+    loadout: Option<String>,
     /// Start pitched nose-down by this many degrees (without a mission).
     #[arg(long)]
     dive: Option<f64>,
@@ -97,14 +100,16 @@ fn place(r: &Renderer, terrain: &il2_render::GpuTerrain, plane: &GpuMesh, s: &Si
 /// The player's guns and the bullets in flight.
 struct Combat {
     guns: Vec<weapons::Gun>,
+    stores: Vec<weapons::Store>,
+    projectiles: Vec<weapons::Projectile>,
     bullets: Vec<weapons::Bullet>,
     rng: weapons::Rng,
     hits: Vec<(weapons::Bullet, weapons::Hit)>,
 }
 
 impl Combat {
-    fn new(guns: Vec<weapons::Gun>) -> Self {
-        Combat { guns, bullets: Vec::new(), rng: weapons::Rng::new(0x5EED), hits: Vec::new() }
+    fn new(guns: Vec<weapons::Gun>, stores: Vec<weapons::Store>) -> Self {
+        Combat { guns, stores, projectiles: Vec::new(), bullets: Vec::new(), rng: weapons::Rng::new(0x5EED), hits: Vec::new() }
     }
 
     fn step(&mut self, sim: &mut Sim, triggers: &[bool; 4], field: &HeightField, objects: &mut objects::MapObjects) {
@@ -112,6 +117,10 @@ impl Combat {
         if recoil != DVec3::ZERO {
             // Gun recoil acts on the aircraft.
             sim.vel += sim.ori * recoil / sim.mass();
+        }
+        weapons::release(&mut self.stores, triggers, sim.pos, sim.ori, sim.vel, TICK, &mut self.rng, &mut self.projectiles);
+        for (at, power, killed) in weapons::fly(&mut self.projectiles, TICK, field, objects, &mut self.rng) {
+            eprintln!("explosion of {power:.1} kg TNT at {:.0?}: {killed} objects destroyed", at);
         }
         self.hits.clear();
         weapons::advance(&mut self.bullets, TICK, field, objects, &mut self.rng, &mut self.hits);
@@ -239,7 +248,8 @@ impl Game {
         self.acc += dt;
         let field = &self.field;
         let ground = |x: f64, y: f64| field.height_at(x, y);
-        let triggers = [self.keys.contains(&KeyCode::Space), self.keys.contains(&KeyCode::Space) || self.keys.contains(&KeyCode::Enter), false, false];
+        let k = |c| self.keys.contains(&c);
+        let triggers = [k(KeyCode::Space), k(KeyCode::Space) || k(KeyCode::Enter), k(KeyCode::KeyU), k(KeyCode::KeyK)];
         while self.acc >= TICK {
             self.sim.tick(&self.inputs, &ground);
             self.combat.step(&mut self.sim, &triggers, field, &mut self.view.objects);
@@ -255,7 +265,7 @@ impl Game {
         };
         place(r, terrain, plane, s, eye);
         r.set_nodes(plane, &world::pose(&self.assets, &s.ct));
-        self.view.draw(r, field, terrain, vp, eye, &[plane], &self.combat.bullets, false);
+        self.view.draw(r, field, terrain, vp, eye, &[plane], &self.combat.bullets, &self.combat.projectiles, false);
 
         for (i, e) in self.sim.engines.iter_mut().enumerate() {
             for ev in e.events.drain(..) {
@@ -608,17 +618,28 @@ fn main() {
     // Guns of the chosen loadout and their tracers.
     let guns = {
         let classes = il2_data::Classes::new(&vfs, &fms.keys);
-        let loadout = mission.as_ref().and_then(|m| m.player()).map_or("default".to_owned(), |w| w.weapons.clone());
+        let loadout = args.loadout.clone().unwrap_or_else(|| mission.as_ref().and_then(|m| m.player()).map_or("default".to_owned(), |w| w.weapons.clone()));
         let mut armoury = weapons::Armoury::default();
         let w = classes.aircraft_weapons(&args.aircraft).unwrap_or_default();
         let guns = weapons::mount(&mut armoury, &classes, &w, &loadout, &assets.hook_frames);
+        let stores = weapons::mount_stores(&classes, &w, &loadout, &assets.hook_frames);
         eprintln!(
             "loadout {loadout}: {}",
-            guns.iter().map(|g| format!("{} ({})", g.spec.name, g.ammo)).collect::<Vec<_>>().join(", ")
+            guns.iter()
+                .map(|g| format!("{} ({})", g.spec.name, g.ammo))
+                .chain(stores.iter().map(|s| format!("{} ({})", s.spec.name, s.count)))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
-        guns
+        (guns, stores)
     };
-    let tracers = effects::Tracers::load(&vfs, guns.iter().flat_map(|g| g.spec.bullets.iter().filter_map(|b| b.trace_mesh.as_deref())));
+    let (guns, stores) = guns;
+    let tracers = effects::Tracers::load(
+        &vfs,
+        guns.iter()
+            .flat_map(|g| g.spec.bullets.iter().filter_map(|b| b.trace_mesh.as_deref()))
+            .chain(stores.iter().filter_map(|s| s.spec.mesh.as_deref())),
+    );
     let mut view = view::WorldView::new(map_objects, forest, roads, Some(tracers));
     let mut assets = assets;
     let plane_mesh = std::mem::take(&mut assets.mesh);
@@ -661,8 +682,8 @@ fn main() {
             sim.ct = inputs;
         }
         let ground = |x: f64, y: f64| field.height_at(x, y);
-        let mut combat = Combat::new(guns);
-        let triggers = [args.fire, args.fire, false, false];
+        let mut combat = Combat::new(guns, stores);
+        let triggers = [args.fire, args.fire, args.fire, args.fire];
         for _ in 0..(args.seconds / TICK) as usize {
             sim.tick(&inputs, &ground);
             combat.step(&mut sim, &triggers, &field, &mut view.objects);
@@ -694,7 +715,7 @@ fn main() {
         }
         r.set_nodes(&plane, &posed);
         eprintln!("{} bullets in flight", combat.bullets.len());
-        let px = view.draw(&mut r, &field, &terrain, vp, eye, &[&plane], &combat.bullets, true).unwrap_or_default();
+        let px = view.draw(&mut r, &field, &terrain, vp, eye, &[&plane], &combat.bullets, &combat.projectiles, true).unwrap_or_default();
         image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).unwrap_or_else(|e| fail(e));
         return;
     }
@@ -710,7 +731,7 @@ fn main() {
         plane: None,
         view,
         env,
-        combat: Combat::new(guns),
+        combat: Combat::new(guns.clone(), stores.clone()),
         keys: HashSet::new(),
         #[cfg(feature = "gamepad")]
         gilrs: Gilrs::new().ok(),

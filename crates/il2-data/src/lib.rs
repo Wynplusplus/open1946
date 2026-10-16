@@ -8,6 +8,7 @@ pub mod keys;
 mod pe;
 
 use il2_formats::SectFile;
+use std::collections::HashMap;
 use il2_sfs::int_hash;
 use il2_vfs::Vfs;
 
@@ -147,6 +148,24 @@ impl<'a> Classes<'a> {
             }
         }
         Some(w)
+    }
+
+    /// `Property.set(cls, key, value)` calls of a class's static initializer, for that class
+    /// (e.g. bomb `mass`, `power`, `mesh`; bomb gun `bulletClass`, `bullets`, `shotFreq`).
+    pub fn class_properties(&self, full: &str) -> HashMap<String, anim::Value> {
+        let full = full.replace('/', ".");
+        let pool = self.pool(&full);
+        let mut out = HashMap::new();
+        if pool.is_empty() {
+            return out;
+        }
+        for (_, args) in anim::record_clinit(&pool, &["set"]) {
+            let (Some(anim::Value::Str(cls)), Some(anim::Value::Str(key)), Some(v)) = (args.first(), args.get(1), args.get(2)) else { continue };
+            if cls.replace('/', ".") == full {
+                out.insert(key.clone(), v.clone());
+            }
+        }
+        out
     }
 
     /// Evaluates a weapon class's `createProperties()` (gun and bullet data), e.g. `MGunMG131si`.

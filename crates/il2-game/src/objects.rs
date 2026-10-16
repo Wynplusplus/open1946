@@ -42,6 +42,8 @@ struct Object {
 pub struct Profile {
     pub dead: Option<u32>,
     pub damage: crate::damage::HouseDamage,
+    /// Height change from the live to the dead mesh's ground offset.
+    pub dz: f32,
 }
 
 /// Bounding sphere of a class's batches.
@@ -368,8 +370,10 @@ impl<'a> Builder<'a> {
             let damage = p.body.as_deref().and_then(|b| crate::damage::HouseDamage::new(b, p.panzer));
             match damage {
                 Some(damage) => {
-                    let dead = props(statics_ini, class, false).and_then(|d| self.class(&d.mesh, None)).map(|(c, _)| c);
-                    self.profile(Profile { dead, damage })
+                    let dp = props(statics_ini, class, false);
+                    let dead = dp.as_ref().and_then(|d| self.class(&d.mesh, None).map(|c| (c, d.add_height)));
+                    let dz = dead.map_or(0.0, |((_, lift), add)| (lift + add) - (c.1 + p.add_height));
+                    self.profile(Profile { dead: dead.map(|((c, _), _)| c), damage, dz })
                 }
                 None => 0,
             }
@@ -489,7 +493,9 @@ impl MapObjects {
     fn kill(&mut self, i: usize) {
         let o = &mut self.objects[i];
         o.alive = false;
-        o.class = self.profiles[o.profile as usize - 1].dead.unwrap_or(u32::MAX);
+        let p = self.profiles[o.profile as usize - 1];
+        o.class = p.dead.unwrap_or(u32::MAX);
+        o.pos.z += p.dz as f64;
     }
 
     /// A bullet hit on object `i`; returns whether it destroyed it.
@@ -522,7 +528,7 @@ impl MapObjects {
                     }
                     let (c, r) = self.classes[o.class as usize].sphere;
                     let d = (o.pos + o.rot.as_dquat() * c.as_dvec3() - at).length();
-                    let got = crate::damage::received_power(power, radius, d, r as f64);
+                    let got = if d - r as f64 > radius { 0.0 } else { crate::damage::received_power_realistic(power, d, r as f64) };
                     if got > 0.0 && self.profiles[o.profile as usize - 1].damage.explosion_kills(got, rng) {
                         victims.push(i);
                     }

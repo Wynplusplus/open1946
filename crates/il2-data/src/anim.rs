@@ -649,6 +649,12 @@ impl<'a> Machine<'a> {
             };
             return Ok(Some(r));
         }
+        // `class$(String)`: the compiler's helper for class literals; keep the name.
+        if name == "class$" {
+            if let Some(V::Str(n)) = args.first() {
+                return Ok(Some(V::Str(n.clone())));
+            }
+        }
         if self.record.contains(&name) {
             let vals = args.iter().map(|a| self.export(a, 0)).collect();
             self.recorded.push((name.to_owned(), vals));
