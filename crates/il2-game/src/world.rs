@@ -34,7 +34,7 @@ pub struct AircraftAssets {
     /// The class implements `TypeFighter`.
     pub fighter: bool,
     /// Turret arcs (`gunners::Arc`) per turret, when the class defines them.
-    pub turret_arcs: Option<Vec<crate::gunners::Arc>>,
+    pub turret_arcs: Option<Vec<Vec<Vec<bool>>>>,
 }
 
 /// Loads the height field of a map's `load.ini`.
