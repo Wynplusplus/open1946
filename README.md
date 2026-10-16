@@ -6,7 +6,7 @@ It needs a legally owned copy of the game (e.g. GOG); point `IL2_ROOT` at the in
 No game files, decompiled code or key material are part of this repository. Format knowledge lives in
 `docs/formats/` as prose specifications, and the Rust code is written from those specs.
 
-## Status: milestones 1–5 done, 6 in progress
+## Status: milestones 1–6 done
 
 | Area | State |
 |------|-------|
@@ -25,9 +25,12 @@ No game files, decompiled code or key material are part of this repository. Form
 | Weapons | Loadouts and gun, bomb and rocket data from the install; ballistics, tracers, house destruction |
 | Effects and sound | Particle effects from `.eff` files for impacts and explosions; engine, gun and explosion sounds from the game's presets (ALSA) |
 | AI and the world | AI flights fly missions (takeoff, waypoints, formation, air combat, level bombing, landing), gunners, anti-aircraft guns, moving ground and naval columns |
-| Menus | Single missions with localized briefings, Quick Mission Builder from the install's templates |
+| Menus | Single missions with localized briefings, Pilot Career (static campaigns), dynamic campaigns from the DGen data, Quick Mission Builder, Play Track |
+| More | Mission objectives and results, track recording and playback (own format), multiplayer (own protocol), DeviceLink |
 
-Not yet: campaigns, track recording, multiplayer, DeviceLink (see `docs/roadmap.md`).
+Where OpenIL2 uses its own designs instead of the original's code, and what is not reproduced yet
+(original network protocol and `.ntrk` tracks, the runtime's AI maneuvers, the detailed damage
+model, …), is listed in `docs/roadmap.md`.
 
 ## Usage
 
@@ -56,6 +59,11 @@ target/release/openil2 --at 214500,86500 --time 19.5              # dusk; --time
 target/release/openil2 --at 214500,86500 --agl 150 --screenshot out.png --orbit 170,12,40
 target/release/openil2 --screenshot out.png --cockpit=-30,-10        # from the cockpit, head turned
 target/release/openil2 --screenshot out.png --damage WingLMid_D0 --seconds 0.5 --orbit 150,30,16
+target/release/openil2 --mission Missions/Single/SK/Bf-109F-4/Bf-109F-4_1.mis --record flight.otrk
+target/release/openil2 --play flight.otrk
+target/release/openil2 --host 27015 --aircraft air.BF_109G6 --map maps/Slovakia/load.ini --at 214500,86500 --agl 1000
+target/release/openil2 --join 192.168.1.10:27015 --aircraft air.LAGG_3SERIES4
+target/release/openil2 --devicelink 10000          # or [DeviceLink] port=10000 in conf.ini
 
 # Joystick (Linux /dev/input/js*): picked up automatically; default axes X/Y = stick, 2 = throttle,
 # 3 = twist rudder, button 2 = wheel brakes. Remap with e.g. --joy-map aileron=0,elevator=1,rudder=5,throttle=-2

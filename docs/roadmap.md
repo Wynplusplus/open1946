@@ -40,5 +40,20 @@ Interim designs to be replaced by ports of the runtime: air combat and ground-at
 armed ground units and ships, mission objectives and results.
 Not yet: carrier operations, water landings, the original GUI screens.
 
-## M6: everything else
-DeviceLink, track recording and playback, campaigns (static campaigns, DGen/NGen), multiplayer.
+## M6: everything else (done)
+DeviceLink per the install's `DeviceLink.txt` (`devicelink.md`). Track recording and playback in
+OpenIL2's own state format (`formats/track.md`). Mission objectives and results, Pilot Career
+through the static campaigns, and dynamic campaigns from OpenIL2's own generator on the DGen data
+(`campaign.md`). Multiplayer over OpenIL2's own UDP protocol (`multiplayer.md`).
+
+## Open: fidelity to the original
+What works today through OpenIL2's own designs, and would be replaced by ports of the runtime:
+- the original network protocol: playing `records/*.ntrk` and `*.TRK`, and joining original
+  servers;
+- AI: the runtime's `Maneuver` (air combat, ground attack, takeoff and landing maneuvers) and
+  `AirGroup` formations; ground and naval units with `ChiefGround` road formations, bridges,
+  armed vehicles and ships;
+- the detailed per-class damage model (`xx…` bones, `hitBone`) and the meshes' collision shapes;
+- DGen's own generator logic (front movement, squadron rosters, ranks, awards);
+- the original GUI screens; carrier operations and water landings; mixture, magnetos and negative-g
+  cut-out; bridge destruction.
