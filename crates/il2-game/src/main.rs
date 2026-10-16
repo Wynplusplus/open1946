@@ -1,3 +1,4 @@
+mod forest;
 mod objects;
 mod world;
 
@@ -82,6 +83,8 @@ struct Game {
     objects: objects::MapObjects,
     objects_gpu: Option<GpuMesh>,
     instances: Vec<InstanceRaw>,
+    forest: Option<forest::Forest>,
+    forest_gpu: Option<GpuMesh>,
     keys: HashSet<KeyCode>,
     #[cfg(feature = "gamepad")]
     gilrs: Option<Gilrs>,
@@ -160,7 +163,17 @@ impl Game {
             None => Vec::new(),
         };
         r.set_instances(&self.instances);
-        r.render(vp, 22.0, Some(terrain), &[plane], &draws);
+        if let Some(f) = self.forest.as_mut() {
+            if let Some(d) = f.update(field, eye) {
+                self.forest_gpu = Some(r.upload(&d));
+            }
+        }
+        let mut meshes = vec![plane];
+        if let (Some(f), Some(g)) = (&self.forest, &self.forest_gpu) {
+            r.set_transform(g, Mat4::from_translation((f.origin - eye).as_vec3()));
+            meshes.push(g);
+        }
+        r.render(vp, 22.0, Some(terrain), &meshes, &draws);
 
         self.title_timer -= dt;
         if self.title_timer <= 0.0 {
@@ -398,7 +411,8 @@ fn main() {
     };
     let t0 = Instant::now();
     let mut map_objects = objects::MapObjects::load(&vfs, &args.map, &field).unwrap_or_else(|e| fail(e));
-    eprintln!("map objects: {} placed in {:.1} s", map_objects.len(), t0.elapsed().as_secs_f64());
+    eprintln!("map objects: {} placed in {:.1} s ({} classes skipped)", map_objects.len(), t0.elapsed().as_secs_f64(), map_objects.skipped.len());
+    let mut forest = forest::Forest::load(&vfs, &args.map, &terrain.types);
     let mut assets = assets;
     let plane_mesh = std::mem::take(&mut assets.mesh);
     let (h, pitch) = assets.parked;
@@ -478,7 +492,13 @@ fn main() {
             map_objects.max_dist()
         );
         r.set_instances(&instances);
-        let px = r.screenshot(vp, 22.0, Some(&terrain), &[&plane], &draws);
+        let mut meshes = vec![&plane];
+        let forest_gpu = forest.as_mut().and_then(|f| f.update(&field, eye)).map(|d| r.upload(&d));
+        if let (Some(f), Some(g)) = (&forest, &forest_gpu) {
+            r.set_transform(g, Mat4::from_translation((f.origin - eye).as_vec3()));
+            meshes.push(g);
+        }
+        let px = r.screenshot(vp, 22.0, Some(&terrain), &meshes, &draws);
         image::save_buffer(out, &px, w, h, image::ExtendedColorType::Rgba8).unwrap_or_else(|e| fail(e));
         return;
     }
@@ -495,6 +515,8 @@ fn main() {
         objects: map_objects,
         objects_gpu: None,
         instances: Vec::new(),
+        forest,
+        forest_gpu: None,
         keys: HashSet::new(),
         #[cfg(feature = "gamepad")]
         gilrs: Gilrs::new().ok(),

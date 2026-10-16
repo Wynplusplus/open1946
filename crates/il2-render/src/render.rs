@@ -552,13 +552,14 @@ impl Renderer {
     }
 
     fn upload_texture(&self, img: &Image) -> wgpu::TextureView {
+        let levels = mips(img);
         let size = wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 };
         let tex = self.device.create_texture_with_data(
             &self.queue,
             &wgpu::TextureDescriptor {
                 label: None,
                 size,
-                mip_level_count: 1,
+                mip_level_count: levels.len() as u32,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -566,7 +567,7 @@ impl Renderer {
                 view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
-            &img.rgba,
+            &levels.concat(),
         );
         tex.create_view(&Default::default())
     }
@@ -898,6 +899,28 @@ impl Renderer {
         }
         out
     }
+}
+
+/// Full mip chain (box filter) of an RGBA8 image of any size; level 0 first.
+fn mips(img: &Image) -> Vec<Vec<u8>> {
+    let mut levels = vec![img.rgba.clone()];
+    let (mut w, mut h) = (img.width as usize, img.height as usize);
+    while w > 1 || h > 1 {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let prev = levels.last().unwrap();
+        let mut next = vec![0u8; nw * nh * 4];
+        for y in 0..nh {
+            for x in 0..nw {
+                for c in 0..4 {
+                    let at = |dx: usize, dy: usize| prev[((2 * y + dy).min(h - 1) * w + (2 * x + dx).min(w - 1)) * 4 + c] as u32;
+                    next[(y * nw + x) * 4 + c] = ((at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1) + 2) / 4) as u8;
+                }
+            }
+        }
+        levels.push(next);
+        (w, h) = (nw, nh);
+    }
+    levels
 }
 
 /// Full mip chains (box filter) for equally sized square RGBA8 images.
