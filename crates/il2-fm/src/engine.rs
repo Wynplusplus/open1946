@@ -13,9 +13,40 @@ fn rpm(w: f64) -> f64 {
     w * 60.0 / (2.0 * PI)
 }
 
+/// `Type` of an engine (`docs/behavior/engine.md`, "Engine types").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineKind {
+    /// `Inline`, `Radial`.
+    Piston,
+    /// `HeloI`: piston, propeller sees the airspeed's magnitude (tail-sitters).
+    PistonHelo,
+    Jet,
+    Rocket,
+    /// A rocket booster burning the separate `[Mass] Nitro` tank.
+    RocketBoost,
+    /// Tow string of a glider: thrust only while towed.
+    Tow,
+    /// `PVRD`: pulse jet / ramjet, also burning the `Nitro` tank.
+    Pvrd,
+}
+
 #[derive(Clone, Debug)]
 pub struct EngineParams {
+    pub kind: EngineKind,
     pub piston: bool,
+    /// `Thrust` (kgf) in newtons.
+    pub thrust_max: f64,
+    pub horse_powers: f64,
+    pub cylinders: f64,
+    /// Radians.
+    pub prop_aoa0: f64,
+    /// Jets: the fan's equivalent area and the drag torque at full RPM.
+    pub jet_s: f64,
+    pub jet_m_max: f64,
+    /// Specific fuel use at power 0, 0.5, 1 and maximum (kg per hp·h, or per N·h for jets and pulse jets).
+    pub fuel_curve: [f64; 4],
+    /// Shaft speed for boost (`PropAnglerAfterburnerParam`), rad/s; `w_max` when not given.
+    pub w_wep: f64,
     pub w_min: f64,
     pub w_nom: f64,
     pub w_max: f64,
@@ -47,6 +78,10 @@ pub struct EngineParams {
     pub ata: Vec<(f64, f64)>,
     /// +1 for `Direction Left`, −1 for `Right`.
     pub direction: f64,
+    /// `CompressorPMax` (rockets use it for their altitude term).
+    pub compressor_p_max: f64,
+    /// Rockets: kg/s at full throttle (2.5777; the runtime uses 1.8 for BI-1/BI-6 and 0.5 for MXY-7).
+    pub rocket_burn: f64,
 }
 
 impl EngineParams {
@@ -57,7 +92,24 @@ impl EngineParams {
         let raw = |k: &str| s.get_ci(k).or_else(|| g.and_then(|g| g.get_ci(k))).map(str::trim);
         let num = |k: &str, d: f64| raw(k).and_then(atof).map_or(d, f64::from);
         let ty = raw("Type").unwrap_or("Inline");
-        let piston = ty.ends_with("Inline") || ty.ends_with("Radial");
+        let kind = if ty.ends_with("Inline") || ty.ends_with("Radial") {
+            EngineKind::Piston
+        } else if ty.ends_with("Jet") {
+            EngineKind::Jet
+        } else if ty.ends_with("RocketBoost") {
+            EngineKind::RocketBoost
+        } else if ty.ends_with("Rocket") {
+            EngineKind::Rocket
+        } else if ty.ends_with("Tow") {
+            EngineKind::Tow
+        } else if ty.ends_with("PVRD") {
+            EngineKind::Pvrd
+        } else if ty.ends_with("HeloI") {
+            EngineKind::PistonHelo
+        } else {
+            return None;
+        };
+        let piston = matches!(kind, EngineKind::Piston | EngineKind::PistonHelo);
         let rpm_max = num("RPMMax", 2200.0);
         let w_max = rad_s(rpm_max);
         let diameter = num("PropDiameter", 3.0);
@@ -101,8 +153,35 @@ impl EngineParams {
             insert(atof(r).unwrap_or(2000.0) as f64, atof(a).unwrap_or(1.0) as f64);
         }
         let hp = num("HorsePowers", 1200.0);
+        let thrust_max = num("Thrust", 10.7 / 9.81) * 9.81;
+        let cylinders = num("Cylinders", 12.0);
+        let prop_aoa0 = num("PropAoA0", 11.0).to_radians();
+        // Jets: the fan is sized so it would give twice the rated thrust at full RPM; the runtime passes
+        // the angle in radians to a function that expects degrees, which is kept here.
+        let jet_s = cylinders * cylinders * 2.0 * thrust_max / (fan_cy(prop_aoa0) * atmosphere::RHO0 * w_max * w_max * prop_r * prop_r);
+        let jet_m_max = 0.5 * fan_cx(prop_aoa0.to_degrees()) * atmosphere::RHO0 * (w_max * prop_r).powi(2) * jet_s * prop_r;
+        let default_fuel = match kind {
+            EngineKind::Jet => [0.075, 0.075, 0.1, 0.11],
+            EngineKind::Pvrd => [0.835; 4],
+            _ => [0.4, 0.24, 0.28, 0.3],
+        };
+        let fuel_curve = [
+            num("FuelConsumptionP0", default_fuel[0]),
+            num("FuelConsumptionP05", default_fuel[1]),
+            num("FuelConsumptionP1", default_fuel[2]),
+            num("FuelConsumptionPMAX", default_fuel[3]),
+        ];
         Some(EngineParams {
+            kind,
             piston,
+            thrust_max,
+            horse_powers: hp,
+            cylinders,
+            prop_aoa0,
+            jet_s,
+            jet_m_max,
+            fuel_curve,
+            w_wep: raw("PropAnglerAfterburnerParam").and_then(atof).map_or(w_max, |r| rad_s(r as f64)),
             w_min: rad_s(num("RPMMin", 200.0)),
             w_nom: rad_s(num("RPMNom", 2000.0)),
             w_max,
@@ -132,6 +211,8 @@ impl EngineParams {
             p_at0: num("CompressorPAt0", 0.3),
             ata,
             direction: if raw("Direction").is_some_and(|d| d.ends_with("Right")) { -1.0 } else { 1.0 },
+            compressor_p_max: num("CompressorPMax", 1.0),
+            rocket_burn: 2.5777,
         })
     }
 
@@ -198,12 +279,136 @@ pub struct EngineState {
     pub torque: f64,
     pub prop_torque: f64,
     pub manifold: f64,
+    /// Fuel use, kg/s, from the main tank and from the `Nitro` tank.
+    pub fuel_rate: f64,
+    pub nitro_rate: f64,
 }
 
 impl EngineState {
     pub fn new(p: &EngineParams, running_at: f64) -> Self {
         let phi = 11f64.to_radians().clamp(p.phi_min, p.phi_max);
-        EngineState { w: running_at, aw: 0.0, phi, phi_target: phi, second_throttle: 1.0, thrust: 0.0, torque: 0.0, prop_torque: 0.0, manifold: 1.0 }
+        let w = match p.kind {
+            // Jets idle at the torque balance of the minimum throttle setting.
+            EngineKind::Jet => running_at.min(p.w_max),
+            _ => running_at,
+        };
+        EngineState {
+            w,
+            aw: 0.0,
+            phi,
+            phi_target: phi,
+            second_throttle: 1.0,
+            thrust: 0.0,
+            torque: 0.0,
+            prop_torque: 0.0,
+            manifold: 1.0,
+            fuel_rate: 0.0,
+            nitro_rate: 0.0,
+        }
+    }
+
+    /// Specific consumption at power fraction `x` (kg per unit per hour).
+    fn specific_fuel(p: &EngineParams, x: f64) -> f64 {
+        let [p0, p05, p1, pmax] = p.fuel_curve;
+        let x = x.max(0.0);
+        if x <= 0.5 {
+            (x - 0.5).powi(2) * (p0 - p05) * 4.0 + p05
+        } else if x <= 1.0 {
+            (x - 0.5).powi(2) * (p1 - p05) * 4.0 + p05
+        } else {
+            p1 + (pmax - p1) * ((x - 1.0).min(0.1) * 10.0)
+        }
+    }
+
+    /// Advances any engine type; `fuel_left`: whether the tank it burns from has fuel.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_any(&mut self, p: &EngineParams, throttle: f64, v: f64, speed: f64, h: f64, dt: f64, fuel_left: bool) {
+        self.fuel_rate = 0.0;
+        self.nitro_rate = 0.0;
+        match p.kind {
+            EngineKind::Piston | EngineKind::PistonHelo => {
+                let v = if p.kind == EngineKind::PistonHelo { v.abs() } else { v };
+                self.step(p, if fuel_left { throttle } else { 0.0 }, v, speed, h, dt);
+            }
+            EngineKind::Jet => {
+                let t = if fuel_left { throttle.clamp(0.0, 1.0) } else { 0.0 };
+                let running = fuel_left;
+                let x = self.w / p.w_max;
+                let mut m = if running { (p.gov_min + t * (p.gov_max - p.gov_min)) / p.gov_max.max(1e-6) * p.jet_m_max } else { 0.0 };
+                if !running {
+                    m -= 0.002 * self.w * (p.prop_i + p.engine_i) / dt;
+                }
+                let q = p.jet_m_max * x * x;
+                let mut aw = (m - q) / (p.prop_i + p.engine_i);
+                if aw > 0.0 {
+                    aw *= p.acceleration;
+                }
+                self.aw = aw;
+                self.w = (self.w + aw * dt).clamp(-p.w_max_allowed, 2.0 * p.w_max_allowed);
+                let x = self.w / p.w_max;
+                let pe = (atmosphere::pressure(h) + p.speed_manifold * 0.5 * atmosphere::density(h) * speed * speed) * 9.871_668_3e-6;
+                let temp = 1.0 - 0.006 * (atmosphere::temperature(h) - 290.0);
+                let ram = 1.0 - 0.0011 * speed;
+                self.thrust = if running { p.thrust_max * x * pe * x * x * temp * ram } else { 0.0 };
+                self.prop_torque = 0.0;
+                self.torque = 0.0;
+                if running {
+                    let power = t;
+                    let n = (p.thrust_max * power).max(p.thrust_max * 0.05);
+                    self.fuel_rate = Self::specific_fuel(p, power) / 3600.0 * n;
+                }
+            }
+            EngineKind::Rocket | EngineKind::RocketBoost => {
+                let t = throttle.clamp(0.0, 1.0);
+                let mut w = p.w_min + (p.w_max - p.w_min) * t;
+                if w < p.w_min || w < 0.0 || !fuel_left {
+                    w = 0.0;
+                }
+                self.w = w;
+                self.thrust = w / p.w_max * p.thrust_max * (p.compressor_p_max / (p.compressor_p_max + 1e-5 * atmosphere::pressure(h)));
+                self.prop_torque = 0.0;
+                self.torque = 0.0;
+                if w > 0.0 {
+                    if p.kind == EngineKind::Rocket {
+                        self.fuel_rate = p.rocket_burn * t;
+                    } else {
+                        self.nitro_rate = 1.432_055_6 * t;
+                    }
+                }
+            }
+            EngineKind::Tow => {
+                // Free flight: the tow string pulls only while a tug tows the glider.
+                self.thrust = 0.0;
+                self.torque = 0.0;
+                self.w = 0.0;
+            }
+            EngineKind::Pvrd => {
+                let t = throttle.clamp(0.0, 1.0);
+                let mut w = p.w_min + (p.w_max - p.w_min) * t;
+                if w < p.w_min || w < 0.0 || !fuel_left {
+                    w = 0.0;
+                }
+                let r = speed / 94.0;
+                let k = if r < 1.0 {
+                    w = 0.0;
+                    0.0
+                } else {
+                    r.sqrt()
+                };
+                let mut thrust = w / p.w_max * p.thrust_max * k;
+                if speed > 208.333 {
+                    thrust = if speed > 291.666 { 0.0 } else { thrust * ((291.666 - speed) / 83.333).sqrt() };
+                }
+                self.w = w;
+                self.thrust = thrust;
+                self.torque = 0.0;
+                self.prop_torque = 0.0;
+                if w > 0.0 {
+                    let n = (p.thrust_max * t).max(p.thrust_max * 0.05);
+                    self.nitro_rate = Self::specific_fuel(p, t) / 3600.0 * n;
+                }
+            }
+        }
     }
 
     /// Advances the engine by `dt`. `v`: airspeed along body x; `h`: altitude; `speed`: total airspeed.
@@ -352,6 +557,14 @@ impl EngineState {
         }
         self.aw = aw;
         self.w = (self.w + aw * dt).clamp(0.0, 2.0 * p.w_max_allowed);
+
+        // Fuel: specific use at the power produced (torque × compressor), per hour.
+        let hp_out = m * self.w * 0.00105;
+        if throttle > 0.0 {
+            let x = hp_out / p.horse_powers;
+            let hp_for = hp_out.max(p.horse_powers * 0.05);
+            self.fuel_rate = Self::specific_fuel(p, x) / 3600.0 * (0.8 + 0.2 * self.w / p.w_wep) * hp_for;
+        }
 
         // 7. Forces on the airframe.
         self.thrust = thrust;

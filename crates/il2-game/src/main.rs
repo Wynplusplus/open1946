@@ -44,6 +44,9 @@ struct Args {
     /// Time of day, hours (overrides the mission's).
     #[arg(long)]
     time: Option<f64>,
+    /// Fly the level-speed check for every aircraft in air.ini and print a table.
+    #[arg(long)]
+    survey: bool,
     /// Fly headless level-flight tests instead of opening a window.
     #[arg(long)]
     test: bool,
@@ -337,7 +340,7 @@ fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
             last.push((sim.vel.length(), sim.pos.z));
         }
     }
-    if let Some(e) = sim.engines.first() {
+    if let Some(e) = sim.engines.first().filter(|_| std::env::var_os("IL2_QUIET").is_none()) {
         eprintln!(
             "  engine at {alt:.0} m: {:.0} rpm, manifold {:.2} ata, pitch {:.1} deg, thrust {:.0} N, prop torque {:.0} N·m",
             e.rpm(), e.manifold, e.phi.to_degrees(), e.thrust, e.prop_torque
@@ -398,7 +401,7 @@ fn parked_test(mut sim: Sim) -> (f64, f64, f64) {
         sim.tick(&inputs, &ground);
     }
     let pitch = (sim.ori * DVec3::X).z.asin().to_degrees();
-    if let Some(e) = sim.engines.first() {
+    if let Some(e) = sim.engines.first().filter(|_| std::env::var_os("IL2_QUIET").is_none()) {
         eprintln!("  parked: engine {:.0} rpm, thrust {:.0} N", e.rpm(), e.thrust);
     }
     (pitch, sim.pos.z, sim.vel.length())
@@ -415,6 +418,10 @@ fn main() {
     let mut args = Args::parse();
     let vfs = il2_vfs::Vfs::open_install(&args.root).unwrap_or_else(|e| fail(e));
     let fms = il2_data::FlightModels::open(&vfs).unwrap_or_else(|e| fail(e));
+    if args.survey {
+        survey(&vfs, &fms);
+        return;
+    }
     let mut start = Start::Default;
     let mut fuel = 1.0;
     let mission = args.mission.as_ref().map(|path| il2_formats::mission::Mission::parse(&vfs.read(path).unwrap_or_else(|e| fail(e))));
@@ -620,6 +627,37 @@ fn main() {
     };
     let el = EventLoop::new().expect("event loop");
     el.run_app(&mut game).expect("run");
+}
+
+/// Level-speed check of every aircraft in `air.ini` against its flight model's `Vmax`/`VmaxH`.
+fn survey(vfs: &il2_vfs::Vfs, fms: &il2_data::FlightModels) {
+    let air = il2_formats::SectFile::parse(&vfs.read("com/maddox/il2/objects/air.ini").unwrap_or_else(|e| fail(e)));
+    let mut seen = HashSet::new();
+    let flat = HeightField::from_raw(2, 2, &[0; 4]);
+    println!("class\tfmd\tV500\tVmax\tVH\tVmaxH\tHofVmax\tparked_pitch\tPitch");
+    let classes = il2_data::Classes::new(vfs, &fms.keys);
+    for (_, v) in air.section_ci("AIR").map(|s| s.entries.as_slice()).unwrap_or_default() {
+        let Some(class) = v.split_whitespace().next() else { continue };
+        if !seen.insert(class.to_owned()) {
+            continue;
+        }
+        let assets = match world::load_aircraft(vfs, fms, class) {
+            Ok(a) => a,
+            Err(e) => {
+                println!("{class}\tERROR {e}");
+                continue;
+            }
+        };
+        let fmd_name = classes.aircraft(class).map(|c| c.flight_model).unwrap_or_default();
+        let fmd = fms.sect_file(&fmd_name).ok();
+        let p = |k: &str| fmd.as_ref().and_then(|f| f.get("Params", k)).unwrap_or("?").to_owned();
+        let hv: f64 = p("HofVmax").parse().unwrap_or(6000.0);
+        let (v0, _) = level_flight_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 120.0), 500.0);
+        let (vh, _) = level_flight_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 120.0), hv);
+        let (pitch, _, _) = parked_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 0.0));
+        let g = fmd.as_ref().and_then(|f| f.get("Gear", "Pitch")).unwrap_or("?").to_owned();
+        println!("{class}\t{fmd_name}\t{v0:.0}\t{}\t{vh:.0}\t{}\t{hv:.0}\t{pitch:.1}\t{g}", p("Vmax"), p("VmaxH"));
+    }
 }
 
 fn fail(e: impl std::fmt::Display) -> ! {

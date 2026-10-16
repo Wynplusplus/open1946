@@ -35,6 +35,8 @@ pub struct Aircraft {
     pub wingspan: f64,
     pub mass_empty: f64,
     pub fuel_max: f64,
+    /// `[Mass] Nitro`: the separate tank of boost systems, rocket boosters and pulse jets (kg).
+    pub nitro_max: f64,
     pub j0: DVec3,
     pub wing_area: f64,
     /// Section areas (in, mid, out) of one wing half.
@@ -60,6 +62,8 @@ pub struct Aircraft {
     pub spin_cx_loss: f64,
     pub spin_cy_loss: f64,
     pub wing: PolarParams,
+    /// Wave drag of the wing; `None` when the flight model has no Mach tables.
+    pub mach: Option<crate::polar::MachTable>,
     pub engines: Vec<EngineParams>,
     pub gear: Vec<GearPoint>,
 }
@@ -85,6 +89,7 @@ impl Aircraft {
             wingspan: 1.0,
             mass_empty: 1.0,
             fuel_max: 0.0,
+            nitro_max: 0.0,
             j0: DVec3::ONE,
             wing_area: 1.0,
             wing_sections: [1.0 / 6.0; 3],
@@ -109,6 +114,7 @@ impl Aircraft {
             spin_cx_loss: 0.0,
             spin_cy_loss: 0.0,
             wing: PolarParams { line_cy: 0.09, aoa_min_cx_shift: 0.0, decline: 0.007, max_dist_ang: 30.0, parab_angle: 5.0, cfg: [cfg, cfg] },
+            mach: None,
             engines: Vec::new(),
             gear: Vec::new(),
         }
@@ -193,9 +199,6 @@ impl Aircraft {
             };
             let e = emd(fam).ok_or_else(|| Error::Bad(format!("engine family {fam} not found")))?;
             let p = EngineParams::load(&e, sub).ok_or_else(|| Error::Bad(format!("engine {fam}/{sub} not found")))?;
-            if !p.piston {
-                return Err(Error::Bad(format!("engine {fam}/{sub}: only piston engines are supported yet")));
-            }
             engines.push(p);
         }
 
@@ -204,6 +207,7 @@ impl Aircraft {
             wingspan,
             mass_empty,
             fuel_max: num(fmd, "Mass", "Fuel")?,
+            nitro_max: num_or(fmd, "Mass", "Nitro", 0.0),
             j0,
             wing_area,
             wing_sections: sections,
@@ -227,6 +231,15 @@ impl Aircraft {
             sens_yaw: num_or(fmd, "Params", "SensYaw", 1.0),
             spin_cx_loss: num_or(fmd, "Params", "SpinCxLoss", 0.0),
             spin_cy_loss: num_or(fmd, "Params", "SpinCyLoss", 0.0),
+            mach: {
+                let list = |k: &str| -> Vec<f64> {
+                    fmd.section_ci("Polares")
+                        .and_then(|s| s.get_ci(k))
+                        .map(|v| v.split(',').filter_map(|t| il2_formats::sectfile::atof(t.trim())).map(f64::from).collect())
+                        .unwrap_or_default()
+                };
+                crate::polar::MachTable::new(&list("mc3"), &list("mc4"), &list("mm"), &list("mz"))
+            },
             wing,
             engines,
             gear,

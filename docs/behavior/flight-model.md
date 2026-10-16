@@ -86,8 +86,18 @@ critical is added before the cap.
 
 **Body-axis coefficients:** `Cx = Cxa cos α − Cya sin α` and `Cy = Cya cos α + Cxa sin α`.
 
-**Wave drag** (wing only; Mach is capped at 0.8 for this use): from the 8-entry `mc3/mc4/mm/mz` tables,
-indexed by lift coefficient `(Cya + 0.9)·3.333`. *OpenIL2 status:* specified separately, not used yet.
+**Wave drag** (wing only). The compressibility factor `Kq` uses Mach capped at 0.8, but wave drag uses the
+**uncapped** Mach `M`. Setup from the comma-separated 8-entry lists `[Polares] mc3, mc4, mm, mz`
+(without them, no wave drag): `mc4 *= mz⁴`, `mc3 *= mz³`, `mc2 = ¼(mz − 6·mc3 − 8·mc4)`, `mc = mm − mz`,
+`md = mc4 + mc3 + mc2 − ½mz`, and `mcMin` = the smallest `mc`.
+
+`cdw(M, Cya)`, added to `Cxa`:
+- 0 below `mcMin`.
+- Let `f = (Cya + 0.9)·3.333333`, `i = ⌊f⌋` and `r = f − i`.
+- If `Cya + 0.9 ≥ 0` and `i < 7`, interpolate `mc`, `mm` and `md` between `i` and `i + 1` with `r`. Below
+  `mc` it is 0; up to `mm` it is `(a + (b − a)·r)·u²` with `u = (M − mc)/(mm − mc)` and
+  `a = (u·mc4ᵢ + mc3ᵢ)·u + mc2ᵢ` (`b` likewise for `i + 1`); beyond that `md + ½(M − mc)`.
+- Otherwise use entry 0 (`Cya < −0.9`) or 7 without interpolation.
 
 Fixed polars (no flap dependence):
 

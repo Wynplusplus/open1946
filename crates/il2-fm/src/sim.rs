@@ -2,7 +2,7 @@
 
 use crate::aircraft::{Aircraft, ContactKind};
 use crate::atmosphere::{self, G};
-use crate::engine::EngineState;
+use crate::engine::{EngineKind, EngineState};
 use crate::polar::Polar;
 use glam::{DQuat, DVec3};
 
@@ -44,6 +44,7 @@ pub struct Sim {
     /// Angular velocity, body frame.
     pub w: DVec3,
     pub fuel: f64,
+    pub nitro: f64,
     pub engines: Vec<EngineState>,
     /// Control surface positions (lagged inputs).
     pub ct: Inputs,
@@ -73,6 +74,7 @@ impl Sim {
     pub fn new(ac: Aircraft, pos: DVec3, ori: DQuat, speed: f64) -> Self {
         let wing = ac.wing_polar();
         let fuel = ac.fuel_max;
+        let nitro = ac.nitro_max;
         let engines = ac.engines.iter().map(|p| EngineState::new(p, p.w_nom)).collect();
         Sim {
             engines,
@@ -82,6 +84,7 @@ impl Sim {
             ori,
             w: DVec3::ZERO,
             fuel,
+            nitro,
             ct: Inputs { gear: 1.0, ..Default::default() },
             wing,
             fusel: Polar::fixed(0.02, 0.2, 17.0, 0.0),
@@ -104,7 +107,7 @@ impl Sim {
     }
 
     pub fn mass(&self) -> f64 {
-        self.ac.mass_empty + self.fuel
+        self.ac.mass_empty + self.fuel + self.nitro
     }
 
     /// Advances one game tick, splitting it like the original when the aircraft is fast.
@@ -141,7 +144,8 @@ impl Sim {
         let aoa = -deg(vflow.z.atan2(vflow.x));
         let aos = deg(vflow.y.atan2(vflow.x));
         let ias = v * (rho / atmosphere::RHO0).sqrt();
-        let mach = (v / atmosphere::sonic_speed(self.pos.z)).min(0.8);
+        let full_mach = v / atmosphere::sonic_speed(self.pos.z);
+        let mach = full_mach.min(0.8);
         let kq = 1.0 / (1.0 - mach * mach).sqrt();
         let q = |vv: DVec3| 0.5 * rho * vv.length_squared();
         let w = self.w;
@@ -152,15 +156,29 @@ impl Sim {
         // Engines (docs/behavior/engine.md).
         let mut thrust = 0.0;
         let mut torque = 0.0;
-        let throttle = if self.fuel > 0.0 { self.ct.throttle } else { 0.0 };
+        let throttle = self.ct.throttle;
+        let (mut burn, mut burn_nitro) = (0.0, 0.0);
         for (p, st) in ac.engines.iter().zip(&mut self.engines) {
-            st.step(p, throttle, vflow.x, v, self.pos.z, dt);
+            // OpenIL2 control mapping: a rocket booster fires while the throttle is in the boost range.
+            let (t, fuel_left) = match p.kind {
+                EngineKind::RocketBoost => (if throttle > 1.0 { 1.0 } else { 0.0 }, self.nitro > 0.0),
+                EngineKind::Pvrd => (throttle, self.nitro > 0.0),
+                _ => (throttle, self.fuel > 0.0),
+            };
+            st.step_any(p, t, vflow.x, v, self.pos.z, dt, fuel_left);
             thrust += st.thrust;
             torque += st.torque;
-            let denom = 6.0 * rho * (vflow.x + self.add_vflow).max(1.0);
-            self.add_vflow = 0.95 * self.add_vflow + 0.05 * st.thrust / denom;
-            self.add_vside = (0.95 * self.add_vside + 0.05 * (st.prop_torque / p.prop_r) / denom).max(0.0);
+            burn += st.fuel_rate * dt;
+            burn_nitro += st.nitro_rate * dt;
+            // Slipstream comes from propellers only.
+            if p.piston {
+                let denom = 6.0 * rho * (vflow.x + self.add_vflow).max(1.0);
+                self.add_vflow = 0.95 * self.add_vflow + 0.05 * st.thrust / denom;
+                self.add_vside = (0.95 * self.add_vside + 0.05 * (st.prop_torque / p.prop_r) / denom).max(0.0);
+            }
         }
+        self.fuel = (self.fuel - burn).max(0.0);
+        self.nitro = (self.nitro - burn_nitro).max(0.0);
         let power_out = throttle.min(1.0);
         let prop_sign = ac.engines.first().map_or(1.0, |e| e.direction);
         let single_prop = ac.engines.len() == 1;
@@ -178,7 +196,7 @@ impl Sim {
             if ail_drag < 0.0 {
                 ail_drag *= 0.18;
             }
-            let (cx, cy) = self.wing.coeffs(a);
+            let (cx, cy) = self.wing.coeffs_mach(a, full_mach, ac.mach.as_ref());
             let (fcx, fcy) = self.fusel.coeffs(aos);
             let cw = DVec3::new(-qn * (cx + ail_drag + ac.airbrake_cx * 0.0) - qn * fcx, -qn * fcy, qn * cy * kq);
             (cw, a_geo, qn)

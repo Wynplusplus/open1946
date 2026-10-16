@@ -1,8 +1,9 @@
 # Piston engine and propeller
 
 Status: **specified from the runtime's engine model** for running piston engines (`Type Inline/Radial`).
+Also specified: jets, rockets, rocket boosters, pulse jets, tow strings and fuel use (sections below).
 Not yet covered: start-up and shut-down stages, mixture, magnetos, failures, temperatures, WEP
-(afterburner types), negative-g carburettor cut, engine roughness, jets and rockets.
+(afterburner types), negative-g carburettor cut, engine roughness.
 
 ## Data (`FlightModels/<family>.emd`)
 A submodel `[Name]` is read **on top of** `[Generic]` in the same file: any key the submodel does not give
@@ -120,3 +121,51 @@ and `h` the altitude.
 
 **Initial state.** A running engine starts at `ω = ωNom` in the air and `ω = ωMin` on the ground. The pitch
 starts at 11°, clamped to the limits.
+
+## Engine types
+`Type` is matched by suffix: `Inline` and `Radial` are piston engines, then `Jet`, `RocketBoost`, `Rocket`
+(checked after `RocketBoost`), `Tow`, `PVRD`, and `HeloI` (a piston engine whose propeller sees `|V|`, for
+tail-sitters). `Thrust` is in kgf (`× 9.81`; default 10.7 N), `Cylinders` defaults to 12, `PropAoA0` to 11°
+(stored in radians).
+
+**Jet.**
+- Setup: fan area `S = Cylinders²·2·Thrust / (FanCy(PropAoA0)·ρ0·ωMax²·propR²)`. The runtime passes
+  `PropAoA0` **in radians** to `FanCy`, which expects degrees; OpenIL2 keeps that. Drag torque at full speed
+  `Mmax = ½·FanCx(PropAoA0 in degrees)·ρ0·(ωMax·propR)²·S·propR`.
+- Per step:
+  - engine torque `M = (PropAnglerMinParam + T·(MaxParam − MinParam))/MaxParam · Mmax` (zero when stopped,
+    plus a friction of `−0.002·ω·(propI + EngineI)/dt` then);
+  - fan torque `Q = Mmax·(ω/ωMax)²`, so the steady speed is `ωMax·√(M/Mmax)`;
+  - `ω̇ = (M − Q)/(propI + EngineI)`, times `EngineAcceleration` when positive; `ω` stays within
+    `[−ωMaxAllowed, 2·ωMaxAllowed]`.
+- Thrust `Thrust·(ω/ωMax)³·pe·(1 − 0.006(T_air − 290 K))·(1 − 0.0011·V)`, with
+  `pe = (p(h) + CompressorSpeedManifold·½ρV²)/101325` (`CompressorSpeedManifold` default 0.2). No torque
+  reaction, no slipstream.
+
+**Rocket and RocketBoost.** `ω = ωMin + (ωMax − ωMin)·T`, zero if below `ωMin` or 0, out of fuel or
+stopped (a negative `RPMMin` gives a dead band at low throttle). Thrust
+`ω/ωMax · Thrust · CompressorPMax/(CompressorPMax + 10⁻⁵·p(h))` (`CompressorPMax` default 1), so it grows with
+altitude. *OpenIL2 control mapping:* a `RocketBoost` engine fires while the throttle is above 100 %.
+
+**PVRD** (pulse jet). `ω` as for rockets. Thrust `ω/ωMax · Thrust · √(V/94)`, zero below 94 m/s; above
+208.333 m/s it is multiplied by `√((291.666 − V)/83.333)`, and it is zero above 291.666 m/s.
+
+**Tow.** The thrust is set by the towing aircraft; in free flight it is zero (gliders).
+
+## Fuel use
+Power fraction `x`: piston engines `x = P/HorsePowers` with `P = M_engine·ω·0.00105` hp (engine torque times
+compressor factor, before readiness), floored at 5 % of `HorsePowers` for the amount; other types
+`x = T` and the amount `Thrust·x` (newtons), floored at 5 %.
+
+Specific use from `FuelConsumptionP0`, `P05`, `P1`, `PMAX` (defaults 0.4, 0.24, 0.28, 0.3; jets 0.075,
+0.075, 0.1, 0.11; pulse jets 0.835 for all):
+- for `x ≤ 0.5`: `(x − ½)²·4(P0 − P05) + P05`;
+- for `x ≤ 1`: `(x − ½)²·4(P1 − P05) + P05`;
+- beyond 1: `P1 + (PMAX − P1)·10·min(x − 1, 0.1)`.
+
+It is per hour, so divide by 3600 and multiply by the amount; piston engines also by
+`0.8 + 0.2·ω/ωWEP` (`ωWEP` from `PropAnglerAfterburnerParam`, else `ωMax`).
+- Rockets burn `2.5777·T` kg/s (1.8 for BI-1 and BI-6, 0.5 for MXY-7).
+- Rocket boosters burn `1.4320556·T` kg/s, and pulse jets their computed rate, from the `[Mass] Nitro`
+  tank instead of the fuel tank.
+- An engine stops when its tank is empty. Aircraft mass is `empty + fuel + nitro`.

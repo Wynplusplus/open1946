@@ -17,3 +17,9 @@ Low altitude runs at 500 m and the references are at sea level, so OpenIL2 shoul
 
 Ground handling (Bf 109 F-4, Kuban mission start, full power, simple pilot): lift-off at about 207 km/h after
 about 480 m. Parked attitude for all of the above is within 0.7° and 2 cm of `[Gear] Pitch` and `H`.
+
+## All aircraft (`openil2 --survey`)
+2026-10-16, every class in `air.ini` (404): all load and fly, including jets, rockets, pulse jets and
+gliders. Level speed at 500 m against `Vmax` has a median of −1.2 %, and at `HofVmax` against `VmaxH`
+−3.3 %. Within ±5 % at both altitudes: 189 aircraft; ±10 %: 321; ±15 %: 365. Some references are clearly
+not measurements; for example, Yak-15 `Vmax 567` km/h is below the real aircraft's ~786.

@@ -22,6 +22,76 @@ pub struct PolarCfg {
     pub parab_cx: f64,
 }
 
+/// Wave drag tables (`[Polares] mc3, mc4, mm, mz`), prepared as the runtime does.
+#[derive(Clone, Debug)]
+pub struct MachTable {
+    mc: [f64; 8],
+    mm: [f64; 8],
+    mc2: [f64; 8],
+    mc3: [f64; 8],
+    mc4: [f64; 8],
+    md: [f64; 8],
+    mc_min: f64,
+}
+
+impl MachTable {
+    /// From the four 8-entry lists; `None` if any is missing or short (no wave drag then).
+    pub fn new(mc3: &[f64], mc4: &[f64], mm: &[f64], mz: &[f64]) -> Option<Self> {
+        if [mc3, mc4, mm, mz].iter().any(|t| t.len() < 8) {
+            return None;
+        }
+        let mut t = MachTable { mc: [0.0; 8], mm: [0.0; 8], mc2: [0.0; 8], mc3: [0.0; 8], mc4: [0.0; 8], md: [0.0; 8], mc_min: 999.0 };
+        for i in 0..8 {
+            let z = mz[i];
+            t.mm[i] = mm[i];
+            t.mc4[i] = mc4[i] * z.powi(4);
+            t.mc3[i] = mc3[i] * z.powi(3);
+            t.mc2[i] = 0.25 * (z - 6.0 * t.mc3[i] - 8.0 * t.mc4[i]);
+            t.mc[i] = mm[i] - z;
+            t.mc_min = t.mc_min.min(t.mc[i]);
+            t.md[i] = t.mc4[i] + t.mc3[i] + t.mc2[i] - z * 0.5;
+        }
+        Some(t)
+    }
+
+    /// Wave drag coefficient at Mach `m` (uncapped) for lift coefficient `cya`.
+    pub fn cdw(&self, m: f64, cya: f64) -> f64 {
+        if m < self.mc_min {
+            return 0.0;
+        }
+        let x = cya + 0.9;
+        let f = x * 3.333333;
+        let i = f as i64;
+        let fr = f - i as f64;
+        if x >= 0.0 && i < 7 {
+            let i = i as usize;
+            let c = self.mc[i] + (self.mc[i + 1] - self.mc[i]) * fr;
+            let mmax = self.mm[i] + (self.mm[i + 1] - self.mm[i]) * fr;
+            if m < c {
+                0.0
+            } else if m < mmax {
+                let u = (m - c) / (mmax - c);
+                let a = (u * self.mc4[i] + self.mc3[i]) * u + self.mc2[i];
+                let b = (u * self.mc4[i + 1] + self.mc3[i + 1]) * u + self.mc2[i + 1];
+                (a + (b - a) * fr) * u * u
+            } else {
+                self.md[i] + (self.md[i + 1] - self.md[i]) * fr + 0.5 * (m - c)
+            }
+        } else {
+            let i = if x < 0.0 { 0 } else { (i as usize).min(7) };
+            let d = m - self.mc[i];
+            if d < 0.0 {
+                0.0
+            } else if m < self.mm[i] {
+                let u = d / (self.mm[i] - self.mc[i]);
+                ((u * self.mc4[i] + self.mc3[i]) * u + self.mc2[i]) * u * u
+            } else {
+                0.5 * d + self.md[i]
+            }
+        }
+    }
+}
+
 /// A polar evaluated for a given flap setting.
 #[derive(Clone, Debug)]
 pub struct Polar {
@@ -180,7 +250,13 @@ impl Polar {
 
     /// Body-axis (Cx, Cy) at angle of attack `a`.
     pub fn coeffs(&self, a: f64) -> (f64, f64) {
-        let (cxa, cya) = (self.cxa(a), self.cya(a));
+        self.coeffs_mach(a, 0.0, None)
+    }
+
+    /// Body-axis (Cx, Cy) with wave drag at (uncapped) Mach `m`.
+    pub fn coeffs_mach(&self, a: f64, m: f64, mach: Option<&MachTable>) -> (f64, f64) {
+        let cya = self.cya(a);
+        let cxa = self.cxa(a) + mach.map_or(0.0, |t| t.cdw(m, cya));
         let (s, c) = a.to_radians().sin_cos();
         (cxa * c - cya * s, cya * c + cxa * s)
     }

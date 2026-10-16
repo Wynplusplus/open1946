@@ -85,7 +85,16 @@ pub fn load_aircraft(vfs: &Vfs, fms: &il2_data::FlightModels, class: &str) -> Re
     mesh.textures = loader.take_images();
     let fmd = fms.sect_file(fmd_name).map_err(|e| e.to_string())?;
     let gear = gear_points(&hooks, &fmd);
-    let fm = Aircraft::load(&fmd, |fam| fms.sect_file(&format!("FlightModels/{fam}.emd")).ok(), gear).map_err(|e| e.to_string())?;
+    let mut fm = Aircraft::load(&fmd, |fam| fms.sect_file(&format!("FlightModels/{fam}.emd")).ok(), gear).map_err(|e| e.to_string())?;
+    // The runtime picks these rocket burn rates by aircraft class (docs/behavior/engine.md).
+    let short = class.rsplit('.').next().unwrap_or(class);
+    for e in &mut fm.engines {
+        e.rocket_burn = match short {
+            "BI_1" | "BI_6" => 1.8,
+            "MXY_7" => 0.5,
+            _ => e.rocket_burn,
+        };
+    }
     let num = |k: &str, d: f64| {
         fmd.section_ci("Gear").and_then(|s| s.get_ci(k)).and_then(il2_formats::sectfile::atof).map_or(d, f64::from)
     };
