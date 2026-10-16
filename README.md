@@ -24,7 +24,6 @@ No game files, decompiled code or key material are part of this repository. Form
 | Aircraft damage | Damage levels, parts torn off as tumbling wreckage, flight-model losses, G limits, flutter and ground strikes |
 | Weapons | Loadouts and gun, bomb and rocket data from the install; ballistics, tracers, house destruction |
 | Effects and sound | Particle effects from `.eff` files for impacts and explosions; engine, gun and explosion sounds from the game's presets (ALSA) |
-
 | AI and the world | AI flights fly missions (takeoff, waypoints, formation, air combat, level bombing, landing), gunners, anti-aircraft guns, moving ground and naval columns |
 | Menus | Single missions with localized briefings, Quick Mission Builder from the install's templates |
 
