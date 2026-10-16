@@ -45,6 +45,9 @@ target/release/openil2 --test                                   # headless fligh
 target/release/openil2 --at 214500,86500 --time 19.5              # dusk; --time overrides the mission's
 target/release/openil2 --at 214500,86500 --agl 150 --screenshot out.png --orbit 170,12,40
 
+# Joystick (Linux /dev/input/js*): picked up automatically; default axes X/Y = stick, 2 = throttle,
+# 3 = twist rudder, button 2 = wheel brakes. Remap with e.g. --joy-map aileron=0,elevator=1,rudder=5,throttle=-2
+
 # Viewer (drag to orbit, wheel to zoom)
 target/release/il2-viewer "3DO/Plane/Bf-109G-6Early/hier.him"
 target/release/il2-viewer "3do/plane/Il-2-1941Early(Multi1)/hier.him" --season winter

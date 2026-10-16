@@ -1,4 +1,5 @@
 mod forest;
+mod joystick;
 mod mission_objects;
 mod objects;
 mod roads;
@@ -41,6 +42,9 @@ struct Args {
     /// Start altitude above ground, metres (without a mission).
     #[arg(long, default_value_t = 1500.0)]
     agl: f64,
+    /// Joystick axes, e.g. "aileron=0,elevator=1,rudder=3,throttle=-2" (minus inverts).
+    #[arg(long)]
+    joy_map: Option<String>,
     /// Time of day, hours (overrides the mission's).
     #[arg(long)]
     time: Option<f64>,
@@ -100,6 +104,7 @@ struct Game {
     keys: HashSet<KeyCode>,
     #[cfg(feature = "gamepad")]
     gilrs: Option<Gilrs>,
+    joystick: Option<(joystick::Joystick, joystick::AxisMap)>,
     inputs: Inputs,
     last: Instant,
     acc: f64,
@@ -147,6 +152,26 @@ impl Game {
             i.throttle = (i.throttle - 0.5 * dt).max(0.0);
         }
         i.brakes = if k(KeyCode::KeyB) { 1.0 } else { 0.0 };
+        if let Some((j, map)) = self.joystick.as_mut() {
+            j.poll();
+            let dz = |v: f64| if v.abs() < 0.03 { 0.0 } else { v };
+            if let Some(v) = j.axis(map.aileron) {
+                i.aileron = dz(v);
+            }
+            if let Some(v) = j.axis(map.elevator) {
+                i.elevator = dz(v);
+            }
+            if let Some(v) = j.axis(map.rudder) {
+                i.rudder = dz(v);
+            }
+            if let Some(v) = j.axis(map.throttle) {
+                // Full travel maps to 0..100 %; boost stays on the keyboard.
+                if !i.wep {
+                    i.throttle = (v + 1.0) * 0.5;
+                }
+            }
+            i.brakes = i.brakes.max(if j.buttons[1] { 1.0 } else { 0.0 });
+        }
         #[cfg(feature = "gamepad")]
         if let Some(g) = self.gilrs.as_mut() {
             while g.next_event().is_some() {}
@@ -634,6 +659,13 @@ fn main() {
         keys: HashSet::new(),
         #[cfg(feature = "gamepad")]
         gilrs: Gilrs::new().ok(),
+        joystick: {
+            let map = args.joy_map.as_deref().map(joystick::AxisMap::parse).transpose().unwrap_or_else(|e| fail(e)).unwrap_or_default();
+            joystick::Joystick::open().map(|(j, path)| {
+                eprintln!("joystick: {path}");
+                (j, map)
+            })
+        },
         last: Instant::now(),
         acc: 0.0,
         title_timer: 0.0,
