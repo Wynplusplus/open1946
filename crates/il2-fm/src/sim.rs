@@ -17,6 +17,8 @@ pub struct Inputs {
     pub brakes: f64,
     /// Gear lever: 1 = down, 0 = up.
     pub gear: f64,
+    /// Emergency boost (WEP) switch, for boost systems not engaged by the throttle alone.
+    pub wep: bool,
 }
 
 /// Ground height query in world coordinates.
@@ -129,6 +131,7 @@ impl Sim {
         self.ct.throttle = approach(self.ct.throttle, input.throttle.min(max_throttle), 1.0, dt);
         self.ct.flaps = approach(self.ct.flaps, input.flaps, 0.2, dt);
         self.ct.brakes = input.brakes;
+        self.ct.wep = input.wep;
         // OpenIL2 simplification: gear travels in about 6 s.
         self.ct.gear = approach(self.ct.gear, input.gear, 1.0 / 6.0, dt);
         self.wing.set_flaps(self.ct.flaps);
@@ -165,7 +168,8 @@ impl Sim {
                 EngineKind::Pvrd => (throttle, self.nitro > 0.0),
                 _ => (throttle, self.fuel > 0.0),
             };
-            st.step_any(p, t, vflow.x, v, self.pos.z, dt, fuel_left);
+            let wep = p.wep_active(t, self.ct.wep, self.nitro > 0.0);
+            st.step_any(p, t, wep, vflow.x, v, self.pos.z, dt, fuel_left);
             thrust += st.thrust;
             torque += st.torque;
             burn += st.fuel_rate * dt;

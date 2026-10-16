@@ -220,14 +220,16 @@ impl Game {
             self.title_timer = 0.25;
             let agl = s.pos.z - field.height_at(s.pos.x, s.pos.y);
             r.window.as_ref().unwrap().set_title(&format!(
-                "OpenIL2 | IAS {:4.0} km/h | ALT {:5.0} m (AGL {:5.0}) | THR {:3.0}% | FLAPS {:3.0}% | GEAR {} | AoA {:5.1}{}",
+                "OpenIL2 | IAS {:4.0} km/h | ALT {:5.0} m (AGL {:5.0}) | THR {:3.0}%{} | FLAPS {:3.0}% | GEAR {} | AoA {:5.1} | FUEL {:4.0} kg{}",
                 s.ias * 3.6,
                 s.pos.z,
                 agl,
                 s.ct.throttle * 100.0,
+                if s.ct.wep { " WEP" } else { "" },
                 s.ct.flaps * 100.0,
                 if s.ct.gear > 0.98 { "DOWN" } else if s.ct.gear < 0.02 { "UP" } else { "MOVING" },
                 s.aoa,
+                s.fuel,
                 if s.on_ground { " | GROUND" } else { "" }
             ));
         }
@@ -270,8 +272,13 @@ impl ApplicationHandler for Game {
                             KeyCode::KeyV => self.inputs.flaps = (self.inputs.flaps - 1.0 / 3.0).max(0.0),
                             KeyCode::KeyG => self.inputs.gear = if self.inputs.gear > 0.5 { 0.0 } else { 1.0 },
                             KeyCode::Digit0 => self.inputs.throttle = 1.0,
-                            // Boost (110 %) for engines that allow it.
-                            KeyCode::KeyW => self.inputs.throttle = 1.1,
+                            // Boost: throttle to 110 % where allowed, and the WEP switch.
+                            KeyCode::KeyW => {
+                                self.inputs.wep = !self.inputs.wep;
+                                if self.inputs.wep {
+                                    self.inputs.throttle = 1.1;
+                                }
+                            }
                             KeyCode::Digit1 => self.inputs.throttle = 0.0,
                             c @ (KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6
                             | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9) => {
@@ -315,7 +322,7 @@ impl ApplicationHandler for Game {
 fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
     let ground = |_: f64, _: f64| 0.0;
     sim.pos.z = alt;
-    let mut inputs = Inputs { throttle: 1.1, ..Default::default() };
+    let mut inputs = Inputs { throttle: 1.1, wep: true, ..Default::default() };
     let mut last = Vec::new();
     for step in 0..(240.0 / TICK) as usize {
         let vz = sim.vel.z;
@@ -634,7 +641,7 @@ fn survey(vfs: &il2_vfs::Vfs, fms: &il2_data::FlightModels) {
     let air = il2_formats::SectFile::parse(&vfs.read("com/maddox/il2/objects/air.ini").unwrap_or_else(|e| fail(e)));
     let mut seen = HashSet::new();
     let flat = HeightField::from_raw(2, 2, &[0; 4]);
-    println!("class\tfmd\tV500\tVmax\tVH\tVmaxH\tHofVmax\tparked_pitch\tPitch");
+    println!("class\tfmd\tV500\tVmax\tVH\tVmaxH\tHofVmax\tparked_pitch\tPitch\tafterburner\tboost");
     let classes = il2_data::Classes::new(vfs, &fms.keys);
     for (_, v) in air.section_ci("AIR").map(|s| s.entries.as_slice()).unwrap_or_default() {
         let Some(class) = v.split_whitespace().next() else { continue };
@@ -656,7 +663,14 @@ fn survey(vfs: &il2_vfs::Vfs, fms: &il2_data::FlightModels) {
         let (vh, _) = level_flight_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 120.0), hv);
         let (pitch, _, _) = parked_test(world::spawn_airborne(assets.fm.clone(), &flat, 0.0, 0.0));
         let g = fmd.as_ref().and_then(|f| f.get("Gear", "Pitch")).unwrap_or("?").to_owned();
-        println!("{class}\t{fmd_name}\t{v0:.0}\t{}\t{vh:.0}\t{}\t{hv:.0}\t{pitch:.1}\t{g}", p("Vmax"), p("VmaxH"));
+        let e0 = assets.fm.engines.first();
+        println!(
+            "{class}\t{fmd_name}\t{v0:.0}\t{}\t{vh:.0}\t{}\t{hv:.0}\t{pitch:.1}\t{g}\t{}\t{}",
+            p("Vmax"),
+            p("VmaxH"),
+            e0.map_or(-1, |e| e.afterburner),
+            e0.map_or(0.0, |e| e.boost_factor)
+        );
     }
 }
 

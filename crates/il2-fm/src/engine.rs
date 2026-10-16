@@ -47,6 +47,14 @@ pub struct EngineParams {
     pub fuel_curve: [f64; 4],
     /// Shaft speed for boost (`PropAnglerAfterburnerParam`), rad/s; `w_max` when not given.
     pub w_wep: f64,
+    /// `AfterburnerType`: emergency boost system (0 none).
+    pub afterburner: i32,
+    /// `WEPBoostFactor`: torque factor with boost engaged (1).
+    pub wep_boost: f64,
+    /// Boost ATA over normal ATA at the boost point of the ATA curve.
+    pub wep_compressor: f64,
+    /// Governor target at full lever with boost (`PropAnglerAfterburnerParam`).
+    pub gov_max_wep: f64,
     pub w_min: f64,
     pub w_nom: f64,
     pub w_max: f64,
@@ -152,6 +160,16 @@ impl EngineParams {
             let (Some(r), Some(a)) = (raw(&format!("CompressorRPM{k}")), raw(&format!("CompressorATA{k}"))) else { break };
             insert(atof(r).unwrap_or(2000.0) as f64, atof(a).unwrap_or(1.0) as f64);
         }
+        // Boost types keep their boost pressure as the last ATA point; it is taken out of the normal curve.
+        let afterburner = num("AfterburnerType", 0.0) as i32;
+        let mut wep_compressor = 1.0;
+        if matches!(afterburner, 1 | 4..=12) && !ata.is_empty() {
+            let (r, a) = ata.pop().unwrap();
+            if ata.len() >= 2 {
+                let normal = ata_at(&ata, r, 0.0);
+                wep_compressor = a / normal;
+            }
+        }
         let hp = num("HorsePowers", 1200.0);
         let thrust_max = num("Thrust", 10.7 / 9.81) * 9.81;
         let cylinders = num("Cylinders", 12.0);
@@ -181,6 +199,10 @@ impl EngineParams {
             jet_s,
             jet_m_max,
             fuel_curve,
+            afterburner,
+            wep_boost: num("WEPBoostFactor", 1.0),
+            wep_compressor,
+            gov_max_wep: if raw("PropAnglerAfterburnerParam").is_some() { gov_param("PropAnglerAfterburnerParam") } else { gov_param("PropAnglerMaxParam") },
             w_wep: raw("PropAnglerAfterburnerParam").and_then(atof).map_or(w_max, |r| rad_s(r as f64)),
             w_min: rad_s(num("RPMMin", 200.0)),
             w_nom: rad_s(num("RPMNom", 2000.0)),
@@ -227,7 +249,32 @@ impl EngineParams {
 
     /// ATA curve value at `r` RPM.
     fn ata(&self, r: f64, h: f64) -> f64 {
-        let p = &self.ata;
+        ata_at(&self.ata, r, h)
+    }
+
+    /// Whether boost is engaged for these controls (`docs/behavior/engine.md`, "Emergency boost").
+    pub fn wep_active(&self, throttle: f64, wep: bool, nitro_left: bool) -> bool {
+        match self.afterburner {
+            0 => false,
+            4 => throttle > 1.0 && nitro_left,
+            8 | 10 => throttle > 1.0,
+            1 => wep && throttle > 1.0 && nitro_left,
+            _ => wep,
+        }
+    }
+
+    /// Nitro use while boost is engaged, kg/s.
+    pub fn wep_nitro_rate(&self) -> f64 {
+        if matches!(self.afterburner, 1 | 2 | 4 | 5 | 9) {
+            0.044872
+        } else {
+            0.0
+        }
+    }
+}
+
+fn ata_at(p: &[(f64, f64)], r: f64, h: f64) -> f64 {
+    {
         if p.len() < 2 {
             return 1.0;
         }
@@ -322,13 +369,16 @@ impl EngineState {
 
     /// Advances any engine type; `fuel_left`: whether the tank it burns from has fuel.
     #[allow(clippy::too_many_arguments)]
-    pub fn step_any(&mut self, p: &EngineParams, throttle: f64, v: f64, speed: f64, h: f64, dt: f64, fuel_left: bool) {
+    pub fn step_any(&mut self, p: &EngineParams, throttle: f64, wep: bool, v: f64, speed: f64, h: f64, dt: f64, fuel_left: bool) {
         self.fuel_rate = 0.0;
         self.nitro_rate = 0.0;
         match p.kind {
             EngineKind::Piston | EngineKind::PistonHelo => {
                 let v = if p.kind == EngineKind::PistonHelo { v.abs() } else { v };
-                self.step(p, if fuel_left { throttle } else { 0.0 }, v, speed, h, dt);
+                self.step_wep(p, if fuel_left { throttle } else { 0.0 }, wep && fuel_left, v, speed, h, dt);
+                if wep && fuel_left {
+                    self.nitro_rate = p.wep_nitro_rate();
+                }
             }
             EngineKind::Jet => {
                 let t = if fuel_left { throttle.clamp(0.0, 1.0) } else { 0.0 };
@@ -413,6 +463,11 @@ impl EngineState {
 
     /// Advances the engine by `dt`. `v`: airspeed along body x; `h`: altitude; `speed`: total airspeed.
     pub fn step(&mut self, p: &EngineParams, throttle: f64, v: f64, speed: f64, h: f64, dt: f64) {
+        self.step_wep(p, throttle, false, v, speed, h, dt);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_wep(&mut self, p: &EngineParams, throttle: f64, wep: bool, v: f64, speed: f64, h: f64, dt: f64) {
         // Throttle above 1 (up to 1.1) is boost, only for engines with BoostFactor > 1.
         let throttle = throttle.clamp(0.0, p.max_throttle());
         let t = throttle.min(1.0);
@@ -439,7 +494,8 @@ impl EngineState {
         let threshold = match p.governor {
             1 | 2 | 7 | 8 => {
                 let lever = if p.boost_factor > 1.0 { 0.75 + 0.227272 * throttle } else { 0.75 + 0.25 * throttle };
-                let wt = p.gov_min + (p.gov_max - p.gov_min) * lever;
+                let top = if wep { p.gov_max_wep } else { p.gov_max };
+                let wt = p.gov_min + (top - p.gov_min) * lever;
                 let rate = p.governor_speed * dt;
                 if self.w < wt {
                     self.phi_target -= (0.01 * (wt - self.w) - 0.012 * self.aw).min(1.0) * rate;
@@ -460,6 +516,9 @@ impl EngineState {
             }
             _ => p.max_ata_rpm * (0.55 + 0.45 * t),
         };
+        // Boost raises the allowed manifold pressure.
+        let wf = if wep { p.wep_compressor } else { 1.0 };
+        let threshold = threshold * wf;
         let step = p.governor_speed * dt;
         let diff = self.phi - self.phi_target;
         self.phi -= diff.signum() * (157.3 * diff.abs()).min(1.0) * step;
@@ -487,7 +546,7 @@ impl EngineState {
                     (0, 1.0 + (1.0 - pe) / (1.0 - pr[0]).max(1e-4) * (p.stage_mult[0] - 1.0))
                 };
                 let mut m = rpm_factor * pe * p.max_ata_rpm / pr[stage];
-                self.second_throttle = (p.max_ata_rpm / m.max(1e-6)).min(1.0);
+                self.second_throttle = (wf * p.max_ata_rpm / m.max(1e-6)).min(1.0);
                 m *= self.second_throttle;
                 m *= (threshold / p.max_ata_rpm).min(1.0);
                 self.manifold = m;
@@ -512,7 +571,7 @@ impl EngineState {
                 }
                 let (_, ki, i) = best;
                 let mut m = rpm_factor * pe * p.max_ata_rpm / p.stage_pressure[i];
-                let target = p.max_ata_rpm / m.max(1e-6);
+                let target = wf * p.max_ata_rpm / m.max(1e-6);
                 self.second_throttle = (self.second_throttle - 3.0 * dt * (self.second_throttle - target)).min(1.0);
                 m *= self.second_throttle;
                 m *= (threshold / p.max_ata_rpm).min(1.0);
@@ -547,6 +606,7 @@ impl EngineState {
         } else {
             1.0
         };
+        let boost = if wep { boost * p.wep_boost } else { boost };
         let torque_curve = (torque_curve * boost).max(-0.8 * self.w / p.w_max * p.m_max);
         let m = torque_curve * c;
 

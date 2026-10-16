@@ -2,8 +2,8 @@
 
 Status: **specified from the runtime's engine model** for running piston engines (`Type Inline/Radial`).
 Also specified: jets, rockets, rocket boosters, pulse jets, tow strings and fuel use (sections below).
-Not yet covered: start-up and shut-down stages, mixture, magnetos, failures, temperatures, WEP
-(afterburner types), negative-g carburettor cut, engine roughness.
+Emergency boost is specified too ("Emergency boost"). Not yet covered: start-up and shut-down stages,
+mixture, magnetos, failures, temperatures, negative-g carburettor cut, engine roughness.
 
 ## Data (`FlightModels/<family>.emd`)
 A submodel `[Name]` is read **on top of** `[Generic]` in the same file: any key the submodel does not give
@@ -169,3 +169,24 @@ It is per hour, so divide by 3600 and multiply by the amount; piston engines als
 - Rocket boosters burn `1.4320556·T` kg/s, and pulse jets their computed rate, from the `[Mass] Nitro`
   tank instead of the fuel tank.
 - An engine stops when its tank is empty. Aircraft mass is `empty + fuel + nitro`.
+
+## Emergency boost (`AfterburnerType`)
+`AfterburnerType` (0 none) selects the boost system; `WEPBoostFactor` (1) multiplies engine torque while it
+is engaged.
+- **Boost pressure.** For types 1 and 4–12, the **last point of the ATA curve** (highest RPM) is the boost
+  pressure: it is removed from the normal curve, and `wepCompressor = ATA_last / ATA_normal(RPM_last)`
+  (1 if fewer than two points remain).
+- **While engaged:**
+  - the supercharger's allowed manifold pressure and the manifold threshold are multiplied by
+    `wepCompressor` (types 7 and 8: only below the top supercharger stage);
+  - engine torque is multiplied by `WEPBoostFactor` (types 7 and 8: only below the top stage; type 1: only
+    with throttle above 100 % and nitro left);
+  - governors 1 and 2 aim at `PropAnglerAfterburnerParam` (default `PropAnglerMaxParam`) instead of the maximum.
+- **Engaging.** Types 4 (with nitro), 8 and 10 engage while the throttle is above 100 % and disengage
+  below it. The other types use a separate WEP switch; type 1 (MW 50, GM-1) also needs throttle above 100 %
+  and nitro.
+- **Nitro.** Types 1 (above 100 %), 2, 4, 5 and 9 burn 0.044872 kg/s of `Nitro` while engaged; type 4
+  disengages when it runs out.
+
+*OpenIL2 status:* the supercharger stage conditions for types 7 and 8 are not modelled (the factors always
+apply).
