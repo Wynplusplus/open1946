@@ -51,6 +51,8 @@ pub struct AiPilot {
     prev_dist2: f64,
     prev_w: DVec3,
     prev_vx: f64,
+    /// Integral part of the formation throttle.
+    thr_i: f64,
 }
 
 impl AiPilot {
@@ -72,6 +74,7 @@ impl AiPilot {
             prev_dist2: 1e8,
             prev_w: DVec3::ZERO,
             prev_vx: 0.0,
+            thr_i: 0.6,
         }
     }
 
@@ -183,6 +186,50 @@ impl AiPilot {
             self.stab_speed = w.speed / 3.6 - 2.0 * self.index as f64;
         }
         self.stab_alt = wp.z;
+        self.steer(s, wp, ground, terrain, dt)
+    }
+
+    /// Station on a leader (OpenIL2's own formation keeping): aim at a point 300 m ahead of the
+    /// slot, and match the leader's speed corrected by how far ahead or behind the slot we are.
+    /// `slot` is the offset in the leader's heading frame (x forward, y left, z up).
+    #[allow(clippy::too_many_arguments)]
+    pub fn follow(
+        &mut self,
+        s: &Sim,
+        lead_pos: DVec3,
+        lead_vel: DVec3,
+        slot: DVec3,
+        ground: f64,
+        terrain: &dyn Fn(f64, f64) -> f64,
+        dt: f64,
+    ) -> Inputs {
+        let fwd = lead_vel.truncate().normalize_or(glam::DVec2::X);
+        let left = glam::DVec2::new(-fwd.y, fwd.x);
+        let station = lead_pos + (fwd * slot.x + left * slot.y).extend(slot.z);
+        let rel = station - s.pos;
+        let along = rel.truncate().dot(fwd);
+        self.stab_speed =
+            (lead_vel.length() + (0.05 * along).clamp(-15.0, 15.0)).max(s.ac.vmin_flaps * 1.1);
+        self.stab_alt = station.z;
+        let aim = station + (fwd * 300.0).extend(0.0);
+        let mut ct = self.steer(s, aim, ground, terrain, dt);
+        // Throttle with an integral term, so the slot is held without a standing error.
+        let err = 0.02 * along + (lead_vel.length() - s.vel.length());
+        self.thr_i = (self.thr_i + 0.02 * err * dt).clamp(0.0, 1.0);
+        ct.throttle = (self.thr_i + 0.05 * err).clamp(0.0, 1.0);
+        self.ct.throttle = ct.throttle;
+        ct
+    }
+
+    /// Flies towards `wp` at `stab_alt` and `stab_speed` (the autopilot's control laws).
+    fn steer(
+        &mut self,
+        s: &Sim,
+        wp: DVec3,
+        ground: f64,
+        terrain: &dyn Fn(f64, f64) -> f64,
+        dt: f64,
+    ) -> Inputs {
         // OpenIL2's terrain floor: 150 m over the highest ground of the next 3 km of the track.
         let ahead = (s.vel.truncate().normalize_or_zero(), s.pos.truncate());
         let high = (0..=6)

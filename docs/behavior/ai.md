@@ -93,3 +93,12 @@ aircraft. The runtime uses the meshes' collision shapes and, for most types, det
 - Damage levels: on an intact `_D0` chunk (not gear) `1 + (TNT − 0.01)/toughness` above 0.01 kg,
   else `TNT/0.01`; on damaged chunks and gear `TNT/toughness`. Fractions carry over per part.
   `[Toughness]` in the `.fmd` gives per-part values (default 100, × 10⁻⁴).
+
+## Formation
+OpenIL2's own formation keeping, until the runtime's `FOLLOW`/`STAY_FORMATION` maneuvers and
+`AirGroup` formations are ported. A wingman flies station on the lowest-numbered aircraft of
+its flight that is still on its route, or on the player when the player leads the flight. The
+station is echelon right, 40 m back and 40 m out per place in the flight. The pilot steers with
+the waypoint autopilot's laws at a point 300 m ahead of his station, at the station's height.
+The throttle is `i + 0.05·e` with `e = 0.02·(distance ahead to the station) + (leader speed −
+speed)`, and the integral `i` grows by `0.02·e·dt`.

@@ -29,6 +29,9 @@ pub struct AiPlane {
     gpu: Option<GpuMesh>,
     trace_t: f64,
     pub guns: Vec<Gun>,
+    /// Its flight and whether the player leads that flight.
+    wing: String,
+    player_leads: bool,
     /// Who it is fighting: contact id (0 player, 1 + n AI) and whether it attacks or evades.
     engaged: Option<(usize, bool)>,
     think: f64,
@@ -133,6 +136,8 @@ impl Traffic {
                     gpu: None,
                     trace_t: 0.0,
                     guns: Self::guns(&mut armoury, &classes_db, &wing.class, &wing.weapons, a),
+                    wing: wing.name.clone(),
+                    player_leads: is_player && m.player_num == 0,
                     engaged: None,
                     think: 0.0,
                 });
@@ -205,6 +210,8 @@ impl Traffic {
                 gpu: None,
                 trace_t: 0.0,
                 guns,
+                wing: "target".into(),
+                player_leads: false,
                 engaged: None,
                 think: 0.0,
             }],
@@ -301,6 +308,29 @@ impl Traffic {
                 contacts.push((1 + n, p.sim.pos, p.sim.vel, p.army));
             }
         }
+        // Flight leaders: the lowest-numbered aircraft of each flight still flying its route.
+        let leaders: Vec<Option<(DVec3, DVec3)>> = self
+            .planes
+            .iter()
+            .map(|p| {
+                if p.pilot.index == 0 {
+                    return None;
+                }
+                if p.player_leads {
+                    return player.3.then_some((player.0, player.1));
+                }
+                self.planes
+                    .iter()
+                    .filter(|q| {
+                        q.wing == p.wing
+                            && q.pilot.index < p.pilot.index
+                            && !q.sim.structure.destroyed
+                            && q.pilot.phase == Phase::Cruise
+                    })
+                    .min_by_key(|q| q.pilot.index)
+                    .map(|q| (q.sim.pos, q.sim.vel))
+            })
+            .collect();
         for (n, p) in self.planes.iter_mut().enumerate() {
             let g = field.height_at(p.sim.pos.x, p.sim.pos.y);
             let fighter = self.classes[p.class].assets.fighter;
@@ -331,7 +361,22 @@ impl Traffic {
                 (Some((c, false)), true) => p.pilot.evade(&p.sim, c, g),
                 _ => {
                     p.engaged = None;
-                    p.pilot.update(&p.sim, g, &ground, dt)
+                    match leaders[n].filter(|_| p.pilot.phase == Phase::Cruise) {
+                        // Echelon right, 40 m back and 40 m out per place.
+                        Some((lp, lv)) => {
+                            let k = p.pilot.index as f64;
+                            p.pilot.follow(
+                                &p.sim,
+                                lp,
+                                lv,
+                                DVec3::new(-40.0 * k, -40.0 * k, 0.0),
+                                g,
+                                &ground,
+                                dt,
+                            )
+                        }
+                        None => p.pilot.update(&p.sim, g, &ground, dt),
+                    }
                 }
             };
             p.sim.tick(&inputs, &ground);
