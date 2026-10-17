@@ -23,6 +23,8 @@ pub struct HeightField {
     pub height: usize,
     /// Metres, row-major, top (north) row first.
     pub heights: Vec<f32>,
+    /// Open water per land-type pixel, same layout (empty: no water anywhere).
+    pub water: Vec<bool>,
 }
 
 impl HeightField {
@@ -32,12 +34,26 @@ impl HeightField {
             width,
             height,
             heights: raw.iter().map(|&v| self::height(v)).collect(),
+            water: Vec::new(),
         }
     }
 
     fn at(&self, c: usize, r_from_south: usize) -> f64 {
         let r = self.height - 1 - r_from_south;
         self.heights[r * self.width + c] as f64
+    }
+
+    /// Whether the land-type pixel under world `(x, y)` is water (never outside the map).
+    pub fn is_water(&self, x: f64, y: f64) -> bool {
+        if self.water.is_empty() {
+            return false;
+        }
+        let (fx, fy) = (x / PIXEL_SIZE as f64, y / PIXEL_SIZE as f64);
+        if fx < 0.0 || fy < 0.0 || fx >= self.width as f64 || fy >= self.height as f64 {
+            return false;
+        }
+        let r = self.height - 1 - fy as usize;
+        self.water[r * self.width + fx as usize]
     }
 
     /// Ground height at world `(x, y)`, interpolated over the two triangles of each cell; 0 outside.

@@ -58,6 +58,33 @@ arrestor hooks.
 - Friction `(−8000·Fv, −50 000·Rv)`, combined at most `20 000·(1 − 0.5|y|/WingEnd)`, times 0.8.
 - They also count within 0.1 m above the ground. A hit breaks when `(Fv² + Rv²)·2.367·10⁻⁴ + Nv²·0.0204 > 1`.
 
+## Water
+**Verified** from the runtime's gear code. Over land-type water pixels (`formats/map.md`, water group
+slots) every contact point, wheel or airframe, that is below the surface (`d < 0`; the airframe's 0.1 m
+grace does not apply) is in the water, and the wheel and skid rules above are skipped. The roughness is 0.5.
+
+With `F, N, R` the point's velocity along the surface's forward, normal and right axes (as for wheels),
+`sink` the current buoyancy (starts at `[Gear] SinkFactor`, e.g. 800 for a Bf 109G-6) and `t` the time:
+- Floats: on aircraft with `[Aircraft] Seaplane 1`, the three wheel points and the `_ClipNN` points named
+  by `[Gear] WaterClipList` (two digits per point, e.g. `0102` = `_Clip01`, `_Clip02`).
+- Depth `d` is limited to −2 m except for floats.
+- Normal force `−(1 + 0.3·max(F, 0))·sink·d·|d|·(1 + 0.3·sin((1 + i mod 3)·t))` (`i` the point's
+  index; t in seconds) plus heave damping `clamp(−1000·N, ±4000)`; floats ignore upward `N` (set to 0).
+- Drag `−500·F` forwards and `−800·R` sideways (floats: `−40·F`, `−300·R`), together at most 50 000 N.
+  Unlike wheel forces, none of this is scaled by the mass.
+- Landplanes lose buoyancy: each point in the water lowers `sink` by `0.4·dt`, down to 1 (OpenIL2
+  applies it on the tick's first gear evaluation). A ditched fighter floats for about a minute, then
+  goes down nose first.
+- Impacts with `N < 0` and severity `(F² + R²)·4·10⁻⁴ + N²/900 > 1` at more than 13 m/s break the part
+  the point is on, as hard airframe strikes do (`damage.md`, "Ground strikes").
+- Effects: above 60 km/h each touching point trails `effects/Smokes/SmokeAirSplat.eff` on water,
+  `SmokeAirTouch.eff` (`SmokeAirTouchW.eff` in winter) on land; floats at speed also leave the
+  `ShipTrail/WakeSmaller` wake (not yet in OpenIL2). OpenIL2 puffs one at the aircraft about twice a
+  second.
+
+`openil2 --test` ditches the aircraft on open sea at 200 km/h, gear up, and reports stop distance, peak
+deceleration, hard hits and the depth after two minutes.
+
 ## Integration and static friction
 - **Sub-steps.** With any ground force, a step uses 5 sub-steps, recomputing the gear between them.
 - **Static friction.** `dry` decays by 0.01 per step, resets to 1 when the number of contacts changes, grows

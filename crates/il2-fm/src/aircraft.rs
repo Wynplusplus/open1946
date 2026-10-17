@@ -27,6 +27,8 @@ pub enum ContactKind {
 pub struct GearPoint {
     pub pos: DVec3,
     pub kind: ContactKind,
+    /// A seaplane's float or hull point (`[Gear] WaterClipList`): it rides on the water.
+    pub float: bool,
 }
 
 /// Which controls an aircraft has, from `[Controls]` (`docs/behavior/controls.md`).
@@ -153,6 +155,10 @@ pub struct Aircraft {
     pub vmax_allowed: f64,
     /// `[Arm] GC_Gear_Shift`: moment arm shift of the gear forces.
     pub gc_gear_shift: f64,
+    /// `[Gear] SinkFactor`: buoyancy of the airframe in water.
+    pub sink_factor: f64,
+    /// `[Aircraft] Seaplane`.
+    pub seaplane: bool,
 }
 
 fn num(f: &SectFile, s: &'static str, k: &'static str) -> Result<f64, Error> {
@@ -228,6 +234,8 @@ impl Aircraft {
             reference_weight: 0.0,
             vmax_allowed: 195.0,
             gc_gear_shift: 0.0,
+            sink_factor: 1.0,
+            seaplane: false,
         }
     }
 
@@ -402,6 +410,8 @@ impl Aircraft {
                 1.3 * num_or(fmd, "Params", "VmaxH", 540.0),
             ) / 3.6,
             gc_gear_shift: num_or(fmd, "Arm", "GC_Gear_Shift", 0.0),
+            sink_factor: num_or(fmd, "Gear", "SinkFactor", 1.0),
+            seaplane: num_or(fmd, "Aircraft", "Seaplane", 0.0) != 0.0,
         })
     }
 

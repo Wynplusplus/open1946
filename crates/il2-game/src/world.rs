@@ -8,6 +8,30 @@ use il2_render::scene::Loader;
 use il2_render::MeshData;
 use il2_vfs::Vfs;
 
+/// The terrain as the flight model feels it: heights and open water.
+pub struct Surface<'a>(pub &'a HeightField);
+
+impl il2_fm::gear::Ground for Surface<'_> {
+    fn height(&self, x: f64, y: f64) -> f64 {
+        self.0.height_at(x, y)
+    }
+    fn is_water(&self, x: f64, y: f64) -> bool {
+        self.0.is_water(x, y)
+    }
+}
+
+/// Marks the water pixels of `field` from the land-type map and its water slots.
+pub fn set_water(field: &mut HeightField, types: &(u32, u32, Vec<u8>), water: &[bool; 32]) {
+    if types.0 as usize != field.width || types.1 as usize != field.height {
+        eprintln!(
+            "land-type map {}x{} differs from the height map {}x{}: no water contact",
+            types.0, types.1, field.width, field.height
+        );
+        return;
+    }
+    field.water = types.2.iter().map(|&t| water[(t & 31) as usize]).collect();
+}
+
 pub struct AircraftAssets {
     /// The model's hierarchy file.
     pub him: String,
@@ -73,6 +97,17 @@ fn gear_points(hooks: &[(String, glam::Vec3)], fmd: &SectFile, gear_moves: bool)
             .find(|(name, _)| name.eq_ignore_ascii_case(n))
             .map(|(_, p)| *p)
     };
+    // `WaterClipList`: two digits per `_ClipNN` point a seaplane floats on, besides its wheel points.
+    let floats: Vec<u32> = fmd
+        .section_ci("Gear")
+        .and_then(|s| s.get_ci("WaterClipList"))
+        .map(|v| {
+            let v: Vec<char> = v.trim_start_matches(['=', ' ']).trim().chars().collect();
+            v.chunks(2)
+                .filter_map(|c| c.iter().collect::<String>().parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut out = Vec::new();
     for (name, kind) in [
         ("_ClipLGear", ContactKind::Wheel),
@@ -90,6 +125,7 @@ fn gear_points(hooks: &[(String, glam::Vec3)], fmd: &SectFile, gear_moves: bool)
             out.push(GearPoint {
                 pos: DVec3::new(x, p.y as f64, z),
                 kind,
+                float: true,
             });
         }
     }
@@ -102,6 +138,7 @@ fn gear_points(hooks: &[(String, glam::Vec3)], fmd: &SectFile, gear_moves: bool)
             out.push(GearPoint {
                 pos: p.as_dvec3(),
                 kind: ContactKind::Body,
+                float: floats.contains(&name[5..].parse::<u32>().unwrap_or(u32::MAX)),
             });
         }
     }

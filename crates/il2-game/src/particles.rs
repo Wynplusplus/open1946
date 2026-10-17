@@ -379,6 +379,10 @@ pub fn known_effects() -> Vec<String> {
             "effects/Explodes/Objects/Bridges",
             &["SmokeBoiling", "SmokeBoiling2"][..],
         ),
+        (
+            "effects/Smokes",
+            &["SmokeAirSplat", "SmokeAirTouch", "SmokeAirTouchW"][..],
+        ),
     ] {
         for f in files {
             v.push(format!("{dir}/{f}.eff"));
@@ -553,4 +557,17 @@ pub fn bridge_collapse(fx: &mut Effects, a: DVec3, b: DVec3, width: f64, rng: &m
             3.0,
         );
     }
+}
+
+/// Spray or dust where an aircraft skims the surface faster than 60 km/h: one puff per call (the
+/// runtime keeps one going per touching point).
+pub fn surface_touch(fx: &mut Effects, at: DVec3, water: bool, winter: bool) {
+    let f = if water {
+        "SmokeAirSplat"
+    } else if winter {
+        "SmokeAirTouchW"
+    } else {
+        "SmokeAirTouch"
+    };
+    fx.spawn(&format!("effects/Smokes/{f}.eff"), at, DVec3::Z, 1.0, 0.5);
 }

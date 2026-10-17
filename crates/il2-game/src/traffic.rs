@@ -435,7 +435,7 @@ impl Traffic {
                     }
                 }
             };
-            p.sim.tick(&inputs, &ground);
+            p.sim.tick(&inputs, &crate::world::Surface(field));
             if alive {
                 let enemies: Vec<(DVec3, DVec3)> = contacts
                     .iter()

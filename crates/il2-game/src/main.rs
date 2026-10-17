@@ -224,6 +224,12 @@ fn airframe_step(
             combat.booms.push((at, power));
         }
     }
+    // Spray or dust under an aircraft skimming the surface, about twice a second.
+    if sim.on_ground && sim.vel.length() > 16.67 && combat.rng.uniform() < 0.06 {
+        let ground = field.height_at(sim.pos.x, sim.pos.y);
+        let at = DVec3::new(sim.pos.x, sim.pos.y, ground + 0.2);
+        particles::surface_touch(&mut view.effects, at, sim.gear.water_points > 0, false);
+    }
     for (a, b, width) in std::mem::take(&mut view.objects.collapses) {
         eprintln!("bridge part down at {:.0?}", a.lerp(b, 0.5));
         particles::bridge_collapse(&mut view.effects, a, b, width, &mut combat.rng);
@@ -709,7 +715,13 @@ fn hud_lines(s: &Sim, field: &HeightField) -> Vec<String> {
         },
         s.trim[1] * 100.0,
         if s.airbrake > 0.5 { "   Air brake" } else { "" },
-        if s.on_ground { "   On ground" } else { "" }
+        if s.gear.water_points > 0 {
+            "   In water"
+        } else if s.on_ground {
+            "   On ground"
+        } else {
+            ""
+        }
     ));
     l
 }
@@ -1136,7 +1148,7 @@ impl Game {
             k(KeyCode::KeyK) || dlf[3],
         ];
         while self.acc >= TICK {
-            self.sim.tick(&self.inputs, &ground);
+            self.sim.tick(&self.inputs, &world::Surface(field));
             let targets = build_targets(
                 &self.sim,
                 &self.assets,
@@ -1690,6 +1702,77 @@ fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
     )
 }
 
+/// Open sea at z = 0 (`--test` ditching).
+struct Sea;
+
+impl il2_fm::gear::Ground for Sea {
+    fn height(&self, _: f64, _: f64) -> f64 {
+        0.0
+    }
+    fn is_water(&self, _: f64, _: f64) -> bool {
+        true
+    }
+}
+
+/// Ditches on open sea: gear up, idle, held 5° nose-up from 3 m at 200 km/h, then left
+/// to drift. Returns a summary line.
+fn ditch_test(mut sim: Sim) -> String {
+    let v0 = 55.0;
+    sim.ori = glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+    sim.pos = DVec3::new(0.0, 0.0, 3.0);
+    sim.vel = sim.ori * DVec3::new(v0, 0.0, 0.0);
+    sim.w = DVec3::ZERO;
+    sim.set_engines_idle(false);
+    let mut inputs = Inputs {
+        throttle: 0.0,
+        gear: 0.0,
+        ..Default::default()
+    };
+    let (mut touch, mut stop, mut max_g, mut hits) = (None, None, 0.0f64, 0usize);
+    let start_y = sim.pos.y;
+    let mut t = 0.0;
+    while t < 120.0 {
+        let pitch = (sim.ori * DVec3::X).z.asin().to_degrees();
+        inputs.elevator = (0.1 * (5.0 - pitch) + 0.3 * sim.w.y).clamp(-1.0, 1.0);
+        inputs.aileron = (-0.05 * sim.bank_deg() - 0.3 * sim.w.x).clamp(-1.0, 1.0);
+        let v = sim.vel;
+        sim.tick(&inputs, &Sea);
+        t += TICK;
+        hits += sim.gear.hits.len();
+        sim.gear.hits.clear();
+        if sim.gear.water_points > 0 {
+            touch.get_or_insert(t);
+            max_g = max_g.max((sim.vel - v).length() / TICK / 9.81);
+        }
+        if std::env::var_os("IL2_TRACE").is_some()
+            && ((t / TICK).round() as usize).is_multiple_of(330)
+        {
+            eprintln!(
+                "  t={t:5.1} z={:6.2} v={:5.1} pitch={:5.1} wet={}",
+                sim.pos.z,
+                sim.vel.length(),
+                (sim.ori * DVec3::X).z.asin().to_degrees(),
+                sim.gear.water_points
+            );
+        }
+        if touch.is_some() && stop.is_none() && sim.vel.length() < 1.0 {
+            stop = Some((t, sim.pos.y - start_y));
+        }
+    }
+    let pitch = (sim.ori * DVec3::X).z.asin().to_degrees();
+    format!(
+        "ditching at {:.0} km/h: touchdown {:.1} s, stopped {}, peak {:.1} g, {} hard hits; after 120 s origin {:.2} m, pitch {:.1}, bank {:.1}",
+        v0 * 3.6,
+        touch.unwrap_or(f64::NAN),
+        stop.map_or("never".to_owned(), |(t, d)| format!("{t:.1} s / {d:.0} m")),
+        max_g,
+        hits,
+        sim.pos.z,
+        pitch,
+        sim.bank_deg()
+    )
+}
+
 /// Drops the aircraft from 0.5 m onto flat ground at its parked attitude, brakes on, engine off.
 fn parked_test(mut sim: Sim, (h, pitch_deg): (f64, f64)) -> (f64, f64, f64) {
     let ground = |_: f64, _: f64| 0.0;
@@ -1889,7 +1972,7 @@ fn main() {
         .aircraft(&args.aircraft)
         .map(|c| c.flight_model)
         .unwrap_or_default();
-    let field = world::load_heights(&vfs, &args.map).unwrap_or_else(|e| fail(e));
+    let mut field = world::load_heights(&vfs, &args.map).unwrap_or_else(|e| fail(e));
     let mut batteries = mission
         .as_ref()
         .filter(|_| !args.no_ai)
@@ -1926,6 +2009,10 @@ fn main() {
             p("VmaxH"),
             p("HofVmax")
         );
+        println!(
+            "{}",
+            ditch_test(world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0))
+        );
         let (pitch, z, v) = parked_test(
             world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0),
             assets.parked,
@@ -1947,6 +2034,7 @@ fn main() {
         }
         t
     };
+    world::set_water(&mut field, &terrain.types, &terrain.water);
     let t0 = Instant::now();
     let map_objects = {
         let statics_ini = objects::statics_ini(&vfs).unwrap_or_else(|e| fail(e));
@@ -2129,7 +2217,7 @@ fn main() {
         );
         let mut max_g = (0.0f64, 0.0f64);
         for _ in 0..(args.seconds / TICK) as usize {
-            sim.tick(&inputs, &ground);
+            sim.tick(&inputs, &world::Surface(&field));
             let targets =
                 build_targets(&sim, &assets, &af, traffic.as_ref(), columns.as_ref(), None);
             combat.step(&mut sim, &triggers, &field, &mut view, &targets);

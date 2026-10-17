@@ -680,7 +680,7 @@ impl Sim {
         if self.ticks % 2 == 1 {
             self.gear.read_surface(ground, self.pos.x, self.pos.y);
         }
-        let mut gear_f = self.gear_forces(ground, mass);
+        let mut gear_f = self.gear_forces(ground, mass, dt);
         let n = if gear_f.0 == DVec3::ZERO && gear_f.1 == DVec3::ZERO {
             1
         } else {
@@ -734,7 +734,7 @@ impl Sim {
             self.vel += self.ori * (f / mass) * sub;
             self.pos += self.vel * sub;
             if k + 1 < n {
-                gear_f = self.gear_forces(ground, mass);
+                gear_f = self.gear_forces(ground, mass, 0.0);
             }
         }
         self.on_ground = self.gear.on_ground();
@@ -755,7 +755,8 @@ impl Sim {
         self.check_structure(&checks);
     }
 
-    fn gear_forces(&mut self, ground: &impl Ground, mass: f64) -> (DVec3, DVec3) {
+    /// Gear and water forces; `dt` > 0 on the tick's first evaluation (buoyancy loss).
+    fn gear_forces(&mut self, ground: &impl Ground, mass: f64, dt: f64) -> (DVec3, DVec3) {
         let c = GearInputs {
             pos: self.pos,
             ori: self.ori,
@@ -768,6 +769,10 @@ impl Sim {
             tail_locked: self.ct.tail_lock,
             gc_gear_shift: self.ac.gc_gear_shift,
             wing_end: self.ac.wingspan * 0.5,
+            sink_factor: self.ac.sink_factor,
+            seaplane: self.ac.seaplane,
+            time: self.ticks as f64 * TICK,
+            dt,
         };
         self.gear.forces(&self.ac.gear, ground, &c)
     }
