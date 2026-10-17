@@ -102,6 +102,31 @@ belongs to the first entry of the runtime's part list its name starts with: `Aro
 - A hard **collision** (`msgCollision`) applies four damage levels at once. Structural failure
   and ground strikes use it.
 
+### Bullet hits
+**Verified** from the runtime's aircraft shot handling.
+- A round's energy is `½·m·v²` with `v` its speed relative to the aircraft; high-explosive rounds
+  (`powerType` 0) count two thirds of it. The aircraft's rotation rates jump by up to
+  `±2000·m / aircraft mass` rad/s on each axis.
+- The shot is traced from 0.1 m before the impact point to 48.9 m beyond it, through the collision
+  parts (`formats/msh.md`, "Collision parts") of the visible chunks. Every part crossed is a hit,
+  in order of entry, with the fraction `t` of the 50 m where it is entered. Cumulative rounds stop
+  after two parts.
+- For each part while the round has energy left, the class's `hitBone(part, shot, point)` runs
+  (below). After a chunk hull (`x…`, not `xx…`), the round loses energy as through armour of
+  `33.333·Δt` (`Δt` to the next part, 0.02 after the last) and is stopped outright 5 % of the time.
+- **Armour** (`getEnergyPastArmor(thickness)`): the round loses `1700·thickness` J, twice that if
+  high explosive; what is left is its new energy.
+- Models whose parts have no separate collision names take the generic damage below on the first
+  chunk struck, with the energy left (`TNT = J × 2.4·10⁻⁷`); there `WingLOut`/`WingROut` hits go to
+  the aileron 20 %, `StabL`/`StabR` to the elevator 45 %, `Keel1`/`Keel2` to the rudder 33 % of the
+  time.
+- **Chunk damage** (`hitChunk`): the TNT over the part's `[Toughness]`·10⁻⁴ (on an intact `_D0`
+  chunk other than gear: 1 + the TNT beyond 0.01 kg over the toughness, or TNT/0.01 below that)
+  plus the fraction carried from earlier hits gives whole damage levels; the rest is carried.
+- OpenIL2, until the classes' `hitBone` runs: a chunk hull takes chunk damage, internal parts are
+  only traced. Chunks without hulls use the box around their geometry. A shell's explosive adds half
+  its TNT to the chunk struck.
+
 ### Flight-model effects
 The runtime keeps per-part areas: six wing sections (the `.fmd` sections, mirrored), stabilizer,
 elevators, keel, rudders. It also keeps roll/pitch/yaw sensitivity factors and an added drag

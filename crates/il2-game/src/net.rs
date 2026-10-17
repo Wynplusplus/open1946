@@ -482,13 +482,16 @@ impl Net {
             }
             let mut nodes = world::pose(&r.assets, &r.sim.ct);
             r.airframe.apply(&mut nodes, &r.sim);
-            out.push(crate::hitbox::Target::new(
-                ID_BASE + r.id as usize,
-                r.sim.pos,
-                r.sim.ori,
-                &nodes,
-                &r.assets.boxes,
-            ));
+            out.push(
+                crate::hitbox::Target::new(
+                    ID_BASE + r.id as usize,
+                    r.sim.pos,
+                    r.sim.ori,
+                    &nodes,
+                    &r.assets.boxes,
+                )
+                .with_hulls(&r.assets.hulls),
+            );
         }
     }
 

@@ -20,6 +20,69 @@ pub fn set_water(field: &mut HeightField, types: &(u32, u32, Vec<u8>), water: &[
     field.water = types.2.iter().map(|&t| water[(t & 31) as usize]).collect();
 }
 
+/// A collision hull (`docs/formats/msh.md`, "Collision parts") in node coordinates.
+pub struct Hull {
+    pub name: String,
+    pub verts: Vec<glam::Vec3>,
+    pub faces: Vec<[u32; 3]>,
+    pub lo: glam::Vec3,
+    pub hi: glam::Vec3,
+}
+
+/// The collision hulls each node of `him` lists with `CollisionObject`, from its mesh file.
+pub fn load_hulls(vfs: &Vfs, him: &str) -> Vec<Vec<Hull>> {
+    let Ok(hier) = vfs
+        .read(him)
+        .map_err(|e| e.to_string())
+        .and_then(|d| il2_formats::him::Hier::parse(&d).map_err(|e| e.to_string()))
+    else {
+        return Vec::new();
+    };
+    let dir = &him[..him.rfind('/').map_or(0, |i| i + 1)];
+    hier.nodes
+        .iter()
+        .map(|n| {
+            let (Some(mesh), false) = (&n.mesh, n.collision_objects.is_empty()) else {
+                return Vec::new();
+            };
+            let Ok(m) = vfs
+                .read(&format!("{dir}{mesh}.msh"))
+                .map_err(|e| e.to_string())
+                .and_then(|d| il2_formats::msh::Mesh::parse(&d).map_err(|e| e.to_string()))
+            else {
+                return Vec::new();
+            };
+            n.collision_objects
+                .iter()
+                .filter_map(|want| {
+                    let want = want.trim().trim_start_matches('.');
+                    let part = m
+                        .collision
+                        .iter()
+                        .find(|p| p.name.eq_ignore_ascii_case(want))?;
+                    let verts: Vec<glam::Vec3> =
+                        part.vertices.iter().map(|&v| glam::Vec3::from(v)).collect();
+                    let lo = verts
+                        .iter()
+                        .copied()
+                        .fold(glam::Vec3::splat(f32::MAX), glam::Vec3::min);
+                    let hi = verts
+                        .iter()
+                        .copied()
+                        .fold(glam::Vec3::splat(f32::MIN), glam::Vec3::max);
+                    (!part.faces.is_empty()).then(|| Hull {
+                        name: want.to_owned(),
+                        verts,
+                        faces: part.faces.clone(),
+                        lo,
+                        hi,
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
 pub struct AircraftAssets {
     /// The model's hierarchy file.
     pub him: String,
@@ -41,6 +104,8 @@ pub struct AircraftAssets {
     pub twin_fin: bool,
     /// Per node: the box around its geometry in node space (for bullet hits).
     pub boxes: Vec<Option<(glam::Vec3, glam::Vec3)>>,
+    /// Per node: its collision hulls (`x…` chunk hull, `xx…` internal parts), node space.
+    pub hulls: std::sync::Arc<Vec<Vec<Hull>>>,
     /// `[Toughness]` per part (`il2_fm::damage::PART_NAMES`), × 10⁻⁴; `NullPart` can't be damaged.
     pub toughness: [f64; 44],
     /// The class implements `TypeFighter`.
@@ -228,6 +293,7 @@ pub fn load_aircraft_with(
         gear_chunks: Vec::new(),
         twin_fin: false,
         boxes: Vec::new(),
+        hulls: Default::default(),
         toughness: [0.01; 44],
         fighter: false,
         turret_arcs: None,
@@ -373,6 +439,7 @@ pub fn load_aircraft_with(
         toughness[i] = v * 1e-4;
     }
     toughness[43] = f64::INFINITY;
+    let hulls = std::sync::Arc::new(load_hulls(vfs, &him));
     Ok(AircraftAssets {
         him,
         hook_frames,
@@ -386,6 +453,7 @@ pub fn load_aircraft_with(
         gear_chunks,
         twin_fin,
         boxes,
+        hulls,
         toughness,
         fighter: classes.interfaces(class).iter().any(|i| i == "TypeFighter"),
         turret_arcs: {

@@ -334,13 +334,10 @@ impl Traffic {
             let c = &self.classes[p.class].assets;
             let mut nodes = world::pose(c, &p.sim.ct);
             p.airframe.apply(&mut nodes, &p.sim);
-            out.push(crate::hitbox::Target::new(
-                1 + n,
-                p.sim.pos,
-                p.sim.ori,
-                &nodes,
-                &c.boxes,
-            ));
+            out.push(
+                crate::hitbox::Target::new(1 + n, p.sim.pos, p.sim.ori, &nodes, &c.boxes)
+                    .with_hulls(&c.hulls),
+            );
         }
     }
 
@@ -351,6 +348,24 @@ impl Traffic {
         };
         let toughness = self.classes[p.class].assets.toughness;
         p.airframe.shot(&mut p.sim, node, tnt, &toughness);
+    }
+
+    /// A round through AI aircraft `n`'s collision `parts`; `vel` is the round's world velocity.
+    pub fn bullet(
+        &mut self,
+        n: usize,
+        parts: &[crate::hitbox::PartHit],
+        vel: DVec3,
+        mass: f64,
+        power_type: i32,
+    ) {
+        let Some(p) = self.planes.get_mut(n) else {
+            return;
+        };
+        let a = &self.classes[p.class].assets;
+        let mut shot = crate::airframe::Shot::new(vel, p.sim.vel, p.sim.ori, mass, power_type);
+        p.airframe
+            .bullet(&mut p.sim, parts, &a.hulls, &mut shot, &a.toughness);
     }
 
     /// One simulation tick for every AI aircraft: choose whom to fight, fly, shoot.

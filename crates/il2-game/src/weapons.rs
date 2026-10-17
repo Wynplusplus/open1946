@@ -284,8 +284,9 @@ pub enum Hit {
     Ground(DVec3),
     /// A map object (index) at a point; whether it was destroyed.
     Object(usize, DVec3, bool),
-    /// An aircraft (owner id, see `hitbox::Target::id`), the chunk node hit and the point.
-    Aircraft(usize, usize, DVec3),
+    /// An aircraft (owner id, see `hitbox::Target::id`), the chunk node hit, the point and the
+    /// collision parts the round passes through (`hitbox::Target::shot_trace`).
+    Aircraft(usize, usize, DVec3, Vec<crate::hitbox::PartHit>),
     /// A time-fused shell burst in the air.
     Air(DVec3),
 }
@@ -332,11 +333,11 @@ pub fn advance(
         }
         // Rounds of other machines and played-back tracks are for show.
         let visual = b.owner == usize::MAX;
-        if let Some((id, node, at)) =
+        if let Some((id, node, at, parts)) =
             crate::hitbox::first_hit(targets, b.prev, b.pos, b.owner).filter(|_| !visual)
         {
             let b = bullets.swap_remove(i);
-            hits.push((b, Hit::Aircraft(id, node, at)));
+            hits.push((b, Hit::Aircraft(id, node, at, parts)));
             continue;
         }
         if let Some((obj, at)) = objects.hit(b.prev, b.pos).filter(|_| !visual) {

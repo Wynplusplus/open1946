@@ -6,6 +6,43 @@ use il2_fm::damage::{self, CF, NULL_PART};
 use il2_fm::Sim;
 use il2_formats::map::HeightField;
 
+/// A round striking an aircraft (`docs/behavior/damage.md`, "Bullet hits"; the runtime's `Shot`).
+#[derive(Clone, Debug)]
+pub struct Shot {
+    /// Kinetic energy relative to the aircraft, J (high explosive × 0.666); armour and the
+    /// airframe eat into it as the round passes through.
+    pub power: f64,
+    /// kg.
+    pub mass: f64,
+    /// 0 high explosive, 1 cumulative, 2 armour-piercing, 3 armour-piercing incendiary.
+    pub power_type: i32,
+    /// Direction of flight relative to the aircraft, body axes, unit length.
+    pub dir: DVec3,
+}
+
+impl Shot {
+    /// A round of `mass` kg flying at `vel` (world) into an aircraft moving at `target_vel` with
+    /// attitude `ori` (the runtime's `setShot`).
+    pub fn new(vel: DVec3, target_vel: DVec3, ori: DQuat, mass: f64, power_type: i32) -> Self {
+        let rel = vel - target_vel;
+        let mut power = 0.5 * mass * rel.length_squared();
+        if power_type == 0 {
+            power *= 0.666;
+        }
+        Shot {
+            power,
+            mass,
+            power_type,
+            dir: (ori.inverse() * rel).normalize_or_zero(),
+        }
+    }
+
+    /// The runtime's `powerToTNT`: J × 2.4·10⁻⁷ kg.
+    pub fn tnt(&self) -> f64 {
+        self.power * 2.4e-7
+    }
+}
+
 /// A torn-off piece: some of the aircraft's nodes, flying on their own.
 struct Wreck {
     nodes: Vec<usize>,
@@ -76,6 +113,91 @@ impl Airframe {
         self.names.get(node).map_or("", String::as_str)
     }
 
+    /// A round passing through the collision `parts` (in order) of this aircraft
+    /// (`docs/behavior/damage.md`, "Bullet hits").
+    pub fn bullet(
+        &mut self,
+        sim: &mut Sim,
+        parts: &[crate::hitbox::PartHit],
+        hulls: &[Vec<crate::world::Hull>],
+        shot: &mut Shot,
+        toughness: &[f64; 44],
+    ) {
+        // The impact jolts the aircraft.
+        let k = 2000.0 * shot.mass / sim.mass().max(1.0);
+        let kick = DVec3::new(
+            (self.uniform() * 2.0 - 1.0) * k,
+            (self.uniform() * 2.0 - 1.0) * k,
+            (self.uniform() * 2.0 - 1.0) * k,
+        );
+        sim.w += kick;
+        let n = if shot.power_type == 1 {
+            parts.len().min(2)
+        } else {
+            parts.len()
+        };
+        let mut generic = false;
+        for i in 0..n {
+            let p = &parts[i];
+            let Some(name) = p
+                .hull
+                .and_then(|k| hulls.get(p.node)?.get(k))
+                .map(|h| h.name.clone())
+            else {
+                generic = true;
+                continue;
+            };
+            if shot.power <= 0.0 {
+                continue;
+            }
+            self.hit_bone(sim, p.node, &name, shot, toughness);
+            if !name.starts_with("xx") {
+                // Passing through a chunk costs energy as armour of 33.3 × the fraction of the
+                // 50 m trace to the next part.
+                let span = if i + 1 == n {
+                    0.02
+                } else {
+                    parts[i + 1].t - p.t
+                };
+                self.armour(33.333 * span, shot);
+                if self.uniform() < 0.05 {
+                    shot.power = 0.0;
+                }
+            }
+        }
+        // Models without collision hulls: the old generic damage on the first chunk struck.
+        if generic {
+            if let Some(p) = parts.first() {
+                self.shot(sim, p.node, shot.tnt(), toughness);
+            }
+        }
+    }
+
+    /// The runtime's `getEnergyPastArmor`: armour `thickness` (mm-like units, 1700 J each, twice
+    /// that against high explosive) takes energy from the round; returns what is left.
+    pub fn armour(&mut self, thickness: f64, shot: &mut Shot) -> f64 {
+        let k = if shot.power_type == 0 { 2.0 } else { 1.0 };
+        shot.power -= k * thickness * 1700.0;
+        shot.power
+    }
+
+    /// A collision part struck by a round. Chunk hulls (`x…`) take the generic chunk damage;
+    /// internal parts (`xx…`) are not interpreted yet.
+    fn hit_bone(
+        &mut self,
+        sim: &mut Sim,
+        node: usize,
+        name: &str,
+        shot: &mut Shot,
+        toughness: &[f64; 44],
+    ) {
+        if name.starts_with("xx") {
+            return;
+        }
+        let chunk = self.name(node).to_owned();
+        self.hit_chunk(sim, &chunk, shot.tnt(), toughness);
+    }
+
     /// A bullet or a direct blast delivering `tnt` kg TNT into `node` (the runtime's generic chunk
     /// damage): the level count is the TNT over the part's toughness, with remainders carried.
     pub fn shot(&mut self, sim: &mut Sim, node: usize, tnt: f64, toughness: &[f64; 44]) {
@@ -97,6 +219,15 @@ impl Airframe {
                 chunk = to.to_owned();
             }
         }
+        self.hit_chunk(sim, &chunk, tnt, toughness);
+    }
+
+    /// The runtime's `hitChunk`: `tnt` kg TNT into chunk `chunk` (`Name_Dn`).
+    pub fn hit_chunk(&mut self, sim: &mut Sim, chunk: &str, tnt: f64, toughness: &[f64; 44]) {
+        if tnt <= 5.0e-7 {
+            return;
+        }
+        let chunk = chunk.to_owned();
         let part = damage::part(&chunk);
         let tough = toughness[part.min(43)];
         if std::env::var_os("IL2_TRACE").is_some() {

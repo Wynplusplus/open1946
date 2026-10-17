@@ -248,13 +248,9 @@ fn build_targets(
 ) -> Vec<hitbox::Target> {
     let mut nodes = world::pose(assets, &sim.ct);
     af.apply(&mut nodes, sim);
-    let mut out = vec![hitbox::Target::new(
-        0,
-        sim.pos,
-        sim.ori,
-        &nodes,
-        &assets.boxes,
-    )];
+    let mut out = vec![
+        hitbox::Target::new(0, sim.pos, sim.ori, &nodes, &assets.boxes).with_hulls(&assets.hulls),
+    ];
     if let Some(t) = traffic {
         t.targets(&mut out);
     }
@@ -331,7 +327,7 @@ fn target_names(
 fn ground_hits(combat: &mut Combat, ground: &mut ground::Ground, view: &mut view::WorldView) {
     let mut killed = Vec::new();
     for (b, h) in &combat.hits {
-        let weapons::Hit::Aircraft(id, _, _) = h else {
+        let weapons::Hit::Aircraft(id, _, _, _) = h else {
             continue;
         };
         if *id >= ground::ID_BASE {
@@ -369,26 +365,36 @@ fn apply_aircraft_hits(
     mut traffic: Option<&mut traffic::Traffic>,
 ) {
     for (b, h) in &combat.hits {
-        let weapons::Hit::Aircraft(id, node, _) = h else {
+        let weapons::Hit::Aircraft(id, node, _, parts) = h else {
             continue;
         };
         let ty = b.ty();
-        let speed = b.vel.length();
-        let mut tnt = 0.5 * ty.mass * speed * speed * 2.4e-7;
-        if ty.power > 0.0 && ty.power_radius > 0.0 {
-            tnt += 0.5 * (ty.power + 0.03 * ty.mass);
-        }
+        // The round itself through the parts it crosses, then the shell's explosive (half of it
+        // into the chunk struck, OpenIL2).
+        let blast = if ty.power > 0.0 && ty.power_radius > 0.0 {
+            0.5 * (ty.power + 0.03 * ty.mass)
+        } else {
+            0.0
+        };
         if std::env::var_os("IL2_TRACE").is_some() {
             eprintln!(
-                "{} hit aircraft {id} in node {node} ({tnt:.4} kg TNT)",
-                b.spec.name
+                "{} hit aircraft {id} in node {node}: {} parts, blast {blast:.4} kg",
+                b.spec.name,
+                parts.len()
             );
         }
         if *id == 0 {
-            af.shot(sim, *node, tnt, &assets.toughness);
+            let mut shot = airframe::Shot::new(b.vel, sim.vel, sim.ori, ty.mass, ty.shot_type());
+            af.bullet(sim, parts, &assets.hulls, &mut shot, &assets.toughness);
+            if blast > 0.0 {
+                af.shot(sim, *node, blast, &assets.toughness);
+            }
         } else if *id < ground::ID_BASE {
             if let Some(t) = traffic.as_deref_mut() {
-                t.shot(id - 1, *node, tnt);
+                t.bullet(id - 1, parts, b.vel, ty.mass, ty.shot_type());
+                if blast > 0.0 {
+                    t.shot(id - 1, *node, blast);
+                }
             }
         }
     }
@@ -397,7 +403,7 @@ fn apply_aircraft_hits(
 /// Our rounds that hit other pilots' aircraft: the damage goes to their owners.
 fn net_hits(combat: &Combat, net: &mut net::Net) {
     for (b, h) in &combat.hits {
-        let weapons::Hit::Aircraft(id, node, _) = h else {
+        let weapons::Hit::Aircraft(id, node, _, _) = h else {
             continue;
         };
         if *id >= net::ID_BASE {
@@ -566,7 +572,7 @@ impl Combat {
                 let at = match h {
                     weapons::Hit::Ground(p)
                     | weapons::Hit::Object(_, p, _)
-                    | weapons::Hit::Aircraft(_, _, p)
+                    | weapons::Hit::Aircraft(_, _, p, _)
                     | weapons::Hit::Air(p) => *p,
                 };
                 self.tick_booms.push((at, ty.power + 0.03 * ty.mass));
@@ -587,7 +593,7 @@ impl Combat {
             let ty = b.ty();
             let (at, object) = match h {
                 weapons::Hit::Ground(p) => (*p, false),
-                weapons::Hit::Object(_, p, _) | weapons::Hit::Aircraft(_, _, p) => (*p, true),
+                weapons::Hit::Object(_, p, _) | weapons::Hit::Aircraft(_, _, p, _) => (*p, true),
                 weapons::Hit::Air(p) => (*p, true),
             };
             let what = if ty.power > 0.0 && ty.power_radius > 0.0 {

@@ -25,6 +25,22 @@ Coordinates are in metres, Z up. An aircraft's nose points along −X (to be con
 - `[Faces]`: one row per triangle, three vertex indices **relative to the face group's `startVertex`**.
 - `[ShVertices_Frame<k>]` / `[ShFaces]`: a simplified closed hull for stencil shadows.
   Indices are absolute into the shadow vertices.
-- `[CoCommon]`, `[CoCommon_b<B>]`, `[CoCommon_b<B>p<P>]`, `[CoVer0_b<B>p<P>]`, `[CoNeiCnt_...]`, `[CoNei_...]`,
-  `[CoFac_...]`: collision geometry, organized in blocks and parts. Each part has a `Type` (e.g. `Mesh`) and a
-  `Name`; the names are referenced by `CollisionObject` in `.him` files. (Details TODO.)
+- Collision geometry (see "Collision parts").
+
+## Collision parts
+**Verified** on a sample of 3000 shipped meshes (860 parts): every collision part is a single-frame
+`Mesh` and every file has one block.
+
+- `[CoCommon]`: `NBlocks <n>`.
+- `[CoCommon_b<B>]`: `NParts <n>` for block `B`.
+- `[CoCommon_b<B>p<P>]`: `Type Mesh`, `NFrames <n>`, `Name <name>` for part `P`.
+- `[CoVer<F>_b<B>p<P>]`: the part's vertices in frame `F`, rows `x y z` in mesh coordinates.
+- `[CoNeiCnt_b<B>p<P>]`: per vertex, how many neighbours it has; `[CoNei_b<B>p<P>]`: the neighbour
+  indices of all vertices in order (vertex adjacency, for convex queries).
+- `[CoFac_b<B>p<P>]`: triangles, rows of three vertex indices.
+
+The parts are closed (convex in the samples looked at) hulls. On aircraft, a chunk's mesh holds the
+chunk's own hull, named `x<part>` (`xcf1`, `xwinglin1`, `xengine1`), and internal parts named
+`xx<what>` (`xxtank1`, `xxeng1`, `xxcontrols5`, `xxarmorp1`, `xxspar…`, `xxpnm`, `xxcannon01`) that
+the class's damage code interprets (`behavior/damage.md`). The `.him` node lists the parts it uses
+with `CollisionObject`; a leading `.` (`.xxtank1`) is not part of the name.

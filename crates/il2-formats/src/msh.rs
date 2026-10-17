@@ -41,12 +41,21 @@ pub struct Hook {
     pub matrix: [f32; 12],
 }
 
+/// A collision part (`Co*` sections, `docs/formats/msh.md`): a closed hull in mesh coordinates.
+#[derive(Clone, Debug, Default)]
+pub struct CoPart {
+    pub name: String,
+    pub vertices: Vec<[f32; 3]>,
+    pub faces: Vec<[u32; 3]>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Mesh {
     /// Switch-out distance of each LOD; empty for single-LOD meshes.
     pub lod_distances: Vec<f32>,
     pub lods: Vec<Lod>,
     pub hooks: Vec<Hook>,
+    pub collision: Vec<CoPart>,
 }
 
 /// Reads `rows x width` numbers. Like the engine, numeric sections are treated as one contiguous
@@ -117,8 +126,64 @@ impl Mesh {
             lod_distances,
             lods,
             hooks,
+            collision: collision(f),
         })
     }
+}
+
+/// The collision parts of every block (first frame); unreadable parts are skipped.
+fn collision(f: &RowFile) -> Vec<CoPart> {
+    let count = |name: &str, key: &str| -> usize {
+        f.section(name)
+            .and_then(|s| {
+                s.rows
+                    .iter()
+                    .find(|r| r.first().and_then(Value::as_str) == Some(key))
+            })
+            .and_then(|r| r.get(1)?.as_i32())
+            .map_or(0, |n| n.max(0) as usize)
+    };
+    let mut out = Vec::new();
+    for b in 0..count("CoCommon", "NBlocks") {
+        for p in 0..count(&format!("CoCommon_b{b}"), "NParts") {
+            let Some(head) = f.section(&format!("CoCommon_b{b}p{p}")) else {
+                continue;
+            };
+            let name = head
+                .rows
+                .iter()
+                .find(|r| r.first().and_then(Value::as_str) == Some("Name"))
+                .and_then(|r| r.get(1)?.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            let (Some(v), Some(fc)) = (
+                f.section(&format!("CoVer0_b{b}p{p}")),
+                f.section(&format!("CoFac_b{b}p{p}")),
+            ) else {
+                continue;
+            };
+            let Ok(vertices) = floats(v, 3) else { continue };
+            let vertices: Vec<[f32; 3]> = vertices.iter().map(|r| [r[0], r[1], r[2]]).collect();
+            let faces: Vec<[u32; 3]> = fc
+                .rows
+                .iter()
+                .filter_map(|r| {
+                    let i = ints(r)?;
+                    (i.len() >= 3
+                        && i[..3]
+                            .iter()
+                            .all(|&k| k >= 0 && (k as usize) < vertices.len()))
+                    .then(|| [i[0] as u32, i[1] as u32, i[2] as u32])
+                })
+                .collect();
+            out.push(CoPart {
+                name,
+                vertices,
+                faces,
+            });
+        }
+    }
+    out
 }
 
 fn parse_lod(f: &RowFile, prefix: &str) -> Result<Lod, Error> {
