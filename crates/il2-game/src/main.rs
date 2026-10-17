@@ -2050,7 +2050,8 @@ fn main() {
             .unwrap_or_else(|e| fail(e));
         print!("{}", ai_landing_test(&assets));
         print!("{}", ai_takeoff_test(&assets));
-        print!("{}", ai_test(assets.fm));
+        print!("{}", ai_test(assets.fm.clone()));
+        println!("{}", land_test(assets.fm));
         return;
     }
     let mut start = Start::Default;
@@ -2850,6 +2851,7 @@ fn ai_landing_test(a: &world::AircraftAssets) -> String {
     while t < 400.0 && pilot.phase != ai::Phase::Parked {
         let inputs = pilot.update(&sim, 0.0, &flat, TICK);
         sim.tick(&inputs, &flat);
+        pilot.constrain(&mut sim, 0.0);
         t += TICK;
         let every = if std::env::var_os("IL2_TRACE").is_some() {
             2.0
@@ -2914,6 +2916,7 @@ fn ai_takeoff_test(a: &world::AircraftAssets) -> String {
     while t < 120.0 {
         let inputs = pilot.update(&sim, 0.0, &flat, TICK);
         sim.tick(&inputs, &flat);
+        pilot.constrain(&mut sim, 0.0);
         t += TICK;
         if (t / TICK) as usize % (4.0 / TICK) as usize == 0 {
             out += &format!(
@@ -2965,6 +2968,7 @@ fn ai_test(ac: il2_fm::Aircraft) -> String {
     while t < 400.0 {
         let inputs = pilot.update(&sim, 0.0, &flat, TICK);
         sim.tick(&inputs, &flat);
+        pilot.constrain(&mut sim, 0.0);
         t += TICK;
         if (t / TICK) as usize % (20.0 / TICK) as usize == 0 {
             let fwd = sim.ori * DVec3::X;
@@ -2981,6 +2985,73 @@ fn ai_test(ac: il2_fm::Aircraft) -> String {
         }
     }
     out
+}
+
+/// AI landing on flat ground: from the gate 5 km before the touchdown point at the origin
+/// (landing east), 400 m up at 1.6·v_ref. Reports touchdowns, bounces and where it stopped.
+fn land_test(ac: il2_fm::Aircraft) -> String {
+    let flat = |_: f64, _: f64| 0.0;
+    let vlift = (2.0 * ac.mass_empty * 9.81 / (1.225 * ac.wing_area.max(1.0) * 1.1)).sqrt();
+    let vref = (1.25 / 0.87 * ac.vmin_flaps).max(vlift);
+    let mut sim = Sim::new(
+        ac,
+        DVec3::new(-5000.0, 0.0, 400.0),
+        glam::DQuat::IDENTITY,
+        1.6 * vref,
+    );
+    sim.ai = true;
+    sim.ct.gear = 0.0;
+    let mut pilot = ai::AiPilot::new(Vec::new(), 0, 0, 2);
+    pilot.phase = ai::Phase::Landing {
+        at: DVec3::ZERO,
+        heading: 0.0,
+    };
+    let (mut t, mut touchdowns, mut first, mut was_ground, mut max_bounce, mut max_vz) =
+        (0.0, 0, None, false, 0.0f64, 0.0f64);
+    let mut ground_h = 0.0;
+    while t < 300.0 && pilot.phase != ai::Phase::Parked {
+        let inputs = pilot.update(&sim, 0.0, &flat, TICK);
+        let vz = sim.vel.z;
+        sim.tick(&inputs, &flat);
+        pilot.constrain(&mut sim, 0.0);
+        t += TICK;
+        if sim.on_ground && !was_ground {
+            touchdowns += 1;
+            max_vz = max_vz.max(-vz);
+            first.get_or_insert((t, sim.pos.x, sim.vel.length() * 3.6));
+            ground_h = sim.pos.z;
+        }
+        if first.is_some() && !sim.on_ground {
+            max_bounce = max_bounce.max(sim.pos.z - ground_h);
+        }
+        was_ground = sim.on_ground;
+        if std::env::var_os("IL2_TRACE").is_some()
+            && ((t / TICK).round() as usize).is_multiple_of(16)
+            && sim.pos.x > -800.0
+        {
+            eprintln!(
+                "  land t={t:5.1} x={:6.0} z={:5.1} v={:4.0} vz={:+5.1} pitch={:+5.1} gnd={} el={:+.2} thr={:.2} wheels={} pts={}",
+                sim.pos.x,
+                sim.pos.z,
+                sim.vel.length() * 3.6,
+                sim.vel.z,
+                (sim.ori * DVec3::X).z.asin().to_degrees(),
+                sim.on_ground,
+                inputs.elevator,
+                inputs.throttle,
+                sim.gear.wheels_on_ground,
+                sim.gear.points_on_ground
+            );
+        }
+    }
+    let (t0, x0, v0) = first.unwrap_or((f64::NAN, f64::NAN, f64::NAN));
+    format!(
+        "landing: v_ref {:.0} km/h, touchdown at {x0:.0} m ({v0:.0} km/h, {t0:.0} s, sink {max_vz:.1} m/s), {touchdowns} ground contacts, bounced {max_bounce:.1} m, {} at {:.0} m{}",
+        vref * 3.6,
+        if pilot.phase == ai::Phase::Parked { "stopped" } else { "still moving" },
+        sim.pos.x,
+        if sim.structure.destroyed { ", DESTROYED" } else { "" }
+    )
 }
 
 /// Cold start on the ground, then temperatures after 5 minutes of full power at 300 km/h and after

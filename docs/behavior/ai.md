@@ -70,15 +70,34 @@ nearest runway, touching down 300 m beyond it in the takeoff direction.
 - **Gate**: he flies to a point 5 km before touchdown, 400 m above it, at 1.6 `v_ref`. He takes
   the final within 1.5 km of the gate, or when 2–6 km out, within a quarter of the distance of the
   centre line and heading within 60° of the runway.
-- **Final**: gear and flaps down. `v_ref` is the faster of 1.5·VminFLAPS and the speed for a lift
-  coefficient of 0.8 at sea level. The localizer intercept heading is `runway − 0.004·offset`
-  (at most 30°), bank `−2·heading error` (at most 20°). The glide path is 4°; the vertical speed
-  wanted is `−v·tan 4° + 0.15·(path height − height)`, limited to −8…3 m/s. The elevator is
-  `i + 0.02·e + 0.5·pitch rate`, with `i` integrating `0.15·e`. The throttle is
-  `0.4 + 0.1·(v_ref − v) + 0.08·e`.
-- **Flare** below 8 m: throttle closed, elevator easing up. On the ground: brakes, rudder on the
-  runway heading; stopped is the end of the flight. Known gap: heavy types (B-25) can porpoise and
-  float past the runway.
+- **Final** (OpenIL2): gear and flaps down. `v_ref` is the faster of 1.25·VminFLAPS and the speed
+  for a lift coefficient of 1.1 at sea level. The localizer intercept heading is
+  `runway − 0.004·offset` (at most 30°), bank `−2·heading error` (at most 20°). The glide path is
+  4°; the vertical speed wanted is `−v·tan 4° + 0.15·(path height − height)`, limited to −6…2 m/s.
+  A cascade flies it: the vertical speed error `e` sets the pitch attitude `p_i + 1.2·e` (`p_i`
+  integrating `0.4·e` °/s, limited to −8° … touchdown attitude), and the elevator holds it with
+  `j + 0.05·(pitch error) + 0.6·pitch rate` (`j` integrating `0.04·pitch error`). The throttle holds
+  `v_ref` alone (`k + 0.08·(v_ref − v)`, `k` integrating `0.03·(v_ref − v)`).
+- **Flare** (OpenIL2) from 12 m wheel height: the wanted sink is `0.3 + 0.3·(wheel height − 0.5)`
+  m/s, `p_i` learns at 1.5 °/s per m/s, the attitude is capped at the touchdown attitude (the
+  three-point angle between main and tail wheels for tail-draggers, 6° for nose-wheel types).
+- **Touchdown zone** (**Verified**, the runtime's `LANDING` maneuver below 60 m): the attitude is kept
+  between −5° and `[Gear] Pitch` + 10°. Below 10 m, while faster than 0.6·VminFLAPS, the runtime acts
+  on the velocity itself each 0.03 s tick: a sink beyond 0.6 m/s is multiplied by 0.94 and limited to
+  2.5 m/s, a climb is multiplied by 0.91 (this is what keeps AI touchdowns from bouncing). The
+  throttle is closed; below 7 m the elevator grows by 1.5/s while the nose is below
+  max(Gear Pitch − 2°, 5°), plus `0.05·pitch rate` per tick.
+- **On the ground** (runtime): with `[Gear] Pitch` ≤ 5° (nose wheel) the elevator is centred; else it
+  grows by 1.5/s while the nose is below the gear pitch, plus `0.3·pitch rate`. Brakes (OpenIL2: 0.3,
+  full below 0.75 `v_ref`), rudder on the runway heading; stopped is the end of the flight. After a
+  touchdown a bounce does not restart the approach; a float beyond 1.2 km past the touchdown point
+  does.
+- The runtime flies the final itself above 4.5 m + gear height: it moves the aircraft along the
+  landing path kinematically (position, velocity and attitude set directly, the flight model
+  skipped) at 1.2·VminFLAPS. OpenIL2 flies it with the controls instead.
+- `openil2 --aircraft CLASS --ai-test` ends with a landing from the 5 km gate onto flat ground: all
+  55 aircraft of a sample across `air.ini` touch down within 300 m of the aim point at ≤ 3.5 m/s and
+  stop within 600 m of it.
 
 ## Sides
 A wing's name is its regiment followed by two digits. The regiment's army comes from

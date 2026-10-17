@@ -176,6 +176,8 @@ pub struct Aircraft {
     pub seaplane: bool,
     /// The lowered arrestor hook's contact point (`_ClipAGear`), body coordinates.
     pub arrestor_hook: Option<DVec3>,
+    /// `[Gear] Pitch`: nose-up attitude standing on the ground, degrees.
+    pub gear_pitch: f64,
 }
 
 fn num(f: &SectFile, s: &'static str, k: &'static str) -> Result<f64, Error> {
@@ -254,6 +256,7 @@ impl Aircraft {
             sink_factor: 1.0,
             seaplane: false,
             arrestor_hook: None,
+            gear_pitch: 10.0,
         }
     }
 
@@ -431,6 +434,7 @@ impl Aircraft {
             sink_factor: num_or(fmd, "Gear", "SinkFactor", 1.0),
             seaplane: num_or(fmd, "Aircraft", "Seaplane", 0.0) != 0.0,
             arrestor_hook: None,
+            gear_pitch: num_or(fmd, "Gear", "Pitch", 10.0),
         })
     }
 

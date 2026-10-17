@@ -445,6 +445,8 @@ impl Traffic {
                 }
             };
             p.sim.tick(&inputs, &crate::ground::Surface(field, ships));
+            let g = field.height_at(p.sim.pos.x, p.sim.pos.y);
+            p.pilot.constrain(&mut p.sim, g);
             if alive {
                 let enemies: Vec<(DVec3, DVec3)> = contacts
                     .iter()

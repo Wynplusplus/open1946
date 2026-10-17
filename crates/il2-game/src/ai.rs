@@ -1,7 +1,7 @@
 //! AI pilots (`docs/behavior/ai.md`): the waypoint autopilot of the runtime's `AutopilotAI`,
 //! flying the simplified AI flight model (`il2_fm::ai_fm`).
 
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 use il2_fm::{Inputs, Sim};
 use il2_formats::mission::Waypoint;
 
@@ -62,6 +62,11 @@ pub struct AiPilot {
     on_final: bool,
     ev_i: f64,
     hdg_i: f64,
+    /// Final approach: pitch trim (degrees) and throttle integrators.
+    pitch_i: f64,
+    land_thr_i: f64,
+    /// Touched down: rolling out (a bounce doesn't restart the approach).
+    rollout: bool,
 }
 
 impl AiPilot {
@@ -88,6 +93,9 @@ impl AiPilot {
             on_final: false,
             ev_i: 0.0,
             hdg_i: 0.0,
+            pitch_i: 3.0,
+            land_thr_i: 0.4,
+            rollout: false,
         }
     }
 
@@ -243,15 +251,42 @@ impl AiPilot {
         let dist = -along;
         let side = to.truncate().perp_dot(dir.truncate());
         let agl = s.pos.z - ground;
-        // Fast enough to fly the approach at modest angles of attack: lift coefficient 0.8.
-        let vlift = (2.0 * s.mass() * 9.81 / (1.225 * s.ac.wing_area.max(1.0) * 0.8)).sqrt();
-        let vref = (1.5 * s.ac.vmin_flaps).max(vlift);
+        // 1.25 × VminFLAPS (`vmin_flaps` holds 0.87 of it in m/s), and fast enough for a lift
+        // coefficient of 1.1.
+        let vlift = (2.0 * s.mass() * 9.81 / (1.225 * s.ac.wing_area.max(1.0) * 1.1)).sqrt();
+        let vref = (1.25 / 0.87 * s.ac.vmin_flaps).max(vlift);
         if s.on_ground {
+            // Roll-out: tail-draggers bring the stick back as they slow, nose-wheel types keep the
+            // nose down.
+            self.rollout = true;
+            let nose_wheel =
+                s.ac.gear
+                    .iter()
+                    .any(|g| g.kind == il2_fm::ContactKind::Castor && g.pos.x > 0.0);
             let v = s.vel.length();
             self.ct.throttle = 0.0;
-            self.ct.brakes = if v < 0.75 * vref { 1.0 } else { 0.3 };
-            self.ct.elevator = 0.3;
-            self.ct.aileron = 0.0;
+            self.ct.brakes = if !s.on_ground {
+                0.0
+            } else if v < 0.75 * vref {
+                1.0
+            } else {
+                0.3
+            };
+            let wv = s.wtrue + s.w;
+            // The runtime's roll-out: nose-wheel types (gear pitch up to 5°) centre the stick;
+            // tail-draggers keep pulling until they sit at their ground attitude.
+            let pitch = (s.ori * DVec3::X).z.clamp(-1.0, 1.0).asin().to_degrees();
+            self.ct.elevator = if s.ac.gear_pitch <= 5.0 {
+                0.0
+            } else {
+                let mut e = self.ct.elevator;
+                if pitch < s.ac.gear_pitch {
+                    e += 1.5 * dt;
+                }
+                (e + 0.3 * wv.y).clamp(-1.0, 1.0)
+            };
+            let _ = nose_wheel;
+            self.ct.aileron = (-0.03 * s.bank_deg() - 0.3 * wv.x).clamp(-1.0, 1.0);
             let f = (s.ori * DVec3::X).truncate().normalize_or_zero();
             self.ct.rudder = (2.0 * dir.truncate().perp_dot(f) + 0.8 * s.w.z).clamp(-1.0, 1.0);
             if v < 2.0 {
@@ -259,8 +294,10 @@ impl AiPilot {
             }
             return self.ct;
         }
-        if dist > 6000.0 || dist < -200.0 {
+        // Too far out, or floated far down the runway: start over.
+        if (dist > 6000.0 || dist < -1200.0) && !(self.rollout && agl < 15.0) {
             self.on_final = false;
+            self.rollout = false;
         }
         let f = (s.ori * DVec3::X).truncate().normalize_or_zero();
         let hdg = f.y.atan2(f.x);
@@ -301,21 +338,127 @@ impl AiPilot {
         };
         ct.rudder = (ct.rudder - aos * 0.04 * dt).clamp(-1.0, 1.0);
         let _ = terrain;
-        // Vertical speed for the glide path, corrected towards it.
+        // Vertical speed for the glide path, corrected towards it; in the flare, a sink rate easing
+        // off with height.
         let v = s.vel.length();
-        let vz_t = (-v * 4f64.to_radians().tan() + 0.15 * (glide - s.pos.z)).clamp(-8.0, 3.0);
+        // Wheel height: the origin's height above the lowest wheel at level attitude.
+        let wheels = -s
+            .ac
+            .gear
+            .iter()
+            .filter(|g| g.kind != il2_fm::ContactKind::Body)
+            .map(|g| g.pos.z)
+            .fold(0.0f64, f64::min);
+        let agl_w = agl - wheels;
+        let nose_wheel =
+            s.ac.gear
+                .iter()
+                .any(|g| g.kind == il2_fm::ContactKind::Castor && g.pos.x > 0.0);
+        // Touchdown attitude (the most the flare pitches up): three points for tail-draggers (main and tail wheel together), 6°
+        // for nose-wheel types.
+        let three_point = {
+            let main =
+                s.ac.gear
+                    .iter()
+                    .find(|g| g.kind == il2_fm::ContactKind::Wheel);
+            let tail =
+                s.ac.gear
+                    .iter()
+                    .find(|g| g.kind == il2_fm::ContactKind::Castor && g.pos.x < 0.0);
+            match (main, tail) {
+                (Some(m), Some(t)) if m.pos.x > t.pos.x => ((t.pos.z - m.pos.z)
+                    / (m.pos.x - t.pos.x))
+                    .atan()
+                    .to_degrees(),
+                _ => 10.0,
+            }
+        };
+        let max_pitch = if nose_wheel {
+            6.0
+        } else {
+            three_point.clamp(5.0, 16.0)
+        };
+        // Flare: level off about 1 m over the runway and hold off while the speed bleeds away,
+        // the attitude rising to the touchdown attitude.
+        let flare = agl_w < 12.0 || self.rollout;
+        let vz_t = if flare {
+            -(0.3 + 0.3 * (agl_w - 0.5).max(0.0)).min(6.0)
+        } else {
+            (-v * 4f64.to_radians().tan() + 0.15 * (glide - s.pos.z)).clamp(-6.0, 2.0)
+        };
         let e = vz_t - s.vel.z;
-        self.ev_i = (self.ev_i + 0.15 * e * dt).clamp(-0.5, 0.85);
-        ct.elevator = (self.ev_i + 0.02 * e + 0.5 * wv.y).clamp(-0.5, 0.85);
-        ct.throttle = (0.4 + 0.1 * (vref - v) + 0.08 * e).clamp(0.0, 1.0);
-        if agl < 8.0 {
-            // Flare.
+        // Cascade: the vertical speed error sets a pitch attitude (about 1° per m/s plus a learnt
+        // trim attitude, learnt faster in the flare), which the elevator holds with rate damping.
+        // Bouncing after touchdown, the pilot holds the touchdown attitude.
+        let learn = if flare { 1.5 } else { 0.4 };
+        self.pitch_i = (self.pitch_i + learn * e * dt).clamp(-8.0, max_pitch);
+        let pitch_cmd = (self.pitch_i + 1.2 * e).clamp(-10.0, max_pitch);
+        if agl < 10.0 {
+            // The runtime's touchdown zone (with `constrain`): throttle closed, the stick eased
+            // back while the nose is below max(gear pitch − 2°, 5°) under 7 m, with rate damping.
+            let pitch = (s.ori * DVec3::X).z.clamp(-1.0, 1.0).asin().to_degrees();
+            let mut el = self.ct.elevator;
+            if agl < 7.0 && pitch < (s.ac.gear_pitch - 2.0).max(5.0) {
+                el += 1.5 * dt;
+            }
+            el = (el + 0.05 * wv.y).clamp(-1.0, 1.0);
+            ct.elevator = el;
             ct.throttle = 0.0;
-            self.ev_i = (self.ev_i + 0.3 * dt).min(0.8);
-            ct.elevator = self.ev_i;
+            self.ct = ct;
+            return ct;
+        }
+        let pitch = (s.ori * DVec3::X).z.clamp(-1.0, 1.0).asin().to_degrees();
+        let pe = pitch_cmd - pitch;
+        self.ev_i = (self.ev_i + 0.04 * pe * dt).clamp(-0.5, 0.85);
+        ct.elevator = (self.ev_i + 0.05 * pe + 0.6 * wv.y).clamp(-0.6, 0.9);
+        // Speed by throttle alone.
+        let ve = vref - v;
+        self.land_thr_i = (self.land_thr_i + 0.03 * ve * dt).clamp(0.0, 1.0);
+        ct.throttle = (self.land_thr_i + 0.08 * ve).clamp(0.0, 1.0);
+        if flare {
+            ct.throttle = 0.0;
         }
         self.ct = ct;
         ct
+    }
+
+    /// The runtime's hand on a landing aircraft below 60 m (`docs/behavior/ai.md`, "Landing"):
+    /// the attitude is kept between −5° and the gear pitch + 10°, and below 10 m, while faster than
+    /// 0.6·VminFLAPS, sinking is damped (×0.94 per tick beyond 0.6 m/s, at most 2.5 m/s) and
+    /// climbing too (×0.91 per tick). Call after each tick.
+    pub fn constrain(&self, s: &mut Sim, ground: f64) {
+        if !matches!(self.phase, Phase::Landing { .. }) || !self.on_final {
+            return;
+        }
+        let agl = s.pos.z - ground;
+        if agl > 60.0 {
+            return;
+        }
+        let pitch = (s.ori * DVec3::X).z.clamp(-1.0, 1.0).asin().to_degrees();
+        let max = s.ac.gear_pitch + 10.0;
+        let fix = if pitch < -5.0 {
+            -5.0 - pitch
+        } else if pitch > max {
+            max - pitch
+        } else {
+            0.0
+        };
+        if fix != 0.0 {
+            s.ori = (s.ori * DQuat::from_rotation_y(-fix.to_radians())).normalize();
+        }
+        if s.vel.length() > 0.6 * s.ac.vmin_flaps && agl < 10.0 {
+            let mut vz = s.vel.z;
+            if vz < -0.6 {
+                vz *= 0.94;
+            }
+            if vz < -2.5 {
+                vz = -2.5;
+            }
+            if vz > 0.0 {
+                vz *= 0.91;
+            }
+            s.vel.z = vz;
+        }
     }
 
     /// Station on a leader (OpenIL2's own formation keeping): aim at a point 300 m ahead of the
