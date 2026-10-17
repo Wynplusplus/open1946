@@ -19,7 +19,8 @@ OpenIL2 judges them when the flight ends (own rules after the runtime's `T*` tar
   if landing is asked;
 - escort: at least the share of the named flight still flying;
 - defend ground: no more than the remaining share of the objects in the radius gone;
-- bridges can't be destroyed yet, so destroy-bridge objectives fail and defend-bridge ones succeed.
+- destroy bridge: some part of the named bridge (`Bridge<index>`, `static.md`) is down; defend
+  bridge: none is (runtime: the bridge "dies" with its first destroyed half segment, `damage.md`).
 
 A mission succeeds when every primary objective is met and the player's aircraft was not
 destroyed. `openil2 --result FILE` writes `result success|failure`, `player alive|lost` and one

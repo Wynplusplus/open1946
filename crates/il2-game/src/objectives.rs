@@ -103,8 +103,9 @@ impl Tracker {
                     3 => self.inspected[i],
                     4 | 5 => lost().is_none_or(|l| 1.0 - l >= need),
                     6 => destroyed <= 1.0 - need,
-                    // Bridges can't be destroyed yet: attacks on them fail, defending them succeeds.
-                    2 => false,
+                    // A bridge counts as destroyed once any part of it is down.
+                    2 => objects.bridge_damaged(name).unwrap_or(false),
+                    7 => !objects.bridge_damaged(name).unwrap_or(false),
                     _ => true,
                 }
             })

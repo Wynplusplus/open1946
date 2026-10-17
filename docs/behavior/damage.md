@@ -55,6 +55,34 @@ for `n` hits it becomes `1 − (1 − p)ⁿ`.
 - High-explosive rounds explode at the impact point.
 - OpenIL2 hit-tests objects against their LOD-0 bounding spheres.
 
+## Bridges
+**Verified** from the runtime's bridge classes. Each segment (`formats/static.md`, "Bridges") has two
+halves, 0 towards the bridge's begin and 1 towards its end, each with its own life: 240 with an ignore
+threshold of 100 kg TNT on highway and railway bridges, 120 and 10 kg on country-road ones.
+
+- A segment's deck runs from `a = p − ½·step` to `c = p + ½·step` (`p` its centre, `step` from one segment
+  centre to the next) with a middle point `b`. Middle segments: `a`, `b = p`, `c` at the deck height. First
+  segment: `b = a + l·step̂`, heights `a` 0, `b` the ramp height, `c` the deck height; the last segment
+  mirrors it. Deck height and width are the intact end mesh's `Top` hook (`z`, `2·|y|`); the ramp height is
+  its `Mid` hook `z`, `l = −Mid.x + ½·segment length` (100 m axis-aligned, 141.42 m diagonal; half each).
+- **TNT on a segment** `t` from point `q`: nothing if `t ≤ ignore`; else damage `U(0,1)²·2t + 0.8t −
+  ignore/2` to half `dir·(q − p) < 0 ? 0 : 1` (`dir` the bridge's unit-step direction), if that half
+  still stands.
+- Explosions reach every segment that is not wholly down: `d` = distance from the blast to the deck line
+  `a–c` minus the bridge width (at least 0); TNT `power` below 1 m, `power/d²` below the blast radius,
+  else 0.
+- Shots (at segments not wholly down) give their kinetic energy × 2.4·10⁻⁷ kg TNT, except armour-piercing
+  rounds; in practice only blasts matter.
+- A half reaching 0 shows the collapse (smoke columns along that half of the deck, at least two and two
+  per bridge width, 3 s) and the segment its damage state `s = (half 1 down ? 2) + (half 0 down ? 1)`:
+  mesh `mono1` for 0, `mono3` for 3, else `mono2`. Middle segments with `s = 2` take the last segment's
+  orientation (no 180° turn), so the broken end faces the gap.
+- Destruction spreads: half 0 down brings down half 1 of the previous segment, half 1 down half 0 of the
+  next; the first segment loses both halves when its half 0 goes, the last when its half 1 goes.
+- The bridge counts as destroyed (objectives, `campaign.md`) once any segment is damaged.
+- Not yet in OpenIL2: ships ramming segments (TNT `life + 1`), columns and trains stopping or falling at
+  broken segments, damaged bridges in DGen's saved state.
+
 ## Aircraft
 
 ### Parts and damage levels

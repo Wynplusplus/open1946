@@ -74,5 +74,6 @@ the segments along the bridge, in pixels.
   is 0 for east, 1 north-east, 2 north, … 7 south-east (`+y` pixel rows point south).
 - Mesh: `3do/bridges/<highway|country|rail>[_W]/<short|long>/<end|mid>/mono<N>.sim`: `_W` on winter maps,
   `short` for axis-aligned and `long` for diagonal bridges, `end` for the first and last segment, and `N` =
-  1 intact, 2 or 3 damaged.
+  1 intact, 2 one half and 3 both halves destroyed (`behavior/damage.md`, "Bridges").
+- Bridges are numbered in file order from 0, counting every record; missions name them `Bridge<index>`.
 - Ramps between the deck and the ground are drawn natively with the map's road material (TODO).

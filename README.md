@@ -59,6 +59,8 @@ target/release/openil2 --at 214500,86500 --time 19.5              # dusk; --time
 target/release/openil2 --at 214500,86500 --agl 150 --screenshot out.png --orbit 170,12,40
 target/release/openil2 --screenshot out.png --cockpit=-30,-10        # from the cockpit, head turned
 target/release/openil2 --screenshot out.png --damage WingLMid_D0 --seconds 0.5 --orbit 150,30,16
+target/release/openil2 --map maps/Smolensk/load.ini --screenshot out.png --seconds 40 \
+    --eye 60250,110480,30 --target 60100,110506,5 --blast 60100,110506,11.5,125,4   # bombed bridge
 target/release/openil2 --mission Missions/Single/SK/Bf-109F-4/Bf-109F-4_1.mis --record flight.otrk
 target/release/openil2 --play flight.otrk
 target/release/openil2 --host 27015 --aircraft air.BF_109G6 --map maps/Slovakia/load.ini --at 214500,86500 --agl 1000

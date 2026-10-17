@@ -84,8 +84,13 @@ pub struct MapObjects {
     /// Classes named by the map that can't be drawn.
     pub skipped: Vec<String>,
     profiles: Vec<Profile>,
-    /// Objects destroyed so far, in order (track recording).
+    /// Objects destroyed so far, in order (track recording); bridge parts are `BRIDGE_KILL` codes.
     pub killed: Vec<usize>,
+    bridges: Vec<Bridge>,
+    /// Object index -> (bridge, segment).
+    bridge_of: HashMap<usize, (u32, u32)>,
+    /// Bridge parts that collapsed since the last drain: deck line and width (effects).
+    pub collapses: Vec<(DVec3, DVec3, f64)>,
 }
 
 /// Per-class placement rules from `static.ini`.
@@ -178,6 +183,8 @@ fn ground_normal(field: &HeightField, x: f64, y: f64) -> DVec3 {
 }
 
 struct Segment {
+    /// Mesh directory (`…/mid/` or `…/end/`); the file is `mono1.sim` intact, `mono2.sim` with one
+    /// half and `mono3.sim` with both halves destroyed.
     mesh: String,
     pos: DVec3,
     /// Degrees, counter-clockwise from east.
@@ -226,7 +233,7 @@ fn bridge_segments(b: &il2_formats::statics::Bridge, winter: bool, rows: f64) ->
         let yaw = oct as f64 * 45.0 + if i == last { 0.0 } else { 180.0 };
         out.push(Segment {
             mesh: format!(
-                "3do/bridges/{kind}{}/{}/{}/mono1.sim",
+                "3do/bridges/{kind}{}/{}/{}/",
                 if winter { "_W" } else { "" },
                 if oct & 1 == 0 { "short" } else { "long" },
                 if mid { "mid" } else { "end" }
@@ -236,6 +243,79 @@ fn bridge_segments(b: &il2_formats::statics::Bridge, winter: bool, rows: f64) ->
         });
     }
     out
+}
+
+/// Bridge segment object classes are tagged with this profile; their state lives in `Bridge`.
+const BRIDGE: u16 = u16::MAX;
+/// High bit of a `killed` entry for a destroyed bridge part: `bridge << 17 | segment << 1 | half`.
+const BRIDGE_KILL: usize = 1 << 31;
+
+/// A destructible bridge (`docs/behavior/damage.md`, "Bridges").
+struct Bridge {
+    /// Object index of each segment, from the begin end.
+    objects: Vec<usize>,
+    /// Segment centres at the water line.
+    pos: Vec<DVec3>,
+    /// Life of each segment's begin (0) and end (1) half.
+    life: Vec<[f32; 2]>,
+    max_life: f32,
+    ignore_tnt: f32,
+    /// Direction from begin to end (not normalised).
+    dir: glam::DVec2,
+    /// From one segment centre to the next.
+    step: DVec3,
+    width: f64,
+    height: f64,
+    height_end: f64,
+    length_end: f64,
+    /// Yaw of the bridge's direction, degrees.
+    yaw: f64,
+    /// Classes for [end, mid] segments: intact, one half and both halves destroyed.
+    meshes: [[u32; 3]; 2],
+    /// Some part is down (the bridge counts as destroyed).
+    damaged: bool,
+}
+
+impl Bridge {
+    /// Begin, middle and end points of segment `i`'s deck (`ComputeSegmentKeyPoints`).
+    fn key_points(&self, i: usize) -> [DVec3; 3] {
+        let p = self.pos[i];
+        let (mut a, mut c) = (p - 0.5 * self.step, p + 0.5 * self.step);
+        let unit = self.step.normalize_or_zero();
+        let n = self.pos.len();
+        let mut b = p;
+        if i == 0 {
+            b = a + unit * self.length_end;
+            a.z = 0.0;
+            b.z = self.height_end;
+            c.z = self.height;
+        } else if i == n - 1 {
+            b = c - unit * self.length_end;
+            a.z = self.height;
+            b.z = self.height_end;
+            c.z = 0.0;
+        } else {
+            a.z = self.height;
+            b.z = self.height;
+            c.z = self.height;
+        }
+        [a, b, c]
+    }
+
+    /// Distance from `p` to segment `i`'s deck line.
+    fn dist(&self, i: usize, p: DVec3) -> f64 {
+        let [a, _, c] = self.key_points(i);
+        let (v, w) = (p - a, c - a);
+        let t = v.dot(w);
+        if t <= 0.0 {
+            return a.distance(p);
+        }
+        let l2 = w.length_squared();
+        if t >= l2 {
+            return c.distance(p);
+        }
+        (v.length_squared() - t * t / l2).max(0.0).sqrt()
+    }
 }
 
 /// How an object stands on the ground.
@@ -262,6 +342,7 @@ pub struct Builder<'a> {
     by_mesh: HashMap<String, Option<(u32, f32)>>,
     objects: Vec<Object>,
     profiles: Vec<Profile>,
+    bridges: Vec<Bridge>,
     pub skipped: Vec<String>,
     pub season: String,
 }
@@ -278,6 +359,7 @@ impl<'a> Builder<'a> {
             by_mesh: HashMap::new(),
             objects: Vec::new(),
             profiles: Vec::new(),
+            bridges: Vec::new(),
             skipped: Vec::new(),
             season: season.to_owned(),
         }
@@ -412,18 +494,7 @@ impl<'a> Builder<'a> {
                 self.place_destructible(class, h.x, h.y, h.yaw as f64, stand, profile);
             }
             for b in &st.bridges {
-                for seg in bridge_segments(b, winter, rows) {
-                    let Some(class) = self.class(&seg.mesh, None) else {
-                        continue;
-                    };
-                    self.place(
-                        class,
-                        seg.pos.x,
-                        seg.pos.y,
-                        seg.yaw,
-                        Stand::Absolute(seg.pos.z),
-                    );
-                }
+                self.add_bridge(b, winter, rows);
             }
         }
         self.skipped.extend(
@@ -433,6 +504,94 @@ impl<'a> Builder<'a> {
                 .map(|(k, _)| k.clone()),
         );
         Ok(())
+    }
+
+    /// Places a bridge's segments; every bridge, drawable or not, takes the next index
+    /// (`Bridge<index>` in missions).
+    fn add_bridge(&mut self, b: &il2_formats::statics::Bridge, winter: bool, rows: f64) {
+        let segs = bridge_segments(b, winter, rows);
+        let mut bridge = Bridge {
+            objects: Vec::new(),
+            pos: segs.iter().map(|s| s.pos).collect(),
+            life: Vec::new(),
+            max_life: if b.kind == 0x20 { 120.0 } else { 240.0 },
+            ignore_tnt: if b.kind == 0x20 { 10.0 } else { 100.0 },
+            dir: glam::DVec2::ZERO,
+            step: DVec3::ZERO,
+            width: 0.0,
+            height: 0.0,
+            height_end: 0.0,
+            length_end: 0.0,
+            yaw: 0.0,
+            meshes: [[u32::MAX; 3]; 2],
+            damaged: false,
+        };
+        let classes = |me: &mut Self, dir: &str| -> Option<[(u32, f32); 3]> {
+            Some([
+                me.class(&format!("{dir}mono1.sim"), None)?,
+                me.class(&format!("{dir}mono2.sim"), None)?,
+                me.class(&format!("{dir}mono3.sim"), None)?,
+            ])
+        };
+        let (Some(first), Some(mid)) = (segs.first(), segs.get(1)) else {
+            self.bridges.push(bridge);
+            return;
+        };
+        let (Some(end), Some(mids)) = (classes(self, &first.mesh), classes(self, &mid.mesh)) else {
+            self.bridges.push(bridge);
+            return;
+        };
+        bridge.meshes = [end.map(|c| c.0), mids.map(|c| c.0)];
+        // Deck height and width from the intact end's `Top` hook, ramp from its `Mid` hook.
+        let hooks = self
+            .loader
+            .hier_hooks(&format!("{}mono1.sim", first.mesh))
+            .unwrap_or_default();
+        let hook = |n: &str| hooks.iter().find(|(h, _)| h == n).map(|(_, p)| *p);
+        let diagonal = segs.len() > 1
+            && (mid.pos.x - first.pos.x).abs() > 1.0
+            && (mid.pos.y - first.pos.y).abs() > 1.0;
+        let seg_len = 200.0 * if diagonal { 0.7071 } else { 0.5 };
+        if let Some(t) = hook("Top") {
+            bridge.height = t.z as f64;
+            bridge.width = 2.0 * (t.y as f64).abs();
+        }
+        if let Some(m) = hook("Mid") {
+            bridge.height_end = m.z as f64;
+            bridge.length_end = -(m.x as f64) + 0.5 * seg_len;
+        }
+        bridge.step = mid.pos - first.pos;
+        let sign = |v: f64| {
+            if v > 1.0 {
+                1.0
+            } else if v < -1.0 {
+                -1.0
+            } else {
+                0.0
+            }
+        };
+        bridge.dir = glam::DVec2::new(sign(bridge.step.x), sign(bridge.step.y));
+        // The begin segment faces backwards (`bridge_segments`).
+        bridge.yaw = first.yaw - 180.0;
+        let n = segs.len();
+        for (i, seg) in segs.iter().enumerate() {
+            let class = if i == 0 || i == n - 1 {
+                end[0]
+            } else {
+                mids[0]
+            };
+            bridge.objects.push(self.objects.len());
+            bridge.life.push([bridge.max_life; 2]);
+            self.place_destructible(
+                class,
+                seg.pos.x,
+                seg.pos.y,
+                seg.yaw,
+                Stand::Absolute(seg.pos.z),
+                BRIDGE,
+            );
+        }
+        self.bridges.push(bridge);
     }
 
     /// A `buildings.House$*` or `buildings.Plate$*` class; `mission` plates sit 0.04 m higher.
@@ -498,9 +657,27 @@ impl<'a> Builder<'a> {
         let mut mesh = self.mesh;
         mesh.textures = self.loader.take_images();
         mesh.node_count = mesh.node_count.max(1);
-        let mut objects = self.objects;
         let tile_of = |p: DVec3| ((p.x / TILE).floor() as i32, (p.y / TILE).floor() as i32);
-        objects.sort_by_key(|o| tile_of(o.pos));
+        let mut order: Vec<usize> = (0..self.objects.len()).collect();
+        order.sort_by_key(|&i| tile_of(self.objects[i].pos));
+        let mut new_index = vec![0; order.len()];
+        for (n, &o) in order.iter().enumerate() {
+            new_index[o] = n;
+        }
+        let mut slots: Vec<Option<Object>> = self.objects.into_iter().map(Some).collect();
+        let objects: Vec<Object> = order.iter().map(|&i| slots[i].take().unwrap()).collect();
+        let mut bridges = self.bridges;
+        for b in &mut bridges {
+            for o in &mut b.objects {
+                *o = new_index[*o];
+            }
+        }
+        let mut bridge_of = HashMap::new();
+        for (bi, b) in bridges.iter().enumerate() {
+            for (si, &o) in b.objects.iter().enumerate() {
+                bridge_of.insert(o, (bi as u32, si as u32));
+            }
+        }
         let mut tiles = HashMap::new();
         let mut i = 0;
         while i < objects.len() {
@@ -527,6 +704,9 @@ impl<'a> Builder<'a> {
             skipped: self.skipped,
             profiles: self.profiles,
             killed: Vec::new(),
+            bridges,
+            bridge_of,
+            collapses: Vec::new(),
         }
     }
 }
@@ -569,7 +749,8 @@ impl MapObjects {
                     continue;
                 };
                 for o in &self.objects[range.clone()] {
-                    if o.profile == 0 || (o.pos.x - x).hypot(o.pos.y - y) > r {
+                    if o.profile == 0 || o.profile == BRIDGE || (o.pos.x - x).hypot(o.pos.y - y) > r
+                    {
                         continue;
                     }
                     all += 1;
@@ -613,6 +794,13 @@ impl MapObjects {
                     if !o.alive || o.profile == 0 || o.class == u32::MAX {
                         continue;
                     }
+                    if o.profile == BRIDGE
+                        && self
+                            .bridge_part(i)
+                            .is_none_or(|(b, s)| self.bridges[b].life[s].iter().all(|&l| l <= 0.0))
+                    {
+                        continue;
+                    }
                     let (c, r) = self.classes[o.class as usize].sphere;
                     let centre = o.pos + o.rot.as_dquat() * c.as_dvec3();
                     let t = ((centre - a).dot(d) / len2).clamp(0.0, 1.0);
@@ -627,12 +815,136 @@ impl MapObjects {
         best.map(|(t, i)| (i, a + d * t))
     }
 
+    fn bridge_part(&self, i: usize) -> Option<(usize, usize)> {
+        self.bridge_of
+            .get(&i)
+            .map(|&(b, s)| (b as usize, s as usize))
+    }
+
+    /// Whether mission bridge `name` (`Bridge<index>`) has a part down; `None` if there is none.
+    pub fn bridge_damaged(&self, name: &str) -> Option<bool> {
+        let i: usize = name.trim().strip_prefix("Bridge")?.parse().ok()?;
+        self.bridges.get(i).map(|b| b.damaged)
+    }
+
+    /// `tnt` kg reaching segment `s` of bridge `b` from `from` (`damagedByTNT`).
+    fn bridge_tnt(
+        &mut self,
+        b: usize,
+        s: usize,
+        from: DVec3,
+        tnt: f64,
+        rng: &mut crate::weapons::Rng,
+    ) {
+        let br = &self.bridges[b];
+        let ignore = br.ignore_tnt as f64;
+        if tnt <= ignore {
+            return;
+        }
+        let r = rng.uniform();
+        let dmg = r * r * tnt * 2.0 + (tnt * 0.8 - ignore / 2.0);
+        let rel = from - br.pos[s];
+        let half = if br.dir.x * rel.x + br.dir.y * rel.y < 0.0 {
+            0
+        } else {
+            1
+        };
+        let life = br.life[s][half];
+        if life > 0.0 {
+            self.bridge_life(b, s, half, life - dmg as f32);
+        }
+    }
+
+    /// Sets a bridge half's life; a half that goes down shows its collapse, swaps the segment's
+    /// mesh and brings down the halves joined to it (`LifeChanged`, `SetSegmentDamageState`).
+    fn bridge_life(&mut self, b: usize, s: usize, half: usize, life: f32) {
+        let mut work = vec![(s, half, life)];
+        while let Some((s, half, life)) = work.pop() {
+            let br = &mut self.bridges[b];
+            let life = life.max(0.0);
+            let was = br.life[s][half] <= 0.0;
+            br.life[s][half] = life;
+            if (life <= 0.0) == was {
+                continue;
+            }
+            if life <= 0.0 {
+                let [a, m, c] = br.key_points(s);
+                let (p, q) = if half == 0 { (a, m) } else { (m, c) };
+                self.collapses.push((p, q, br.width));
+                self.killed.push(BRIDGE_KILL | b << 17 | s << 1 | half);
+            }
+            let state = self.bridge_mesh(b, s);
+            if state == 0 {
+                continue;
+            }
+            let br = &self.bridges[b];
+            let n = br.life.len();
+            let mut down = |s: usize, h: usize| {
+                if br.life[s][h] > 0.0 {
+                    work.push((s, h, 0.0));
+                }
+            };
+            if state & 1 != 0 && s > 0 {
+                down(s - 1, 1);
+            }
+            if state & 2 != 0 && s + 1 < n {
+                down(s + 1, 0);
+            }
+            if s == 0 && state & 1 != 0 {
+                down(s, 1);
+            }
+            if s == n - 1 && state & 2 != 0 {
+                down(s, 0);
+            }
+        }
+    }
+
+    /// Shows segment `s` of bridge `b` in its damage state; returns the state (bit 0: begin half
+    /// down, bit 1: end half down).
+    fn bridge_mesh(&mut self, b: usize, s: usize) -> usize {
+        let br = &mut self.bridges[b];
+        let [l0, l1] = br.life[s];
+        let state = (if l1 <= 0.0 { 2 } else { 0 }) + (if l0 <= 0.0 { 1 } else { 0 });
+        let n = br.life.len();
+        let (first, last) = (s == 0, s == n - 1);
+        let mid = !first && !last;
+        // Mid segments with only the end half down show the one-half mesh turned around.
+        let forward = last || (mid && state == 2);
+        let yaw = br.yaw + if forward { 0.0 } else { 180.0 };
+        let class = br.meshes[mid as usize][match state {
+            0 => 0,
+            3 => 2,
+            _ => 1,
+        }];
+        if state != 0 {
+            br.damaged = true;
+        }
+        if class != u32::MAX {
+            let o = &mut self.objects[br.objects[s]];
+            o.class = class;
+            o.rot = glam::Quat::from_rotation_z(yaw.to_radians() as f32);
+        }
+        state
+    }
+
     /// Destroys object `i` (also for track playback); logged in `killed`.
     pub fn kill(&mut self, i: usize) {
+        if i & BRIDGE_KILL != 0 {
+            let (b, s, h) = ((i & !BRIDGE_KILL) >> 17, (i >> 1) & 0xffff, i & 1);
+            if self
+                .bridges
+                .get(b)
+                .and_then(|br| br.life.get(s))
+                .is_some_and(|l| l[h] > 0.0)
+            {
+                self.bridge_life(b, s, h, 0.0);
+            }
+            return;
+        }
         if !self
             .objects
             .get(i)
-            .is_some_and(|o| o.alive && o.profile > 0)
+            .is_some_and(|o| o.alive && o.profile > 0 && o.profile != BRIDGE)
         {
             return;
         }
@@ -644,10 +956,11 @@ impl MapObjects {
         o.pos.z += p.dz as f64;
     }
 
-    /// A bullet hit on object `i`; returns whether it destroyed it.
+    /// A bullet hit on object `i` at `at`; returns whether it destroyed it.
     pub fn shot(
         &mut self,
         i: usize,
+        at: DVec3,
         energy: f64,
         power_type: i32,
         speed: f64,
@@ -656,6 +969,18 @@ impl MapObjects {
         let o = &self.objects[i];
         if !o.alive || o.profile == 0 {
             return false;
+        }
+        if o.profile == BRIDGE {
+            // Kinetic energy as TNT; armour-piercing rounds don't count (`msgShot`).
+            let Some((b, s)) = self.bridge_part(i) else {
+                return false;
+            };
+            if energy <= 0.0 || power_type == 1 {
+                return false;
+            }
+            let before = self.killed.len();
+            self.bridge_tnt(b, s, at, energy * 2.4e-7, rng);
+            return self.killed.len() > before;
         }
         let dmg = self.profiles[o.profile as usize - 1].damage;
         if dmg.shot_kills(energy, power_type, speed, rng) {
@@ -690,7 +1015,7 @@ impl MapObjects {
                 };
                 for i in range.clone() {
                     let o = &self.objects[i];
-                    if !o.alive || o.profile == 0 {
+                    if !o.alive || o.profile == 0 || o.profile == BRIDGE {
                         continue;
                     }
                     let (c, r) = self.classes[o.class as usize].sphere;
@@ -713,7 +1038,43 @@ impl MapObjects {
         for &i in &victims {
             self.kill(i);
         }
-        victims.len()
+        victims.len() + self.explode_bridges(at, power, radius, rng)
+    }
+
+    /// A blast's effect on bridges (`msgExplosion`): TNT by the inverse square of the distance to
+    /// each segment's deck beyond the bridge's width; returns the parts brought down.
+    fn explode_bridges(
+        &mut self,
+        at: DVec3,
+        power: f64,
+        radius: f64,
+        rng: &mut crate::weapons::Rng,
+    ) -> usize {
+        let before = self.killed.len();
+        for b in 0..self.bridges.len() {
+            for s in 0..self.bridges[b].pos.len() {
+                let br = &self.bridges[b];
+                let p = br.pos[s];
+                if (p.x - at.x).hypot(p.y - at.y) > radius + 200.0
+                    || br.life[s].iter().all(|&l| l <= 0.0)
+                {
+                    continue;
+                }
+                let d = (br.dist(s, at) - br.width).max(0.0);
+                let tnt = if d >= radius {
+                    0.0
+                } else if d < 1.0 {
+                    power
+                } else {
+                    power / (d * d)
+                };
+                self.bridge_tnt(b, s, at, tnt, rng);
+            }
+        }
+        self.killed[before..]
+            .iter()
+            .filter(|&&k| k & BRIDGE_KILL != 0)
+            .count()
     }
 
     pub fn len(&self) -> usize {
@@ -785,6 +1146,58 @@ impl MapObjects {
 
 #[cfg(test)]
 mod tests {
+    /// A 250 kg-class blast on a bridge's middle brings down parts of it and swaps their meshes.
+    /// Run with `IL2_ROOT=/path/to/game cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn bridge_goes_down() {
+        let vfs = il2_vfs::Vfs::open_install(std::env::var("IL2_ROOT").unwrap()).unwrap();
+        let ini = "maps/Smolensk/load.ini";
+        let field = crate::world::load_heights(&vfs, ini).unwrap();
+        let mut objects = super::MapObjects::load(&vfs, ini, &field).unwrap();
+        let (bi, b) = objects
+            .bridges
+            .iter()
+            .enumerate()
+            .find(|(_, b)| b.pos.len() >= 5 && b.meshes[1][0] != u32::MAX)
+            .expect("a bridge");
+        eprintln!(
+            "bridge {bi}: {} segments, width {:.1} height {:.1} end {:.1}/{:.1}, life {}",
+            b.pos.len(),
+            b.width,
+            b.height,
+            b.height_end,
+            b.length_end,
+            b.max_life
+        );
+        assert!(b.width > 2.0 && b.height > 1.0);
+        let s = b.pos.len() / 2;
+        let at = b.pos[s] + glam::DVec3::new(0.0, 0.0, b.height + 1.0);
+        let class0 = objects.objects[b.objects[s]].class;
+        let name = format!("Bridge{bi}");
+        assert_eq!(objects.bridge_damaged(&name), Some(false));
+        let mut rng = crate::weapons::Rng::new(1);
+        // Bridges are tough: a direct hit takes 50..300 of 240 life.
+        let mut down = 0;
+        let mut drops = 0;
+        while down == 0 && drops < 20 {
+            down = objects.explode(at, 125.0, 150.0, &mut rng);
+            drops += 1;
+        }
+        let b = &objects.bridges[bi];
+        eprintln!(
+            "parts down after {drops} blasts: {down}, lives {:?}",
+            b.life
+        );
+        assert!(down >= 2, "a hit halves and its neighbour");
+        assert_eq!(objects.bridge_damaged(&name), Some(true));
+        assert_ne!(objects.objects[b.objects[s]].class, class0);
+        assert!(!objects.collapses.is_empty());
+        // A rifle round does nothing.
+        let far = objects.bridges[bi].objects[0];
+        assert!(!objects.shot(far, at, 3500.0, 0, 800.0, &mut rng));
+    }
+
     /// Every shipped map: static files parse and every class except `Furniture$*` gets a mesh.
     /// Run with `IL2_ROOT=/path/to/game cargo test -- --ignored`.
     #[test]

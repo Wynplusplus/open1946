@@ -158,6 +158,9 @@ struct Args {
     /// Screenshot: strike these chunks at the start (e.g. `WingLOut_D0,StabL_D0`).
     #[arg(long, value_delimiter = ',')]
     damage: Option<Vec<String>>,
+    /// Screenshot: detonate "x,y,z,kg[,count]" of TNT at the start (e.g. on a bridge).
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+    blast: Option<Vec<f64>>,
 }
 
 /// Chase-camera view-projection and the eye position (scene is drawn relative to the eye).
@@ -220,6 +223,10 @@ fn airframe_step(
         if power > 0.0 {
             combat.booms.push((at, power));
         }
+    }
+    for (a, b, width) in std::mem::take(&mut view.objects.collapses) {
+        eprintln!("bridge part down at {:.0?}", a.lerp(b, 0.5));
+        particles::bridge_collapse(&mut view.effects, a, b, width, &mut combat.rng);
     }
 }
 
@@ -2105,6 +2112,13 @@ fn main() {
         let mut af = new_airframe(&assets);
         for c in args.damage.iter().flatten() {
             af.collision(&mut sim, c);
+        }
+        if let Some(b) = args.blast.as_deref().filter(|b| b.len() >= 4) {
+            let at = DVec3::new(b[0], b[1], b[2]);
+            for _ in 0..b.get(4).copied().unwrap_or(1.0) as usize {
+                let n = view.objects.explode(at, b[3], 150.0, &mut combat.rng);
+                eprintln!("blast at {at:.0?}: {n} destroyed");
+            }
         }
         let mut tracker = objectives::Tracker::new(
             mission

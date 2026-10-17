@@ -375,6 +375,10 @@ pub fn known_effects() -> Vec<String> {
             "effects/Explodes/Explode10Kg/Object",
             &["Sparks", "Flash", "Spray"][..],
         ),
+        (
+            "effects/Explodes/Objects/Bridges",
+            &["SmokeBoiling", "SmokeBoiling2"][..],
+        ),
     ] {
         for f in files {
             v.push(format!("{dir}/{f}.eff"));
@@ -527,5 +531,26 @@ fn blast(fx: &mut Effects, at: DVec3, power: f64, water: bool, rng: &mut Rng) {
                 fx.spawn(&format!("{dir}/{f}.eff"), at, axis, 1.0, -1.0);
             }
         }
+    }
+}
+
+/// A bridge part collapsing between `a` and `b` (`width` m wide): smoke columns at random points
+/// along it, at least two and two per `width` of length.
+pub fn bridge_collapse(fx: &mut Effects, a: DVec3, b: DVec3, width: f64, rng: &mut Rng) {
+    let n = ((2.0 * a.distance(b) / width.max(0.1)) as usize).max(2);
+    for _ in 0..n {
+        let at = a.lerp(b, rng.uniform());
+        let f = if rng.uniform() < 0.5 {
+            "SmokeBoiling"
+        } else {
+            "SmokeBoiling2"
+        };
+        fx.spawn(
+            &format!("effects/Explodes/Objects/Bridges/{f}.eff"),
+            at,
+            DVec3::Z,
+            1.0,
+            3.0,
+        );
     }
 }

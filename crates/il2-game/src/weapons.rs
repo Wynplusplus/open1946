@@ -345,6 +345,7 @@ pub fn advance(
             let speed = b.vel.length();
             let mut killed = objects.shot(
                 obj,
+                at,
                 0.5 * ty.mass * speed * speed,
                 ty.shot_type(),
                 speed,
