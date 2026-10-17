@@ -178,6 +178,13 @@ pub struct Aircraft {
     pub arrestor_hook: Option<DVec3>,
     /// `[Gear] Pitch`: nose-up attitude standing on the ground, degrees.
     pub gear_pitch: f64,
+    /// `[Aircraft] Crew`.
+    pub crew: usize,
+    /// The part (`damage::PART_NAMES` index) each fuel tank and engine sits in, from the
+    /// `_Tank<n>Burn` and `_Engine<n>Smoke` hooks; `scheme1`: single engine in the nose.
+    pub tank_parts: [Option<usize>; 4],
+    pub engine_parts: Vec<Option<usize>>,
+    pub scheme1: bool,
 }
 
 fn num(f: &SectFile, s: &'static str, k: &'static str) -> Result<f64, Error> {
@@ -257,6 +264,10 @@ impl Aircraft {
             seaplane: false,
             arrestor_hook: None,
             gear_pitch: 10.0,
+            crew: 1,
+            tank_parts: [None; 4],
+            engine_parts: Vec::new(),
+            scheme1: false,
         }
     }
 
@@ -435,6 +446,10 @@ impl Aircraft {
             seaplane: num_or(fmd, "Aircraft", "Seaplane", 0.0) != 0.0,
             arrestor_hook: None,
             gear_pitch: num_or(fmd, "Gear", "Pitch", 10.0),
+            crew: crew.max(1.0) as usize,
+            tank_parts: [None; 4],
+            engine_parts: Vec::new(),
+            scheme1: false,
         })
     }
 

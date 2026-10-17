@@ -128,6 +128,10 @@ struct Particle {
 
 struct Emitter {
     spec: Arc<EffectSpec>,
+    /// Set for emitters that follow something (`attach`).
+    id: u64,
+    /// Where the emitter was at the last update (particles are spread along the way).
+    prev: DVec3,
     pos: DVec3,
     axis: DVec3,
     scale: f64,
@@ -144,6 +148,7 @@ pub struct Effects {
     pub data: Option<MeshData>,
     emitters: Vec<Emitter>,
     rng: Rng,
+    next_id: u64,
 }
 
 impl Effects {
@@ -183,6 +188,7 @@ impl Effects {
             data: Some(mesh),
             emitters: Vec::new(),
             rng: Rng::new(0xE77EC7),
+            next_id: 1,
         }
     }
 
@@ -198,6 +204,8 @@ impl Effects {
         };
         let mut e = Emitter {
             spec: spec.clone(),
+            id: 0,
+            prev: pos,
             pos,
             axis: axis.normalize_or(DVec3::Z),
             scale,
@@ -216,6 +224,33 @@ impl Effects {
         self.emitters.push(e);
     }
 
+    /// Starts an effect that keeps emitting until `detach`, moved along with `follow`.
+    pub fn attach(&mut self, name: &str, pos: DVec3, axis: DVec3, scale: f64) -> Option<u64> {
+        let n = self.emitters.len();
+        self.spawn(name, pos, axis, scale, -1.0);
+        let e = self.emitters.get_mut(n)?;
+        e.life = f64::INFINITY;
+        e.id = self.next_id;
+        self.next_id += 1;
+        Some(e.id)
+    }
+
+    /// Moves an attached emitter.
+    pub fn follow(&mut self, id: u64, pos: DVec3, axis: DVec3) {
+        if let Some(e) = self.emitters.iter_mut().find(|e| e.id == id) {
+            e.pos = pos;
+            e.axis = axis.normalize_or(DVec3::X);
+        }
+    }
+
+    /// Stops an attached emitter (its particles live out their time).
+    pub fn detach(&mut self, id: u64) {
+        if let Some(e) = self.emitters.iter_mut().find(|e| e.id == id) {
+            e.life = e.age;
+            e.id = 0;
+        }
+    }
+
     pub fn update(&mut self, dt: f64) {
         let rng = &mut self.rng;
         for e in &mut self.emitters {
@@ -223,8 +258,12 @@ impl Effects {
             let s = e.spec.clone();
             if !s.sprite && e.age <= e.life {
                 e.debt += s.emit_frq * dt;
+                let total = e.debt.floor().max(1.0);
+                let mut k = 0.0;
                 while e.debt >= 1.0 && e.particles.len() < s.max_particles {
                     e.debt -= 1.0;
+                    k += 1.0;
+                    let origin = e.prev.lerp(e.pos, k / total);
                     // Inside a cone of half-angle theta around the axis.
                     let theta = (s.theta.0 + (s.theta.1 - s.theta.0) * rng.uniform())
                         .to_radians()
@@ -238,7 +277,7 @@ impl Effects {
                         (s.velocity.0 + s.velocity.1 * (rng.uniform() * 2.0 - 1.0)) * e.scale;
                     let offset = dir * (s.max_r * rng.uniform() * e.scale);
                     e.particles.push(Particle {
-                        pos: e.pos + offset,
+                        pos: origin + offset,
                         vel: dir * speed,
                         age: 0.0,
                     });
@@ -247,6 +286,7 @@ impl Effects {
                     e.debt = e.debt.min(1.0);
                 }
             }
+            e.prev = e.pos;
             e.particles.retain_mut(|p| {
                 p.age += dt;
                 // Quadratic air resistance, dv/dt = −k·v².
@@ -312,7 +352,7 @@ impl Effects {
 
 /// Every effect file the explosion rules below can start.
 pub fn known_effects() -> Vec<String> {
-    let mut v: Vec<String> = Vec::new();
+    let mut v: Vec<String> = crate::smoke::effect_files();
     for (dir, files) in [
         (
             "effects/Explodes/Bullet/Land",

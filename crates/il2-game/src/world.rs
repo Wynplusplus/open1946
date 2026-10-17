@@ -106,6 +106,10 @@ pub struct AircraftAssets {
     pub boxes: Vec<Option<(glam::Vec3, glam::Vec3)>>,
     /// Per node: its collision hulls (`x…` chunk hull, `xx…` internal parts), node space.
     pub hulls: std::sync::Arc<Vec<Vec<Hull>>>,
+    /// The chunks holding the fuel tanks and engines (their `_Tank<n>Burn`/`_Engine<n>Smoke`
+    /// hooks).
+    pub tank_chunks: [Option<String>; 4],
+    pub engine_chunks: Vec<Option<String>>,
     /// `[Toughness]` per part (`il2_fm::damage::PART_NAMES`), × 10⁻⁴; `NullPart` can't be damaged.
     pub toughness: [f64; 44],
     /// The class implements `TypeFighter`.
@@ -294,6 +298,8 @@ pub fn load_aircraft_with(
         twin_fin: false,
         boxes: Vec::new(),
         hulls: Default::default(),
+        tank_chunks: Default::default(),
+        engine_chunks: Vec::new(),
         toughness: [0.01; 44],
         fighter: false,
         turret_arcs: None,
@@ -412,6 +418,33 @@ pub fn load_aircraft_with(
         .then(|| crate::cockpit::Cockpit::load(vfs, &classes, class, &him))
         .flatten();
     let owners = loader.hier_hook_owners(&him).unwrap_or_default();
+    // Where the tanks and engines sit: the chunks carrying their effect hooks.
+    let owner_of = |hook: &str| {
+        owners
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(hook))
+            .map(|(_, node)| node.clone())
+    };
+    let tank_chunks: [Option<String>; 4] =
+        std::array::from_fn(|i| owner_of(&format!("_Tank{}Burn", i + 1)));
+    let engine_chunks: Vec<Option<String>> = (0..fm.engines.len())
+        .map(|i| owner_of(&format!("_Engine{}Smoke", i + 1)))
+        .collect();
+    fm.tank_parts = std::array::from_fn(|i| {
+        tank_chunks[i]
+            .as_deref()
+            .map(il2_fm::damage::part)
+            .filter(|&p| p < il2_fm::damage::NULL_PART)
+    });
+    fm.engine_parts = engine_chunks
+        .iter()
+        .map(|c| {
+            c.as_deref()
+                .map(il2_fm::damage::part)
+                .filter(|&p| p < il2_fm::damage::NULL_PART)
+        })
+        .collect();
+    fm.scheme1 = is(&["Scheme1"]);
     let gear_chunks = gear_hook_names(&hooks)
         .iter()
         .map(|h| {
@@ -454,6 +487,8 @@ pub fn load_aircraft_with(
         twin_fin,
         boxes,
         hulls,
+        tank_chunks,
+        engine_chunks,
         toughness,
         fighter: classes.interfaces(class).iter().any(|i| i == "TypeFighter"),
         turret_arcs: {

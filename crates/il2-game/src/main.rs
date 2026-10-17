@@ -22,6 +22,7 @@ mod objects;
 mod particles;
 mod roads;
 mod sky;
+mod smoke;
 mod track;
 mod traffic;
 mod view;
@@ -234,6 +235,72 @@ fn airframe_step(
     for (a, b, width) in std::mem::take(&mut view.objects.collapses) {
         eprintln!("bridge part down at {:.0?}", a.lerp(b, 0.5));
         particles::bridge_collapse(&mut view.effects, a, b, width, &mut combat.rng);
+    }
+}
+
+/// The player's damaged systems this tick (`il2_fm::systems`): tank and engine explosions,
+/// messages, and the smoke and fire trails.
+fn systems_step(
+    af: &mut airframe::Airframe,
+    sim: &mut Sim,
+    assets: &world::AircraftAssets,
+    view: &mut view::WorldView,
+    combat: &mut Combat,
+    trails: &mut smoke::Trails,
+) {
+    for ev in std::mem::take(&mut sim.systems.events) {
+        system_event(af, sim, assets, &ev);
+        if let il2_fm::systems::Event::EngineExplodes(e) = ev {
+            let at = sim.pos
+                + sim.ori
+                    * assets
+                        .hook_frames
+                        .iter()
+                        .find(|(h, _)| h.eq_ignore_ascii_case(&format!("_Engine{}Smoke", e + 1)))
+                        .map_or(DVec3::ZERO, |(_, m)| m.w_axis.truncate().as_dvec3());
+            particles::impact(
+                &mut view.effects,
+                at,
+                particles::Impact::Blast { power: 1.248 },
+                false,
+                true,
+                &mut combat.rng,
+            );
+        }
+    }
+    let wing: [bool; 4] = std::array::from_fn(|t| {
+        assets.tank_chunks[t]
+            .as_deref()
+            .is_some_and(|c| c.to_ascii_lowercase().starts_with("wing"))
+    });
+    trails.update(&mut view.effects, sim, &assets.hook_frames, &wing);
+}
+
+/// One system event on an aircraft's airframe (shared by the player and the AI).
+pub fn system_event(
+    af: &mut airframe::Airframe,
+    sim: &mut Sim,
+    assets: &world::AircraftAssets,
+    ev: &il2_fm::systems::Event,
+) {
+    use il2_fm::systems::Event;
+    match ev {
+        Event::TankExplodes(t) => {
+            if let Some(c) = assets.tank_chunks.get(*t).cloned().flatten() {
+                af.collision(sim, &c);
+            }
+            if sim.systems.scheme1 {
+                af.collision(sim, "CF_D0");
+            }
+        }
+        Event::EngineExplodes(e) => {
+            if let Some(c) = assets.engine_chunks.get(*e).cloned().flatten() {
+                af.collision(sim, &c);
+            }
+        }
+        Event::Message(m) => af.messages.push((*m).to_owned()),
+        Event::CrewDead(0) => af.messages.push("PilotKilled".to_owned()),
+        _ => {}
     }
 }
 
@@ -620,6 +687,8 @@ impl Combat {
 }
 
 struct Game {
+    /// Smoke and fire of the player's damaged systems.
+    trails: smoke::Trails,
     sim: Sim,
     airframe: airframe::Airframe,
     traffic: Option<traffic::Traffic>,
@@ -1243,6 +1312,14 @@ impl Game {
                 &mut self.combat,
                 &mut self.view,
             );
+            systems_step(
+                &mut self.airframe,
+                &mut self.sim,
+                &self.assets,
+                &mut self.view,
+                &mut self.combat,
+                &mut self.trails,
+            );
             self.objectives.update(&self.sim, TICK);
             if let Some(g) = self.ground.as_mut() {
                 ground_hits(&mut self.combat, g, &mut self.view);
@@ -1266,6 +1343,7 @@ impl Game {
                     &mut self.combat.projectiles,
                     &|n| names.get(n).copied(),
                 );
+                t.update_trails(&mut self.view.effects);
             }
             self.acc -= TICK;
         }
@@ -2482,7 +2560,22 @@ fn main() {
         let mut combat = Combat::new(guns, stores);
         let triggers = [args.fire, args.fire, args.fire, args.fire];
         let mut af = new_airframe(&assets);
+        let mut trails = smoke::Trails::default();
         for c in args.damage.iter().flatten() {
+            // `#tank0=5`, `#engine1=4`, `#oil0`: system states (diagnostics).
+            if let Some(sys) = c.strip_prefix('#') {
+                let (what, n) = sys.split_once('=').unwrap_or((sys, "1"));
+                let n: u8 = n.parse().unwrap_or(1);
+                let idx = |p: &str| what[p.len()..].parse::<usize>().unwrap_or(0);
+                if what.starts_with("tank") {
+                    sim.set_tank(idx("tank"), n);
+                } else if what.starts_with("engine") {
+                    sim.set_engine(idx("engine"), n);
+                } else if what.starts_with("oil") {
+                    sim.hit_oil(idx("oil"));
+                }
+                continue;
+            }
             af.collision(&mut sim, c);
         }
         if let Some(b) = args.blast.as_deref().filter(|b| b.len() >= 4) {
@@ -2548,6 +2641,14 @@ fn main() {
                 }
             }
             airframe_step(&mut af, &mut sim, &field, &mut combat, &mut view);
+            systems_step(
+                &mut af,
+                &mut sim,
+                &assets,
+                &mut view,
+                &mut combat,
+                &mut trails,
+            );
             if let Some(g) = columns.as_mut() {
                 ground_hits(&mut combat, g, &mut view);
                 g.step(&field, TICK);
@@ -2565,6 +2666,7 @@ fn main() {
                     &mut combat.projectiles,
                     &|n| names.get(n).copied(),
                 );
+                t.update_trails(&mut view.effects);
             }
             tracker.update(&sim, TICK);
             max_g = (max_g.0.max(sim.overload), max_g.1.min(sim.overload));
@@ -2711,6 +2813,7 @@ fn main() {
     sim.structure.twin_fin = assets.twin_fin;
     let airframe = new_airframe(&assets);
     let mut game = Game {
+        trails: smoke::Trails::default(),
         airframe,
         traffic,
         ground: columns,

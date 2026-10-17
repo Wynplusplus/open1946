@@ -474,6 +474,15 @@ pub struct EngineState {
     produced_dist: f64,
     /// Malfunctions that happened, for messages (`overheat`, `cylinder`, `oil`, `fire`, …).
     pub events: Vec<&'static str>,
+    /// Combat damage (`docs/behavior/damage.md`, "Systems"): the supercharger works no more (as
+    /// if there were none), the propeller pitch is frozen or slow, the throttle is stuck where it
+    /// was, the propeller and mixture levers are cut.
+    pub supercharger_dead: bool,
+    pub pitch_frozen: bool,
+    pub pitch_slow: bool,
+    pub throttle_stuck: Option<f64>,
+    pub prop_lever_cut: bool,
+    pub mix_lever_cut: bool,
 }
 
 /// How the automatic radiator works; the runtime picks it by aircraft class.
@@ -537,6 +546,12 @@ impl EngineState {
             readyness: 1.0,
             cylinders_out: 0.0,
             oil_damage: 0.0,
+            supercharger_dead: false,
+            pitch_frozen: false,
+            pitch_slow: false,
+            throttle_stuck: None,
+            prop_lever_cut: false,
+            mix_lever_cut: false,
             rng: 0x9E37_79B9_7F4A_7C15 ^ (p.horse_powers.to_bits() ^ p.thrust_max.to_bits()),
             mix: 1.0,
             magneto: 3,
@@ -771,6 +786,58 @@ impl EngineState {
                 }
             }
         }
+    }
+
+    /// Combat hits (`docs/behavior/damage.md`, "Systems").
+    /// `n` cylinders shot out: below 12 % of them the engine dies, else its condition drops to
+    /// the share left.
+    pub fn knock_out_cylinders(&mut self, p: &EngineParams, n: f64) {
+        self.knock_out(p, n);
+        self.events.push("cylinder");
+    }
+
+    /// Magneto `i` (0, 1) destroyed; the engine stops if it ran on that one alone.
+    pub fn knock_out_magneto(&mut self, i: usize) {
+        if let Some(m) = self.magnetos_ok.get_mut(i) {
+            *m = false;
+        }
+        if self.magneto as usize == i + 1 && self.stage < 7 {
+            self.set_stage(0);
+        }
+    }
+
+    /// The engine dies (stage 7): no more power.
+    pub fn die(&mut self) {
+        if self.stage < 7 {
+            self.set_stage(7);
+            self.readyness = 0.0;
+            self.events.push("dead");
+        }
+    }
+
+    /// The engine seizes (stage 8): it dies and the propeller stops.
+    pub fn seize(&mut self) {
+        if self.stage != 8 {
+            self.set_stage(8);
+            self.readyness = 0.0;
+            self.w = 0.0;
+            self.events.push("seized");
+        }
+    }
+
+    /// Sets the engine's condition; reaching 0 kills it.
+    pub fn set_readyness(&mut self, r: f64) {
+        let r = r.clamp(0.0, 1.0);
+        if self.readyness > 0.0 && r == 0.0 {
+            self.die();
+        } else {
+            self.readyness = r;
+        }
+    }
+
+    /// Cuts the throttle linkage: the engine keeps the setting `at`.
+    pub fn cut_throttle(&mut self, at: f64) {
+        self.throttle_stuck.get_or_insert(at);
     }
 
     fn knock_out(&mut self, p: &EngineParams, n: f64) {
@@ -1021,7 +1088,10 @@ impl EngineState {
         dt: f64,
     ) {
         // Throttle above 1 (up to 1.1) is boost, only for engines with BoostFactor > 1.
-        let throttle = throttle.clamp(0.0, p.max_throttle());
+        let throttle = self
+            .throttle_stuck
+            .unwrap_or(throttle)
+            .clamp(0.0, p.max_throttle());
         let t = throttle.min(1.0);
         let rho = atmosphere::density(h);
         let pe = (atmosphere::pressure(h) + p.speed_manifold * 0.5 * rho * speed * speed)
@@ -1124,7 +1194,10 @@ impl EngineState {
         // Boost raises the allowed manifold pressure.
         let wf = if wep { p.wep_compressor } else { 1.0 };
         let threshold = threshold * wf;
-        let step = p.governor_speed * dt;
+        let step = p.governor_speed * dt * if self.pitch_slow { 0.1 } else { 1.0 };
+        if self.pitch_frozen {
+            self.phi_target = self.phi;
+        }
         let diff = self.phi - self.phi_target;
         self.phi -= diff.signum() * (157.3 * diff.abs()).min(1.0) * step;
         self.phi_target = self.phi_target.clamp(p.phi_min, p.phi_max);
@@ -1132,7 +1205,12 @@ impl EngineState {
 
         // 4. Supercharger.
         let rpm_factor = p.p_at0 + (1.0 - p.p_at0) * self.w / p.w_max;
-        let c = match p.compressor {
+        let compressor = if self.supercharger_dead {
+            0
+        } else {
+            p.compressor
+        };
+        let c = match compressor {
             0 => (atmosphere::pressure(h) + 0.5 * rho * speed * speed) / atmosphere::P0,
             2 => {
                 let pr = &p.stage_pressure;
@@ -1434,6 +1512,9 @@ impl EngineState {
 
     /// Mixture lever (−/+ steps of 0.05), where the engine has one.
     pub fn set_mix(&mut self, p: &EngineParams, v: f64) {
+        if self.mix_lever_cut {
+            return;
+        }
         if p.has_mix {
             self.mix = if p.mixer_type == 1 { v.max(1.0) } else { v }.clamp(0.0, 1.2);
         }

@@ -37,6 +37,8 @@ pub struct AiPlane {
     /// Who it is fighting: contact id (0 player, 1 + n AI) and whether it attacks or evades.
     engaged: Option<(usize, bool)>,
     think: f64,
+    /// Smoke and fire of its damaged systems.
+    trails: crate::smoke::Trails,
 }
 
 pub struct Traffic {
@@ -171,6 +173,7 @@ impl Traffic {
                     player_leads: is_player && m.player_num == 0,
                     engaged: None,
                     think: 0.0,
+                    trails: Default::default(),
                 });
             }
         }
@@ -246,6 +249,7 @@ impl Traffic {
                 player_leads: false,
                 engaged: None,
                 think: 0.0,
+                trails: Default::default(),
             }],
         })
     }
@@ -350,6 +354,19 @@ impl Traffic {
         p.airframe.shot(&mut p.sim, node, tnt, &toughness);
     }
 
+    /// Smoke and fire trails of the AI aircraft's damaged systems.
+    pub fn update_trails(&mut self, fx: &mut crate::particles::Effects) {
+        for p in &mut self.planes {
+            let a = &self.classes[p.class].assets;
+            let wing: [bool; 4] = std::array::from_fn(|t| {
+                a.tank_chunks[t]
+                    .as_deref()
+                    .is_some_and(|c| c.to_ascii_lowercase().starts_with("wing"))
+            });
+            p.trails.update(fx, &p.sim, &a.hook_frames, &wing);
+        }
+    }
+
     /// A round through AI aircraft `n`'s collision `parts`; `vel` is the round's world velocity.
     pub fn bullet(
         &mut self,
@@ -420,7 +437,9 @@ impl Traffic {
             let g = field.height_at(p.sim.pos.x, p.sim.pos.y);
             let fighter = self.classes[p.class].assets.fighter;
             let mut fire = false;
-            let alive = !p.sim.structure.destroyed;
+            // A dead pilot or a crew bailing out leaves the aircraft to itself.
+            let flown = p.sim.systems.crew[0] < 100 && !p.sim.systems.bailing_out;
+            let alive = !p.sim.structure.destroyed && flown;
             p.think -= dt;
             if alive && p.pilot.phase == Phase::Cruise && p.think <= 0.0 {
                 p.think = 0.5;
@@ -460,6 +479,10 @@ impl Traffic {
                                 dt,
                             )
                         }
+                        None if !flown => il2_fm::Inputs {
+                            gear: p.sim.ct.gear,
+                            ..Default::default()
+                        },
                         None => p.pilot.update(&p.sim, g, &ground, dt),
                     }
                 }
@@ -474,6 +497,10 @@ impl Traffic {
                 }
             }
             p.sim.tick(&inputs, &crate::ground::Surface(field, ships));
+            let a = &self.classes[p.class].assets;
+            for ev in std::mem::take(&mut p.sim.systems.events) {
+                crate::system_event(&mut p.airframe, &mut p.sim, a, &ev);
+            }
             let g = field.height_at(p.sim.pos.x, p.sim.pos.y);
             p.pilot.constrain(&mut p.sim, g);
             if alive {

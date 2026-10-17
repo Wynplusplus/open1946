@@ -161,6 +161,49 @@ A **cut**:
 | wing middle / outer | the sections outboard are cut too; the whole half loses all lift (as the runtime does), ailerons stop working, then the aileron is cut |
 | aileron | aileron area × 0.5, roll sensitivity × 0.5·(other aileron intact) |
 
+### Systems
+**Verified** from the runtime's aircraft state class unless marked OpenIL2.
+- **Where.** Fuel tank `n` lives in the chunk carrying hook `_Tank<n>Burn`, engine `n` in the one
+  carrying `_Engine<n>Smoke`; a tank or engine whose chunk is gone can't change state.
+- **Fuel tanks**, states 0–6 (`hitTank(n, k)` adds `k`, at most 6). 1–2 leak, 3 leaks heavily, 4
+  smokes, 5 burns, 6 blazes. Reaching 5 is mortal damage. Each level gained at 6 makes the crew
+  give up (75 %, always single-engine) and then bail out (75 %).
+- **Engines**, states 0–4 (`hitEngine`): 1 hit, 2 smoking, 3 heavy smoke, 4 burning. Burning in a
+  single-engine aircraft is mortal (bail-out 50 %); on the ground it is mortal for any.
+- **Oil** (`hitOil`): a leak; all engines' oil hit sets cockpit bit 128.
+- **Every 44 ticks** (1.32 s, `dt` = 1.32): leaks drain `0.12·Σ state²·dt` kg of fuel. State 1
+  seals itself (1.25 %), 1–2 stop when the fuel is gone; 4 may go to 4 again (6 %) or catch fire
+  (0.333 %); 5 goes out above 90 m/s (`0…0.2` over 90–200 m/s), grows (0.48 %) or explodes
+  (0.2 %); 6 goes out (`0…0.1`) or explodes (0.75 %). Tanks 5/6 in a single-engine fuselage burn
+  the pilot (5/7 points). Engines in states 2–4 lose `state·k·2.5·10⁻⁴·dt` condition (`k` = 15 at
+  4) and die below 0.2; state 3 running catches fire (1.5 % at load ≤ 1, none at load 3), starting
+  engines die (20 %), stopped ones recover a level (0.75 %); state 4 goes out above 80 m/s
+  (`0…0.3` over 80–200 m/s), burns a single-engine pilot (4), makes running piston engines explode
+  (`1 % … 0` over load 1–5) and starting ones die (30 %), stopped ones recover (15 %). An oil leak
+  takes `0.001875·dt` condition.
+- **Explosions**: a tank or engine explosion is a hard collision of its chunk (and of the fuselage
+  for a single-engine aircraft's tank); a piston engine's also bursts with 1.248 kg TNT.
+- **Engine specific damage** (`setEngineSpecificDamage`): 0 supercharger out (as if it had none),
+  1 throttle linkage cut (stays where it was), 3 propeller pitch gear (pitch frozen), 4 pitch-change
+  speed (OpenIL2: a tenth), 6 propeller lever, 7 mixture lever cut. Cylinders shot out
+  (`setCyliderKnockOut`) cost condition down to the share left and kill the engine below 12 %;
+  a destroyed magneto stops an engine running on it alone; `setEngineStuck` seizes it.
+- **Controls** (`setControlsDamage`): 0 aileron, 1 elevator, 2 rudder runs cut (the surface
+  centres), 3 stabilizer trim and autopilot. **Internal** (`setInternalDamage`): 0 hydraulics
+  (gear and flaps stay put), 1 flap drive, 2 nitrous oxide lost, 3 gear jammed.
+- **Crew** wounds 0–100 per seat (`hitPilot`); above 95 is dead. Bleeding `n` adds a point every
+  `120/n` s (rates add). Arm wounds scale roll and pitch control by 0.6, leg wounds yaw by 0.2.
+  OpenIL2: an AI aircraft whose pilot is dead or whose crew bails out is left uncontrolled.
+- **Guns** (`setJamBullets(trigger, n)`): that gun's ammunition is gone.
+- **Effects** at the hooks (`_Tank<n>Burn`, `_Engine<n>Smoke`, `_Engine<n>Oil`), from
+  `3DO/Effects/Aircraft/`, three per state (fewer on the ground, below 10 m/s): tanks 1–2
+  `RedLeakTSPD`, 3 `TankBlackMedium(T)SPD`, 4 `BlackHeavy(T)SPD`, 5 `FireSPD` + `BlackHeavy(T)SPD`,
+  6 `FireSPDLong` + `BlackHeavy(T)SPD` (wing tanks: `FireSPDWing`, `FireSPDWingLong`,
+  `BlackHeavySPDWing`); engines 1 `GraySmall(T)SPD`, 2 `EngineBlackMedium(T)SPD`, 3
+  `BlackHeavySPD` + `EngineBlackHeavyTSPD`, 4 `FireSPD` + those; oil `OilBlackMedium(T)SPD`; on the
+  ground the `…GND` variants. OpenIL2 draws the particle ones (not yet the `TSPD` ribbon trails).
+  `openil2 --screenshot … --damage '#tank0=5,#engine0=4,#oil0'` sets states for a look.
+
 ### Structural limits
 `LimitLoad = G_CLASS / 1.5` (12 without `G_CLASS`). The reference force is
 `LimitLoad·(empty + fuel + nitro + ReferenceWeight)`. Every step the current limit is

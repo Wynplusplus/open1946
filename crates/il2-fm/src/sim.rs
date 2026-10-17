@@ -110,6 +110,8 @@ pub struct Sim {
     pub complex_engine: bool,
     /// Rotation rates the AI's controls command, body axes (the runtime's `Wtrue`).
     pub wtrue: DVec3,
+    /// Tanks, engines, crew, control runs (`systems`).
+    pub systems: crate::systems::Systems,
 }
 
 fn deg(r: f64) -> f64 {
@@ -134,7 +136,7 @@ impl Sim {
 
     /// Sets the propeller lever (0..1), or `None` for automatic.
     pub fn set_prop(&mut self, l: Option<f64>) {
-        for st in &mut self.engines {
+        for st in self.engines.iter_mut().filter(|st| !st.prop_lever_cut) {
             st.prop_manual = l;
         }
     }
@@ -213,6 +215,7 @@ impl Sim {
         let ac_trim = ac.controls.default_trim;
         let sq = crate::damage::Squares::new(&ac);
         let structure = crate::damage::Structure::new(&ac);
+        let systems = crate::systems::Systems::for_aircraft(&ac);
         // In flight, blades start at their working pitch for the airspeed (no windmilling overspeed).
         let engines = ac
             .engines
@@ -265,6 +268,7 @@ impl Sim {
             ai: false,
             complex_engine: false,
             wtrue: DVec3::ZERO,
+            systems,
         }
     }
 
@@ -282,6 +286,7 @@ impl Sim {
     /// Advances one game tick, splitting it like the original when the aircraft is fast.
     pub fn tick(&mut self, input: &Inputs, ground: &impl Ground) {
         self.step(TICK, input, ground);
+        self.update_systems(TICK);
     }
 
     fn step(&mut self, dt: f64, input: &Inputs, ground: &impl Ground) {
@@ -308,7 +313,7 @@ impl Sim {
         for i in 0..3 {
             self.trim[i] = filter(dt, self.trim_target[i], self.trim[i], 999.9, 0.25);
         }
-        let ail_in = if self.structure.ailerons_failed {
+        let ail_in = if self.structure.ailerons_failed || self.systems.controls_cut[0] {
             0.0
         } else {
             input.aileron
@@ -321,7 +326,12 @@ impl Sim {
             0.2 * (1.0 + 0.3 * input.aileron.abs()),
             0.025,
         );
-        let ev = trimmed(input.elevator, self.trim[1], elev_lim);
+        let ev_in = if self.systems.controls_cut[1] {
+            0.0
+        } else {
+            input.elevator
+        };
+        let ev = trimmed(ev_in, self.trim[1], elev_lim);
         // The elevator surface lags in `ev`; at high speed the trimmed neutral moves up.
         self.ev = filter(
             dt,
@@ -331,7 +341,12 @@ impl Sim {
             0.022,
         );
         self.ct.elevator = (self.ev - 0.25 * (1.0 - elev_lim)).clamp(-1.0, 1.0);
-        let rud = trimmed(input.rudder, self.trim[2], rud_lim);
+        let rud_in = if self.systems.controls_cut[2] {
+            0.0
+        } else {
+            input.rudder
+        };
+        let rud = trimmed(rud_in, self.trim[2], rud_lim);
         self.ct.rudder = filter(
             dt,
             rud,
@@ -347,7 +362,10 @@ impl Sim {
             .fold(1.0, f64::max);
         // The player's throttle acts directly.
         self.ct.throttle = input.throttle.clamp(0.0, max_throttle);
-        let flaps_target = if c.flaps && !self.structure.flaps_failed {
+        let flaps_target = if self.systems.flaps_dead || self.systems.hydraulics_dead {
+            // The flaps stay where they are.
+            self.ct.flaps
+        } else if c.flaps && !self.structure.flaps_failed {
             input.flaps.clamp(0.0, 1.0)
         } else {
             0.0
@@ -367,11 +385,14 @@ impl Sim {
         };
         self.ct.wep = input.wep;
         self.ct.tail_lock = input.tail_lock && c.tailwheel_lock;
-        self.ct.gear = if c.retractable {
-            filter(dt, input.gear.clamp(0.0, 1.0), self.ct.gear, 999.9, 0.2)
-        } else {
-            1.0
-        };
+        self.ct.gear =
+            if c.retractable && (self.systems.hydraulics_dead || self.systems.gear_jammed) {
+                self.ct.gear
+            } else if c.retractable {
+                filter(dt, input.gear.clamp(0.0, 1.0), self.ct.gear, 999.9, 0.2)
+            } else {
+                1.0
+            };
         if c.airbrake {
             self.airbrake = filter(
                 dt,
