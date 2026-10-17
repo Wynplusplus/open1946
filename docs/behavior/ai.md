@@ -73,7 +73,8 @@ nearest runway, touching down 300 m beyond it in the takeoff direction.
 - **Final** (OpenIL2): gear and flaps down. `v_ref` is the faster of 1.25·VminFLAPS and the speed
   for a lift coefficient of 1.1 at sea level. The localizer intercept heading is
   `runway − 0.004·offset` (at most 30°), bank `−2·heading error` (at most 20°). The glide path is
-  4°; the vertical speed wanted is `−v·tan 4° + 0.15·(path height − height)`, limited to −6…2 m/s.
+  4°; the vertical speed wanted is `−c·tan 4° + 0.15·(path height − height)`, limited to −6…2 m/s,
+  with `c` the closing speed over the touchdown point (it moves on a carrier, `carrier.md`).
   A cascade flies it: the vertical speed error `e` sets the pitch attitude `p_i + 1.2·e` (`p_i`
   integrating `0.4·e` °/s, limited to −8° … touchdown attitude), and the elevator holds it with
   `j + 0.05·(pitch error) + 0.6·pitch rate` (`j` integrating `0.04·pitch error`). The throttle holds

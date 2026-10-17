@@ -131,6 +131,11 @@ impl Traffic {
                     .iter()
                     .find(|w| w.kind.starts_with("LANDING"))
                 {
+                    pilot.landing_ship = l
+                        .target
+                        .clone()
+                        .filter(|(t, _)| t.ends_with("_Chief"))
+                        .map(|(t, u)| (t, u as usize));
                     if let Some((x, y, heading)) = world::takeoff_spot(runways, l.x, l.y) {
                         let (fx, fy) = (heading.cos(), heading.sin());
                         let (tx, ty) = (x + fx * 300.0, y + fy * 300.0);
@@ -444,6 +449,15 @@ impl Traffic {
                     }
                 }
             };
+            // A carrier's landing spot moves with the ship.
+            if let (Some((chief, unit)), Some(g)) = (&p.pilot.landing_ship, ships) {
+                if let Some((at, heading)) = g.carrier_landing(chief, *unit) {
+                    p.pilot.landing_runway = Some((at, heading));
+                    if matches!(p.pilot.phase, Phase::Landing { .. }) {
+                        p.pilot.phase = Phase::Landing { at, heading };
+                    }
+                }
+            }
             p.sim.tick(&inputs, &crate::ground::Surface(field, ships));
             let g = field.height_at(p.sim.pos.x, p.sim.pos.y);
             p.pilot.constrain(&mut p.sim, g);

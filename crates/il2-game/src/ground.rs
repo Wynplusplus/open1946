@@ -296,6 +296,23 @@ impl Ground {
         Some((at, u.yaw + heading as f64, u.vel))
     }
 
+    /// Where aircraft landing on unit `unit` of column `chief` aim: the deck's landing spot
+    /// (`_RWY_LDG`) in world coordinates on the deck, and the ship's heading.
+    pub fn carrier_landing(&self, chief: &str, unit: usize) -> Option<(DVec3, f64)> {
+        let col = self.columns.iter().find(|c| c.name == chief)?;
+        let u = col.units.get(unit).or(col.units.first())?;
+        if !u.alive {
+            return None;
+        }
+        let deck = self.classes[u.class].deck.as_ref()?;
+        let f = deck.landing.or(deck.takeoff)?;
+        let p = f.w_axis.truncate();
+        let z = deck.surface(p.x, p.y, p.z + 1.0).unwrap_or(p.z);
+        let at =
+            u.pos + DQuat::from_rotation_z(u.yaw) * DVec3::new(p.x as f64, p.y as f64, z as f64);
+        Some((at, u.yaw))
+    }
+
     /// Arrestor wires of the carriers near `p` in world coordinates, with the ship's velocity.
     pub fn wires_near(&self, p: DVec3) -> Vec<(DVec3, DVec3, DVec3)> {
         let mut out = Vec::new();

@@ -1830,6 +1830,75 @@ fn trap_test(
     )
 }
 
+/// The AI lands on carrier `chief`: from the gate 5 km behind its landing spot. Returns a summary.
+fn carrier_ai_landing_test(
+    ac: il2_fm::Aircraft,
+    field: &HeightField,
+    ships: &mut ground::Ground,
+    chief: &str,
+) -> String {
+    let flat = |x: f64, y: f64| field.height_at(x, y);
+    let Some((at, heading)) = ships.carrier_landing(chief, 0) else {
+        return "carrier landing: no deck".to_owned();
+    };
+    let dir = DVec3::new(heading.cos(), heading.sin(), 0.0);
+    let start = at - dir * 5000.0 + DVec3::new(0.0, 0.0, 400.0);
+    let mut sim = Sim::new(ac, start, glam::DQuat::from_rotation_z(heading), 60.0);
+    sim.ai = true;
+    sim.ct.gear = 0.0;
+    let mut pilot = ai::AiPilot::new(Vec::new(), 0, 0, 2);
+    pilot.landing_ship = Some((chief.to_owned(), 0));
+    pilot.phase = ai::Phase::Landing { at, heading };
+    let (mut t, mut caught) = (0.0, None);
+    while t < 400.0 && pilot.phase != ai::Phase::Parked && !sim.structure.destroyed {
+        if let Some((at, heading)) = ships.carrier_landing(chief, 0) {
+            pilot.phase = ai::Phase::Landing { at, heading };
+        }
+        let g = field.height_at(sim.pos.x, sim.pos.y);
+        let inputs = pilot.update(&sim, g, &flat, TICK);
+        ships.step(field, TICK);
+        sim.tick(&inputs, &ground::Surface(field, Some(ships)));
+        pilot.constrain(&mut sim, g);
+        t += TICK;
+        if let Some(w) = sim.gear.towed {
+            caught.get_or_insert(w);
+        }
+        if std::env::var_os("IL2_TRACE").is_some()
+            && ((t / TICK).round() as usize).is_multiple_of(33)
+        {
+            let (at, _) = ships
+                .carrier_landing(chief, 0)
+                .unwrap_or((DVec3::ZERO, 0.0));
+            let rel = sim.pos - at;
+            eprintln!(
+                "  cvland t={t:5.1} along {:6.0} side {:5.1} dz {:5.1} vrel {:4.0} km/h deck {} towed {:?}",
+                rel.truncate().dot(dir.truncate()),
+                rel.truncate().perp_dot(dir.truncate()),
+                rel.z,
+                (sim.vel - sim.gear.surface_vel).length() * 3.6,
+                sim.gear.on_deck,
+                sim.gear.towed
+            );
+        }
+    }
+    let on_deck = sim.gear.on_deck;
+    format!(
+        "carrier landing: {:?} after {t:.0} s, wire {}, {}{}",
+        pilot.phase,
+        caught.map_or("none".to_owned(), |w| w.to_string()),
+        if on_deck {
+            "on the deck"
+        } else {
+            "not on the deck"
+        },
+        if sim.structure.destroyed {
+            ", DESTROYED"
+        } else {
+            ""
+        }
+    )
+}
+
 /// Open sea at z = 0 (`--test` ditching).
 struct Sea;
 
@@ -2369,7 +2438,16 @@ fn main() {
                     &objects::season(&vfs, &args.map),
                 );
                 let s2 = world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0);
-                Some(trap_test(s2, &field, &mut fresh, chief, h))
+                let trap = trap_test(s2, &field, &mut fresh, chief, h);
+                let mut fresh = ground::Ground::from_mission(
+                    &vfs,
+                    &fms,
+                    mission.as_ref().unwrap(),
+                    &field,
+                    &objects::season(&vfs, &args.map),
+                );
+                let ai = carrier_ai_landing_test(assets.fm.clone(), &field, &mut fresh, chief);
+                Some(format!("{trap}\n{ai}"))
             }
             _ => None,
         };

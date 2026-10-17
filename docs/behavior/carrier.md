@@ -58,5 +58,18 @@ Wing folding (`CWingFold`, rate `1 / WingPeriod`, default 0.1 per second) is a c
 (approach 15 m behind the stern at 120 km/h airspeed): F4F-3 from the CVE-55 lifts off after a
 ~250 m run (deck plus ship's way) and traps on wire 7, stopping ~25 m forward of it.
 
-Not yet in OpenIL2: AI landings on carriers (they use land airfields), the landing pattern
-(`landWay`), deck parking after landing, the drawn wire, ship rocking and the collision mesh.
+## AI landings on carriers
+A `LANDING … <N>_Chief <unit>` waypoint lands on that ship. The runtime lowers the hook with the gear,
+aims for at least ship speed + 10 m/s, and below 10 m only softens sinking beyond 5.5 m/s (×0.95 per
+tick) and damps climbing (×0.91); after stopping, the aircraft folds its wings, raises the hook and is
+removed after 25 s.
+
+OpenIL2: the touchdown point is the deck's `_RWY_LDG` spot, recomputed every tick as the ship moves,
+with the ship's heading as the landing direction. The approach (`ai.md`, "Landing") descends at the
+closing speed over that moving point, ends with the wheels 1 m over the spot (no flare: it flies onto
+the deck and the hook stops it) and holds the centre line tighter close in (`0.004 + 2/distance` per
+metre of offset). `--test` on a carrier mission also flies this: the AI F4F-3 and SBD-3 trap on the
+CVE-55 and park on the deck.
+
+Not yet in OpenIL2: the landing pattern (`landWay`), deck parking after landing, the drawn wire, ship
+rocking and the collision mesh.

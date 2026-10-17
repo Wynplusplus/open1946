@@ -67,6 +67,12 @@ pub struct AiPilot {
     land_thr_i: f64,
     /// Touched down: rolling out (a bounce doesn't restart the approach).
     rollout: bool,
+    /// Landing on a carrier (column and unit of the `LANDING` waypoint): the hook goes down and
+    /// the touchdown point moves with the ship.
+    pub landing_ship: Option<(String, usize)>,
+    /// The touchdown point at the last step and its velocity (a moving deck).
+    prev_at: Option<DVec3>,
+    at_vel: DVec3,
 }
 
 impl AiPilot {
@@ -96,6 +102,9 @@ impl AiPilot {
             pitch_i: 3.0,
             land_thr_i: 0.4,
             rollout: false,
+            landing_ship: None,
+            prev_at: None,
+            at_vel: DVec3::ZERO,
         }
     }
 
@@ -246,10 +255,21 @@ impl AiPilot {
         dt: f64,
     ) -> Inputs {
         let dir = DVec3::new(heading.cos(), heading.sin(), 0.0);
+        if let Some(p) = self.prev_at.replace(at) {
+            if dt > 0.0 {
+                self.at_vel = (at - p) / dt;
+            }
+        }
         let to = at - s.pos;
         let along = -to.truncate().dot(dir.truncate()); // < 0 before the threshold
         let dist = -along;
         let side = to.truncate().perp_dot(dir.truncate());
+        // Near the touchdown point heights count from it (a carrier's deck stands above the sea).
+        let ground = if (-3000.0..1500.0).contains(&along) {
+            ground.max(at.z)
+        } else {
+            ground
+        };
         let agl = s.pos.z - ground;
         // 1.25 × VminFLAPS (`vmin_flaps` holds 0.87 of it in m/s), and fast enough for a lift
         // coefficient of 1.1.
@@ -263,7 +283,7 @@ impl AiPilot {
                 s.ac.gear
                     .iter()
                     .any(|g| g.kind == il2_fm::ContactKind::Castor && g.pos.x > 0.0);
-            let v = s.vel.length();
+            let v = (s.vel - s.gear.surface_vel).length();
             self.ct.throttle = 0.0;
             self.ct.brakes = if !s.on_ground {
                 0.0
@@ -317,18 +337,39 @@ impl AiPilot {
                 return self.steer(s, gate, ground, terrain, dt);
             }
         }
-        // Final: glide path, gear and flaps.
+        // Final: glide path, gear and flaps (and the hook for a carrier).
         self.on_final = true;
         self.ct.gear = 1.0;
         self.ct.flaps = 1.0;
+        if self.landing_ship.is_some() {
+            self.ct.arrestor = 1.0;
+        }
         self.stab_speed = vref;
-        let glide = at.z + (dist.max(0.0) * 4f64.to_radians().tan());
+        // On a carrier the path ends with the wheels 1 m over the landing spot (no flare: the
+        // aircraft flies onto the deck and the hook stops it).
+        let ship = self.landing_ship.is_some();
+        let wheel_h = -s
+            .ac
+            .gear
+            .iter()
+            .filter(|g| g.kind != il2_fm::ContactKind::Body)
+            .map(|g| g.pos.z)
+            .fold(0.0f64, f64::min);
+        let glide = at.z
+            + if ship { wheel_h + 1.0 } else { 0.0 }
+            + (dist.max(0.0) * 4f64.to_radians().tan());
         self.stab_alt = glide;
         // Localizer: intercept the centre line at up to 30°, banking at most 20°.
         let mut ct = self.ct;
         let wv = s.wtrue + s.w;
         let bank = s.bank_deg();
-        let cmd = heading + (-side * 0.004).clamp(-0.52, 0.52);
+        // Closer in the centre line is held tighter (a deck is narrow).
+        let k_side = if ship {
+            0.004 + 2.0 / dist.max(100.0)
+        } else {
+            0.004
+        };
+        let cmd = heading + (-side * k_side).clamp(-0.52, 0.52);
         let herr = wrap_rad(cmd - hdg).to_degrees();
         let bank_cmd = (-2.0 * herr).clamp(-20.0, 20.0);
         ct.aileron = (0.03 * (bank_cmd - bank) - 0.3 * wv.x).clamp(-1.0, 1.0);
@@ -380,11 +421,15 @@ impl AiPilot {
         };
         // Flare: level off about 1 m over the runway and hold off while the speed bleeds away,
         // the attitude rising to the touchdown attitude.
-        let flare = agl_w < 12.0 || self.rollout;
+        let flare = !ship && (agl_w < 12.0 || self.rollout);
         let vz_t = if flare {
             -(0.3 + 0.3 * (agl_w - 0.5).max(0.0)).min(6.0)
         } else {
-            (-v * 4f64.to_radians().tan() + 0.15 * (glide - s.pos.z)).clamp(-6.0, 2.0)
+            {
+                // Down the path at the closing speed over the (possibly moving) touchdown point.
+                let closing = (s.vel - self.at_vel).dot(dir).max(0.0);
+                (-closing * 4f64.to_radians().tan() + 0.15 * (glide - s.pos.z)).clamp(-6.0, 2.0)
+            }
         };
         let e = vz_t - s.vel.z;
         // Cascade: the vertical speed error sets a pitch attitude (about 1° per m/s plus a learnt
@@ -393,7 +438,7 @@ impl AiPilot {
         let learn = if flare { 1.5 } else { 0.4 };
         self.pitch_i = (self.pitch_i + learn * e * dt).clamp(-8.0, max_pitch);
         let pitch_cmd = (self.pitch_i + 1.2 * e).clamp(-10.0, max_pitch);
-        if agl < 10.0 {
+        if agl < 10.0 && !ship {
             // The runtime's touchdown zone (with `constrain`): throttle closed, the stick eased
             // back while the nose is below max(gear pitch − 2°, 5°) under 7 m, with rate damping.
             let pitch = (s.ori * DVec3::X).z.clamp(-1.0, 1.0).asin().to_degrees();
@@ -427,9 +472,20 @@ impl AiPilot {
     /// 0.6·VminFLAPS, sinking is damped (×0.94 per tick beyond 0.6 m/s, at most 2.5 m/s) and
     /// climbing too (×0.91 per tick). Call after each tick.
     pub fn constrain(&self, s: &mut Sim, ground: f64) {
-        if !matches!(self.phase, Phase::Landing { .. }) || !self.on_final {
+        let Phase::Landing { at, heading } = self.phase else {
+            return;
+        };
+        if !self.on_final {
             return;
         }
+        let along = (s.pos - at)
+            .truncate()
+            .dot(glam::DVec2::new(heading.cos(), heading.sin()));
+        let ground = if (-3000.0..1500.0).contains(&along) {
+            ground.max(at.z)
+        } else {
+            ground
+        };
         let agl = s.pos.z - ground;
         if agl > 60.0 {
             return;
@@ -448,11 +504,18 @@ impl AiPilot {
         }
         if s.vel.length() > 0.6 * s.ac.vmin_flaps && agl < 10.0 {
             let mut vz = s.vel.z;
-            if vz < -0.6 {
-                vz *= 0.94;
-            }
-            if vz < -2.5 {
-                vz = -2.5;
+            if self.landing_ship.is_some() {
+                // On a carrier only hard sinking is softened.
+                if vz < -5.5 {
+                    vz *= 0.95;
+                }
+            } else {
+                if vz < -0.6 {
+                    vz *= 0.94;
+                }
+                if vz < -2.5 {
+                    vz = -2.5;
+                }
             }
             if vz > 0.0 {
                 vz *= 0.91;
