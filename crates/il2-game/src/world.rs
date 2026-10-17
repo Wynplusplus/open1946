@@ -8,18 +8,6 @@ use il2_render::scene::Loader;
 use il2_render::MeshData;
 use il2_vfs::Vfs;
 
-/// The terrain as the flight model feels it: heights and open water.
-pub struct Surface<'a>(pub &'a HeightField);
-
-impl il2_fm::gear::Ground for Surface<'_> {
-    fn height(&self, x: f64, y: f64) -> f64 {
-        self.0.height_at(x, y)
-    }
-    fn is_water(&self, x: f64, y: f64) -> bool {
-        self.0.is_water(x, y)
-    }
-}
-
 /// Marks the water pixels of `field` from the land-type map and its water slots.
 pub fn set_water(field: &mut HeightField, types: &(u32, u32, Vec<u8>), water: &[bool; 32]) {
     if types.0 as usize != field.width || types.1 as usize != field.height {
@@ -244,10 +232,12 @@ pub fn load_aircraft_with(
         fighter: false,
         turret_arcs: None,
     };
+    // The arrestor hook's contact point is taken lowered as well.
     let down = pose(
         &assets_for_pose,
         &il2_fm::Inputs {
             gear: 1.0,
+            arrestor: 1.0,
             ..Default::default()
         },
     );
@@ -304,6 +294,10 @@ pub fn load_aircraft_with(
         gear,
     )
     .map_err(|e| e.to_string())?;
+    fm.arrestor_hook = hooks
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("_ClipAGear"))
+        .map(|(_, p)| p.as_dvec3());
     // The runtime picks these rocket burn rates by aircraft class (docs/behavior/engine.md).
     let short = class.rsplit('.').next().unwrap_or(class);
     let lineage = classes.lineage(class);
@@ -432,6 +426,8 @@ pub fn pose_rig(
             Channel::Aileron => ct.aileron,
             Channel::Flaps => ct.flaps,
             Channel::Gear => ct.gear,
+            Channel::Arrestor => ct.arrestor,
+            Channel::WingFold => ct.wing_fold,
         } as f32;
         for (name, st) in t.eval(x) {
             if let Some(i) = rig.find(name) {

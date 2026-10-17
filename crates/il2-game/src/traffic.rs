@@ -77,7 +77,9 @@ impl Traffic {
         m: &Mission,
         field: &HeightField,
         runways: &[il2_formats::statics::Placed],
+        ships: Option<&crate::ground::Ground>,
     ) -> Traffic {
+        let slots = deck_slots(m);
         let armies = armies(vfs);
         let classes_db = il2_data::Classes::new(vfs, &fms.keys);
         let mut armoury = weapons::Armoury::default();
@@ -117,7 +119,13 @@ impl Traffic {
                     continue;
                 }
                 let a = &t.classes[class].assets;
-                let (sim, mut pilot) = spawn(a, wing, i, field, runways);
+                let deck = ships.zip(slots.get(&(wing.name.clone(), i)));
+                let (sim, mut pilot) = match deck.and_then(|(g, &(ref chief, unit, slot))| {
+                    spawn_on_deck(a, wing, i, g, chief, unit, slot)
+                }) {
+                    Some(sp) => sp,
+                    None => spawn(a, wing, i, field, runways),
+                };
                 if let Some(l) = wing
                     .waypoints
                     .iter()
@@ -346,6 +354,7 @@ impl Traffic {
     pub fn step(
         &mut self,
         field: &HeightField,
+        ships: Option<&crate::ground::Ground>,
         dt: f64,
         player: (DVec3, DVec3, u8, bool),
         rng: &mut Rng,
@@ -435,7 +444,7 @@ impl Traffic {
                     }
                 }
             };
-            p.sim.tick(&inputs, &crate::world::Surface(field));
+            p.sim.tick(&inputs, &crate::ground::Surface(field, ships));
             if alive {
                 let enemies: Vec<(DVec3, DVec3)> = contacts
                     .iter()
@@ -609,6 +618,55 @@ fn engage(
         }
     }
     best.map(|(id, _)| (id, true))
+}
+
+/// Deck slots of the flights taking off from carriers (`TAKEOFF … N_Chief unit`): per (wing, plane)
+/// the carrier column, unit and slot, numbered per carrier in mission order (OpenIL2).
+pub fn deck_slots(m: &Mission) -> HashMap<(String, usize), (String, usize, usize)> {
+    let mut next: HashMap<(String, usize), usize> = HashMap::new();
+    let mut out = HashMap::new();
+    for wing in &m.wings {
+        let Some(w0) = wing.waypoints.first() else {
+            continue;
+        };
+        let Some((chief, unit)) = w0
+            .target
+            .clone()
+            .filter(|(t, _)| t.ends_with("_Chief") && w0.kind.starts_with("TAKEOFF"))
+        else {
+            continue;
+        };
+        let n = next.entry((chief.clone(), unit as usize)).or_insert(0);
+        for i in 0..wing.planes as usize {
+            out.insert((wing.name.clone(), i), (chief.clone(), unit as usize, *n));
+            *n += 1;
+        }
+    }
+    out
+}
+
+/// An aircraft starting on a carrier deck in slot `slot`, waiting its turn to take off.
+fn spawn_on_deck(
+    a: &AircraftAssets,
+    wing: &Wing,
+    i: usize,
+    ships: &crate::ground::Ground,
+    chief: &str,
+    unit: usize,
+    slot: usize,
+) -> Option<(Sim, AiPilot)> {
+    let (at, heading, vel) =
+        ships.carrier_takeoff(chief, unit, slot, a.fm.length, a.fm.wingspan)?;
+    let (h, pitch) = a.parked;
+    let ori =
+        glam::DQuat::from_rotation_z(heading) * glam::DQuat::from_rotation_y(-pitch.to_radians());
+    let mut sim = Sim::new(a.fm.clone(), at + DVec3::new(0.0, 0.0, h), ori, 0.0);
+    sim.set_engines_idle(true);
+    sim.vel = vel;
+    let skill = wing.skills.get(i).copied().unwrap_or(1);
+    let mut p = AiPilot::new(wing.waypoints.clone(), 0, i, skill);
+    p.phase = Phase::Lineup(3.0 + 15.0 * slot as f64);
+    Some((sim, p))
 }
 
 /// Where and how a wing's `i`-th aircraft starts: lined up on the runway for a `TAKEOFF` waypoint

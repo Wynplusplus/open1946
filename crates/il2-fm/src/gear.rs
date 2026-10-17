@@ -14,6 +14,14 @@ pub trait Ground {
     fn is_water(&self, _x: f64, _y: f64) -> bool {
         false
     }
+    /// A ship's deck at most 20 m below `(x, y, z)`: its height and velocity.
+    fn deck(&self, _x: f64, _y: f64, _z: f64) -> Option<(f64, DVec3)> {
+        None
+    }
+    /// Arrestor wires of the deck near `(x, y)`: world ends, in a stable order per ship.
+    fn wires(&self, _x: f64, _y: f64) -> Vec<(DVec3, DVec3)> {
+        Vec::new()
+    }
 }
 
 impl<F: Fn(f64, f64) -> f64> Ground for F {
@@ -59,6 +67,14 @@ pub struct GearState {
     pub hits: Vec<(usize, f64)>,
     /// Points in the water this step.
     pub water_points: usize,
+    /// Velocity of the surface under the aircraft (a ship's deck), m/s.
+    pub surface_vel: DVec3,
+    /// Standing on a deck this step.
+    pub on_deck: bool,
+    /// The arrestor wire the hook holds (index into `Ground::wires`).
+    pub towed: Option<usize>,
+    /// The hook's world position at the previous tick.
+    prev_hook: Option<DVec3>,
     /// Current buoyancy (`SinkFactor`, slowly lost by landplanes); `None` until first in water.
     sink: Option<f64>,
 }
@@ -76,10 +92,17 @@ impl Default for GearState {
             sinking: [0.0; 3],
             hits: Vec::new(),
             water_points: 0,
+            surface_vel: DVec3::ZERO,
+            on_deck: false,
+            towed: None,
+            prev_hook: None,
             sink: None,
         }
     }
 }
+
+/// How far the lowered arrestor hook may hang below its posed point (OpenIL2), m.
+const HOOK_DROOP: f64 = 1.5;
 
 /// The runtime's two-step limit `if x > m { m }; if x < -m { -m }` (also defined for negative `m`).
 fn lim(x: f64, m: f64) -> f64 {
@@ -117,18 +140,25 @@ impl GearState {
         self.sinking = [0.0; 3];
         self.hits.clear();
         self.water_points = 0;
-        let h0 = ground.height(c.pos.x, c.pos.y);
+        let deck = ground.deck(c.pos.x, c.pos.y, c.pos.z);
+        self.on_deck = deck.is_some();
+        self.surface_vel = deck.map_or(DVec3::ZERO, |d| d.1);
+        let h0 = deck.map_or_else(|| ground.height(c.pos.x, c.pos.y), |d| d.0);
         if c.pos.z - h0 > 50.0 {
             return (f, m);
         }
-        // Ground plane at the point below the aircraft.
+        // Ground plane at the point below the aircraft (decks are level).
         let e = 1.0;
-        let nw = DVec3::new(
-            ground.height(c.pos.x - e, c.pos.y) - ground.height(c.pos.x + e, c.pos.y),
-            ground.height(c.pos.x, c.pos.y - e) - ground.height(c.pos.x, c.pos.y + e),
-            2.0 * e,
-        )
-        .normalize();
+        let nw = if deck.is_some() {
+            DVec3::Z
+        } else {
+            DVec3::new(
+                ground.height(c.pos.x - e, c.pos.y) - ground.height(c.pos.x + e, c.pos.y),
+                ground.height(c.pos.x, c.pos.y - e) - ground.height(c.pos.x, c.pos.y + e),
+                2.0 * e,
+            )
+            .normalize()
+        };
         let inv = c.ori.inverse();
         let normal = inv * nw;
         let pn = inv * DVec3::new(0.0, 0.0, h0 - c.pos.z);
@@ -138,10 +168,10 @@ impl GearState {
         }
         let forward = DVec3::Y.cross(normal).normalize();
         let right = normal.cross(forward);
-        let vrel = c.vel; // no moving decks
+        let vrel = c.vel - self.surface_vel;
         let fd = (inv * -vrel).normalize_or_zero();
         let mass_coeff = (4e-4 * c.mass).min(1.0);
-        let water = ground.is_water(c.pos.x, c.pos.y);
+        let water = deck.is_none() && ground.is_water(c.pos.x, c.pos.y);
         if water {
             self.roughness = 0.5;
         }
@@ -340,6 +370,71 @@ impl GearState {
         self.wheels_on_ground + self.points_on_ground + self.water_points > 0
     }
 
+    /// The arrestor wire's pull on the lowered hook at `hook` (body coordinates), body force and
+    /// moment (`docs/behavior/carrier.md`, "Arrestor wires"). `tick`: the tick's first evaluation,
+    /// which catches and releases wires.
+    pub fn arrestor(
+        &mut self,
+        hook: DVec3,
+        lowered: f64,
+        ground: &impl Ground,
+        c: &GearInputs,
+        tick: bool,
+    ) -> (DVec3, DVec3) {
+        let mut world = c.pos + c.ori * hook;
+        let wires = if self.on_deck {
+            ground.wires(c.pos.x, c.pos.y)
+        } else {
+            Vec::new()
+        };
+        // OpenIL2: the lowered hook hangs up to HOOK_DROOP below its posed point, riding on the deck.
+        if lowered > 0.5 {
+            let deck = ground.deck(world.x, world.y, world.z).map(|d| d.0);
+            world.z = (world.z - HOOK_DROOP * lowered).max(deck.unwrap_or(f64::MIN));
+        }
+        let vrel = c.vel - self.surface_vel;
+        if tick {
+            let prev = self.prev_hook.replace(world);
+            if self.towed.is_some_and(|w| w >= wires.len()) {
+                self.towed = None;
+            }
+            if self.towed.is_none() && lowered > 0.1 && vrel.length_squared() > 10.0 {
+                if let Some(prev) = prev {
+                    self.towed = wires.iter().position(|(a, b)| {
+                        prev.z < a.z + 0.5 * (b.z - a.z) + 0.2
+                            && crosses(
+                                a.truncate(),
+                                b.truncate(),
+                                prev.truncate(),
+                                world.truncate(),
+                            )
+                    });
+                }
+            }
+            if self.towed.is_some() && vrel.length_squared() < 1.0 && self.rand(0.0, 1.0) < 0.008 {
+                self.towed = None;
+            }
+        }
+        let Some(w) = self.towed else {
+            return (DVec3::ZERO, DVec3::ZERO);
+        };
+        let (a, b) = wires[w];
+        let inv = c.ori.inverse();
+        let mid = inv * ((a + b) * 0.5 - c.pos);
+        let v0 = mid - hook;
+        if v0.x > 0.0 {
+            // The hook went back over the wire.
+            self.towed = None;
+            return (DVec3::ZERO, DVec3::ZERO);
+        }
+        // Pulls only while the aircraft still rolls forward over the deck.
+        if (inv * vrel).x <= 0.0 {
+            return (DVec3::ZERO, DVec3::ZERO);
+        }
+        let f = v0 * 1000.0;
+        (f, hook.cross(f * 0.3))
+    }
+
     /// Force of the water on a point `d` below its surface (`docs/behavior/gear.md`, "Water"): buoyancy
     /// growing with depth and forward speed, heave damping and drag; hard enough impacts are hits.
     #[allow(clippy::too_many_arguments)]
@@ -390,4 +485,12 @@ impl GearState {
         }
         tn
     }
+}
+
+/// Whether segments `a–b` and `p–q` cross in the plane.
+fn crosses(a: glam::DVec2, b: glam::DVec2, p: glam::DVec2, q: glam::DVec2) -> bool {
+    let side = |o: glam::DVec2, u: glam::DVec2, v: glam::DVec2| (u - o).perp_dot(v - o);
+    let (d1, d2) = (side(a, b, p), side(a, b, q));
+    let (d3, d4) = (side(p, q, a), side(p, q, b));
+    d1 * d2 <= 0.0 && d3 * d4 <= 0.0 && (d1 != 0.0 || d2 != 0.0)
 }

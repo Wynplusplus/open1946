@@ -23,6 +23,10 @@ pub struct Inputs {
     pub airbrake: f64,
     /// Tail wheel lock (aircraft with `CLockTailwheel`).
     pub tail_lock: bool,
+    /// Arrestor hook lever and its position, 0 up .. 1 down (`CArrestorHook`).
+    pub arrestor: f64,
+    /// Wing fold lever and position, 0 spread .. 1 folded (`CWingFold`).
+    pub wing_fold: f64,
 }
 
 /// The runtime's control filter: exponential approach with time constant `tau`, plus a linear
@@ -378,6 +382,25 @@ impl Sim {
             );
         }
         self.ct.airbrake = self.airbrake;
+        if c.arrestor {
+            let target = if input.arrestor > 0.5 { 1.0 } else { 0.0 };
+            self.ct.arrestor = filter(dt, target, self.ct.arrestor, 999.9, 0.2);
+        }
+        if c.wing_fold {
+            // Folds only standing on the ground.
+            let target = if input.wing_fold > 0.5 && self.on_ground {
+                1.0
+            } else {
+                input.wing_fold.min(self.ct.wing_fold)
+            };
+            self.ct.wing_fold = filter(
+                dt,
+                target.clamp(0.0, 1.0),
+                self.ct.wing_fold,
+                999.9,
+                c.wing_rate,
+            );
+        }
         self.wing.set_flaps(self.ct.flaps);
 
         let ac = &self.ac;
@@ -717,8 +740,13 @@ impl Sim {
             || sum_m.length_squared() > 2.0 * km
             || sum_f.length_squared() > 80.0 * km
             || self.w.length_squared() > 1.4e-4 * k
-            || self.vel.length_squared() > 0.09 * k);
+            || (self.vel - self.gear.surface_vel).length_squared() > 0.09 * k);
         let n = if stuck { 0 } else { n };
+        if stuck {
+            // Held by friction: carried along with a moving deck.
+            self.vel = self.gear.surface_vel;
+            self.pos += self.vel * dt;
+        }
         let sub = dt / n.max(1) as f64;
         for k in 0..n {
             let f = af + gear_f.0 + self.ori.inverse() * DVec3::new(0.0, 0.0, -gravity);
@@ -774,7 +802,15 @@ impl Sim {
             time: self.ticks as f64 * TICK,
             dt,
         };
-        self.gear.forces(&self.ac.gear, ground, &c)
+        let (mut f, mut m) = self.gear.forces(&self.ac.gear, ground, &c);
+        if let (Some(hook), true) = (self.ac.arrestor_hook, self.ac.controls.arrestor) {
+            let (fa, ma) = self
+                .gear
+                .arrestor(hook, self.ct.arrestor, ground, &c, dt > 0.0);
+            f += fa;
+            m += ma;
+        }
+        (f, m)
     }
 
     /// Bank angle in degrees, positive when banked right.

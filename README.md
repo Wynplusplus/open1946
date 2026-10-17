@@ -49,7 +49,7 @@ target/release/il2 parse-all --names names.txt
 target/release/openil2
 
 # Fly (arrows: stick, Z/X: rudder, PageUp/PageDown or 1-9/0/W: throttle, F/V: flaps, G: gear, B: brakes,
-#      I: start/stop engines, R: radiator (auto / 33 / 67 / 100 %), W: emergency boost, ,/.: elevator trim, [/]: aileron trim, ;/': rudder trim, N: dive brake, L: tail wheel lock, O: prop pitch auto/manual, Q/E: prop lever, H/J: mixture, M: magnetos,
+#      I: start/stop engines, R: radiator (auto / 33 / 67 / 100 %), W: emergency boost, ,/.: elevator trim, [/]: aileron trim, ;/': rudder trim, N: dive brake, L: tail wheel lock, O: prop pitch auto/manual, Q/E: prop lever, H/J: mixture, M: magnetos, Y: arrestor hook, T: wing fold,
 #      Space: guns, Enter: cannons, U: rockets, K: bombs,
 #      F1: cockpit (mouse drag looks around), F2: free orbit view with mouse drag and wheel, F3: chase view)
 target/release/openil2 --aircraft air.BF_109G6 --map maps/Slovakia/load.ini --at 214500,86500 --agl 300

@@ -48,6 +48,11 @@ pub struct Controls {
     pub tailwheel_lock: bool,
     /// Speeds (m/s) above which aileron, rudder and elevator travel is limited.
     pub thresholds: [f64; 3],
+    /// `CArrestorHook`, `CWingFold`.
+    pub arrestor: bool,
+    pub wing_fold: bool,
+    /// Wing folding rate, travel per second (`1 / WingPeriod`, default 0.1).
+    pub wing_rate: f64,
 }
 
 impl Default for Controls {
@@ -62,6 +67,9 @@ impl Default for Controls {
             diff_brakes: true,
             tailwheel_lock: false,
             thresholds: [100.0, 100.0, 112.0],
+            arrestor: false,
+            wing_fold: false,
+            wing_rate: 0.1,
         }
     }
 }
@@ -97,6 +105,13 @@ impl Controls {
                 0.27778 * get("CRudderThreshold", 360.0),
                 0.27778 * get("CElevatorThreshold", 403.2),
             ],
+            arrestor: flag("CArrestorHook", false),
+            wing_fold: flag("CWingFold", false),
+            wing_rate: fmd
+                .section_ci("Controls")
+                .and_then(|s| s.get_ci("WingPeriod"))
+                .and_then(il2_formats::sectfile::atof)
+                .map_or(0.1, |p| 1.0 / f64::from(p).max(0.1)),
         }
     }
 }
@@ -159,6 +174,8 @@ pub struct Aircraft {
     pub sink_factor: f64,
     /// `[Aircraft] Seaplane`.
     pub seaplane: bool,
+    /// The lowered arrestor hook's contact point (`_ClipAGear`), body coordinates.
+    pub arrestor_hook: Option<DVec3>,
 }
 
 fn num(f: &SectFile, s: &'static str, k: &'static str) -> Result<f64, Error> {
@@ -236,6 +253,7 @@ impl Aircraft {
             gc_gear_shift: 0.0,
             sink_factor: 1.0,
             seaplane: false,
+            arrestor_hook: None,
         }
     }
 
@@ -412,6 +430,7 @@ impl Aircraft {
             gc_gear_shift: num_or(fmd, "Arm", "GC_Gear_Shift", 0.0),
             sink_factor: num_or(fmd, "Gear", "SinkFactor", 1.0),
             seaplane: num_or(fmd, "Aircraft", "Seaplane", 0.0) != 0.0,
+            arrestor_hook: None,
         })
     }
 

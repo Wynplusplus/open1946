@@ -24,6 +24,8 @@ struct UnitClass {
     ship: bool,
     /// Armour, m (`PanzerBodyTop`; ships: none, they take blasts only).
     armour: f64,
+    /// Flight deck of airport ships (carriers).
+    deck: Option<crate::deck::Deck>,
 }
 
 pub struct Unit {
@@ -31,6 +33,8 @@ pub struct Unit {
     pub alive: bool,
     pub pos: DVec3,
     pub yaw: f64,
+    /// World velocity over the last step, m/s.
+    pub vel: DVec3,
     gpu: Option<GpuMesh>,
 }
 
@@ -48,6 +52,29 @@ pub struct Column {
 pub struct Ground {
     classes: Vec<UnitClass>,
     pub columns: Vec<Column>,
+}
+
+/// The terrain as the flight model feels it: heights, open water and the ships' decks.
+pub struct Surface<'a>(pub &'a HeightField, pub Option<&'a Ground>);
+
+impl il2_fm::gear::Ground for Surface<'_> {
+    fn height(&self, x: f64, y: f64) -> f64 {
+        self.0.height_at(x, y)
+    }
+    fn is_water(&self, x: f64, y: f64) -> bool {
+        self.0.is_water(x, y)
+    }
+    fn deck(&self, x: f64, y: f64, z: f64) -> Option<(f64, DVec3)> {
+        self.1?.deck_at(DVec3::new(x, y, z))
+    }
+    fn wires(&self, x: f64, y: f64) -> Vec<(DVec3, DVec3)> {
+        self.1.map_or_else(Vec::new, |g| {
+            g.wires_near(DVec3::new(x, y, 0.0))
+                .into_iter()
+                .map(|(a, b, _)| (a, b))
+                .collect()
+        })
+    }
 }
 
 fn ini(vfs: &Vfs, p: &str) -> SectFile {
@@ -96,6 +123,7 @@ impl Ground {
                         alive: true,
                         pos: DVec3::ZERO,
                         yaw: 0.0,
+                        vel: DVec3::ZERO,
                         gpu: None,
                     });
                 }
@@ -125,6 +153,20 @@ impl Ground {
             g.classes.len()
         );
         g.place_all(field);
+        // Moving from the start (ships carry the aircraft on their decks).
+        for col in &mut g.columns {
+            let (i, _) = segment_at(&col.road, col.s);
+            let lead = &g.classes[col.units[0].class];
+            let speed = col.road[i].speed.unwrap_or(lead.speed).max(0.5);
+            let moving = col.s < road_length(&col.road) && col.road[0].wait <= 0.0;
+            for u in &mut col.units {
+                u.vel = if moving {
+                    DVec3::new(u.yaw.cos(), u.yaw.sin(), 0.0) * speed
+                } else {
+                    DVec3::ZERO
+                };
+            }
+        }
         if std::env::var_os("IL2_TRACE").is_some() {
             for c in &g.columns {
                 let u = &c.units[0];
@@ -192,7 +234,90 @@ impl Ground {
                 }
             }
         }
+        let before: Vec<DVec3> = self
+            .columns
+            .iter()
+            .flat_map(|c| c.units.iter().map(|u| u.pos))
+            .collect();
         self.place_all(field);
+        let mut k = 0;
+        for col in &mut self.columns {
+            for u in &mut col.units {
+                u.vel = if dt > 0.0 {
+                    (u.pos - before[k]) / dt
+                } else {
+                    DVec3::ZERO
+                };
+                k += 1;
+            }
+        }
+    }
+
+    /// The carrier deck under `p` (within 20 m below it): its height and velocity.
+    pub fn deck_at(&self, p: DVec3) -> Option<(f64, DVec3)> {
+        let mut best: Option<(f64, DVec3)> = None;
+        for col in &self.columns {
+            for u in &col.units {
+                let Some(deck) = &self.classes[u.class].deck else {
+                    continue;
+                };
+                let rel = p - u.pos;
+                if !u.alive || rel.truncate().length() > deck.radius() as f64 {
+                    continue;
+                }
+                let local = DQuat::from_rotation_z(-u.yaw) * rel;
+                if let Some(h) = deck.surface(local.x as f32, local.y as f32, local.z as f32) {
+                    let z = u.pos.z + h as f64;
+                    if best.is_none_or(|(b, _)| z > b) {
+                        best = Some((z, u.vel));
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Where aircraft `slot` (`length` × `span` m) of a flight taking off from unit `unit` of
+    /// column `chief` starts: world position on the deck, heading (radians, counter-clockwise from
+    /// east) and the ship's velocity.
+    pub fn carrier_takeoff(
+        &self,
+        chief: &str,
+        unit: usize,
+        slot: usize,
+        length: f64,
+        span: f64,
+    ) -> Option<(DVec3, f64, DVec3)> {
+        let col = self.columns.iter().find(|c| c.name == chief)?;
+        let u = col.units.get(unit).or(col.units.first())?;
+        let deck = self.classes[u.class].deck.as_ref()?;
+        let (p, heading) = deck.takeoff_slot(slot, length as f32, span as f32)?;
+        let at = u.pos + DQuat::from_rotation_z(u.yaw) * p.as_dvec3();
+        Some((at, u.yaw + heading as f64, u.vel))
+    }
+
+    /// Arrestor wires of the carriers near `p` in world coordinates, with the ship's velocity.
+    pub fn wires_near(&self, p: DVec3) -> Vec<(DVec3, DVec3, DVec3)> {
+        let mut out = Vec::new();
+        for col in &self.columns {
+            for u in &col.units {
+                let Some(deck) = &self.classes[u.class].deck else {
+                    continue;
+                };
+                if !u.alive || (p - u.pos).truncate().length() > deck.radius() as f64 + 50.0 {
+                    continue;
+                }
+                let rot = DQuat::from_rotation_z(u.yaw);
+                for (a, b) in &deck.wires {
+                    out.push((
+                        u.pos + rot * a.as_dvec3(),
+                        u.pos + rot * b.as_dvec3(),
+                        u.vel,
+                    ));
+                }
+            }
+        }
+        out
     }
 
     /// Hit targets for the living units.
@@ -365,8 +490,10 @@ fn unit_class(
             .and_then(il2_formats::sectfile::atof)
             .map(f64::from)
     };
+    let mut airport = false;
     let (him, speed, spacing, ship, armour) = if class.contains(".ships.") {
         let s = ships.section(short)?;
+        airport = num(s, "IsAirport").is_some_and(|v| v != 0.0);
         (
             s.get("Mesh")?.trim().to_owned(),
             num(s, "Speed").map_or(5.0, |v| v / 3.6 * 2.0),
@@ -415,6 +542,16 @@ fn unit_class(
     } else {
         nodes
     };
+    let deck = if airport {
+        let hooks = loader.hier_hook_frames(&him, &nodes).unwrap_or_default();
+        let d = crate::deck::Deck::build(&mesh, &nodes, &hooks);
+        if d.is_none() {
+            eprintln!("warning: carrier {short}: no deck surface");
+        }
+        d
+    } else {
+        None
+    };
     Some(UnitClass {
         mesh: Some(mesh),
         gpu: None,
@@ -424,5 +561,6 @@ fn unit_class(
         spacing,
         ship,
         armour,
+        deck,
     })
 }

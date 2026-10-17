@@ -14,21 +14,27 @@ pub enum Channel {
     Aileron,
     Flaps,
     Gear,
+    /// `moveArrestorHook`: 0 up .. 1 down.
+    Arrestor,
+    /// `moveWingFold(HierMesh, float)`: 0 spread .. 1 folded.
+    WingFold,
 }
 
 impl Channel {
-    pub const ALL: [Channel; 5] = [
+    pub const ALL: [Channel; 7] = [
         Channel::Rudder,
         Channel::Elevator,
         Channel::Aileron,
         Channel::Flaps,
         Channel::Gear,
+        Channel::Arrestor,
+        Channel::WingFold,
     ];
 
     fn range(self) -> (f32, f32) {
         match self {
             Channel::Rudder | Channel::Elevator | Channel::Aileron => (-1.0, 1.0),
-            Channel::Flaps | Channel::Gear => (0.0, 1.0),
+            Channel::Flaps | Channel::Gear | Channel::Arrestor | Channel::WingFold => (0.0, 1.0),
         }
     }
 }
@@ -88,7 +94,7 @@ pub fn default_track(ch: Channel) -> Track {
         Channel::Elevator => (&["VatorL_D0", "VatorR_D0"], -30.0),
         Channel::Aileron => (&["AroneL_D0", "AroneR_D0"], -30.0),
         Channel::Flaps => (&["Flap01_D0", "Flap02_D0", "Flap03_D0", "Flap04_D0"], -50.0),
-        Channel::Gear => (&[], 0.0),
+        Channel::Gear | Channel::Arrestor | Channel::WingFold => (&[], 0.0),
     };
     let nodes = names
         .iter()
@@ -1475,6 +1481,8 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
         Channel::Elevator => "moveElevator",
         Channel::Aileron => "moveAileron",
         Channel::Flaps => "moveFlap",
+        Channel::Arrestor => "moveArrestorHook",
+        Channel::WingFold => "moveWingFold",
         Channel::Gear => "",
     };
     // Gear: the static methods of the most derived class that declares them.
@@ -1491,8 +1499,14 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
     if ch == Channel::Gear && gear3.is_none() && gear1.is_none() {
         return None;
     }
+    // Wing folding: the variant on a HierMesh (the plain one also hides guns and pods).
+    let virt_desc = if ch == Channel::WingFold {
+        format!("({HM}F)V")
+    } else {
+        "(F)V".to_owned()
+    };
     let virt = (ch != Channel::Gear)
-        .then(|| m.resolve(None, virtual_name, "(F)V"))
+        .then(|| m.resolve(None, virtual_name, &virt_desc))
         .flatten();
     // Only use an override below the generic Aircraft base (whose bodies are empty).
     if ch != Channel::Gear
@@ -1515,7 +1529,12 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
             ok
         } else {
             let (c, mm) = virt?;
-            m.call(c, mm, vec![V::This, V::F(x)], 0).is_ok()
+            let args = if ch == Channel::WingFold {
+                vec![V::This, V::Hier, V::F(x)]
+            } else {
+                vec![V::This, V::F(x)]
+            };
+            m.call(c, mm, args, 0).is_ok()
         };
         if !ok {
             return None;

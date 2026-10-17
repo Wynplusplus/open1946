@@ -3,6 +3,7 @@ mod airframe;
 mod audio;
 mod cockpit;
 mod damage;
+mod deck;
 mod devicelink;
 mod dgen;
 mod effects;
@@ -704,7 +705,7 @@ fn hud_lines(s: &Sim, field: &HeightField) -> Vec<String> {
         ));
     }
     l.push(format!(
-        "Flaps {:.0}%   Gear {}   Trim {:+.2}{}{}",
+        "Flaps {:.0}%   Gear {}   Trim {:+.2}{}{}{}{}",
         s.ct.flaps * 100.0,
         if s.ct.gear > 0.98 {
             "down"
@@ -715,6 +716,20 @@ fn hud_lines(s: &Sim, field: &HeightField) -> Vec<String> {
         },
         s.trim[1] * 100.0,
         if s.airbrake > 0.5 { "   Air brake" } else { "" },
+        if s.ct.arrestor > 0.5 {
+            if s.gear.towed.is_some() {
+                "   Hook (wire)"
+            } else {
+                "   Hook down"
+            }
+        } else {
+            ""
+        },
+        if s.ct.wing_fold > 0.5 {
+            "   Wings folded"
+        } else {
+            ""
+        },
         if s.gear.water_points > 0 {
             "   In water"
         } else if s.on_ground {
@@ -1138,7 +1153,6 @@ impl Game {
             self.playback_step(dt);
         }
         let field = &self.field;
-        let ground = |x: f64, y: f64| field.height_at(x, y);
         let k = |c| self.keys.contains(&c);
         let dlf = self.dl_fire;
         let triggers = [
@@ -1148,7 +1162,8 @@ impl Game {
             k(KeyCode::KeyK) || dlf[3],
         ];
         while self.acc >= TICK {
-            self.sim.tick(&self.inputs, &world::Surface(field));
+            self.sim
+                .tick(&self.inputs, &ground::Surface(field, self.ground.as_ref()));
             let targets = build_targets(
                 &self.sim,
                 &self.assets,
@@ -1237,6 +1252,7 @@ impl Game {
                 let names = target_names(self.mission.as_ref(), self.ground.as_ref());
                 t.step(
                     field,
+                    self.ground.as_ref(),
                     TICK,
                     pl,
                     &mut self.combat.rng,
@@ -1495,6 +1511,12 @@ impl ApplicationHandler for Game {
                                 self.sim.set_prop(Some((cur + d).clamp(0.0, 1.0)));
                             }
                             KeyCode::KeyL => self.inputs.tail_lock = !self.inputs.tail_lock,
+                            KeyCode::KeyY => {
+                                self.inputs.arrestor = 1.0 - self.inputs.arrestor.round()
+                            }
+                            KeyCode::KeyT => {
+                                self.inputs.wing_fold = 1.0 - self.inputs.wing_fold.round()
+                            }
                             KeyCode::KeyJ => self.sim.change_mix(-0.05),
                             KeyCode::KeyH => self.sim.change_mix(0.05),
                             KeyCode::KeyM => self.sim.cycle_magneto(),
@@ -1640,7 +1662,11 @@ fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
 
 /// Full-throttle takeoff with a simple pilot: keep straight with rudder, raise the tail at 100 km/h,
 /// rotate at 170 km/h. Reports lift-off speed and ground roll.
-fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
+fn takeoff_test(
+    mut sim: Sim,
+    field: &HeightField,
+    mut ships: Option<&mut ground::Ground>,
+) -> String {
     let start = sim.pos;
     let heading0 = (sim.ori * DVec3::X).truncate().normalize();
     let mut inputs = Inputs {
@@ -1649,13 +1675,12 @@ fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
         tail_lock: true,
         ..Default::default()
     };
-    let ground = |x: f64, y: f64| field.height_at(x, y);
     let mut t = 0.0;
     let mut last_contact = (0.0, sim.pos, 0.0, heading0);
     for _ in 0..(90.0 / TICK) as usize {
         let fwd = (sim.ori * DVec3::X).truncate().normalize();
         let yaw_err = heading0.perp_dot(fwd); // >0: nose left of the runway heading
-        let kmh = sim.vel.length() * 3.6;
+        let kmh = (sim.vel - sim.gear.surface_vel).length() * 3.6;
         inputs.rudder = (2.0 * yaw_err + 0.8 * sim.w.z).clamp(-1.0, 1.0);
         let pitch = (sim.ori * DVec3::X).z.asin().to_degrees();
         let target = if kmh < 100.0 {
@@ -1671,7 +1696,23 @@ fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
             (0.08 * (target - pitch) + 0.3 * sim.w.y).clamp(-1.0, 1.0)
         };
         inputs.aileron = (-0.05 * sim.bank_deg() - 0.3 * sim.w.x).clamp(-1.0, 1.0);
-        sim.tick(&inputs, &ground);
+        if let Some(g) = ships.as_deref_mut() {
+            g.step(field, TICK);
+            if std::env::var_os("IL2_TRACE").is_some()
+                && ((t / TICK).round() as usize).is_multiple_of(33)
+            {
+                let u = &g.columns[0].units[0];
+                let l = glam::DQuat::from_rotation_z(-u.yaw) * (sim.pos - u.pos);
+                eprintln!(
+                    "local {:.1?} vrel {:.1?} rpm {:.0} thrust {:.0}",
+                    l,
+                    sim.vel - u.vel,
+                    sim.engines[0].rpm(),
+                    sim.engines[0].thrust
+                );
+            }
+        }
+        sim.tick(&inputs, &ground::Surface(field, ships.as_deref()));
         t += TICK;
         if sim.on_ground {
             last_contact = (t, sim.pos, sim.ias, fwd);
@@ -1699,6 +1740,93 @@ fn takeoff_test(mut sim: Sim, field: &HeightField) -> String {
         "takeoff: no lift-off within 90 s (speed {:.0} km/h, on ground {})",
         sim.vel.length() * 3.6,
         sim.on_ground
+    )
+}
+
+/// Lands on the carrier `chief`'s deck: from 15 m behind the deck's stern edge, wheels 2.5 m over
+/// the deck (origin `h` above them), at 120 km/h airspeed and sinking 1 m/s, gear and hook down,
+/// idle. Returns a summary.
+fn trap_test(
+    mut sim: Sim,
+    field: &HeightField,
+    ships: &mut ground::Ground,
+    chief: &str,
+    h: f64,
+) -> String {
+    let Some(col) = ships.columns.iter().position(|c| c.name == chief) else {
+        return "trap: no carrier".to_owned();
+    };
+    let (ship_pos, yaw, ship_vel) = {
+        let u = &ships.columns[col].units[0];
+        (u.pos, u.yaw, u.vel)
+    };
+    let rot = glam::DQuat::from_rotation_z(yaw);
+    let deck_z = ships
+        .deck_at(ship_pos + DVec3::new(0.0, 0.0, 30.0))
+        .map_or(13.0, |d| d.0 - ship_pos.z);
+    // Aft edge of the deck: walk aft along the centre line until the deck ends.
+    let mut x = 0.0;
+    while ships
+        .deck_at(ship_pos + rot * DVec3::new(x - 1.0, 0.0, deck_z + 1.0))
+        .is_some()
+    {
+        x -= 1.0;
+    }
+    sim.ori = rot * glam::DQuat::from_rotation_y(-8f64.to_radians());
+    sim.pos = ship_pos + rot * DVec3::new(x - 15.0, 0.0, deck_z + h + 2.5);
+    let over_deck = (120.0 / 3.6 - ship_vel.length()).max(15.0);
+    sim.vel = ship_vel + rot * DVec3::new(over_deck, 0.0, -1.0);
+    sim.w = DVec3::ZERO;
+    sim.set_engines_idle(false);
+    sim.ct.gear = 1.0;
+    sim.ct.flaps = 1.0;
+    sim.ct.arrestor = 1.0;
+    let mut inputs = Inputs {
+        throttle: 0.0,
+        gear: 1.0,
+        flaps: 1.0,
+        arrestor: 1.0,
+        ..Default::default()
+    };
+    let (mut caught, mut max_g, mut t, mut stop) = (None, 0.0f64, 0.0, None);
+    while t < 30.0 {
+        let pitch = (sim.ori * DVec3::X).z.asin().to_degrees();
+        inputs.elevator = (0.08 * (10.0 - pitch) + 0.3 * sim.w.y).clamp(-1.0, 1.0);
+        inputs.aileron = (-0.05 * sim.bank_deg() - 0.3 * sim.w.x).clamp(-1.0, 1.0);
+        ships.step(field, TICK);
+        let v = sim.vel - sim.gear.surface_vel;
+        sim.tick(&inputs, &ground::Surface(field, Some(ships)));
+        t += TICK;
+        if let Some(w) = sim.gear.towed {
+            caught.get_or_insert(w);
+            max_g = max_g.max(((sim.vel - sim.gear.surface_vel) - v).length() / TICK / 9.81);
+        }
+        let u = &ships.columns[col].units[0];
+        let local = glam::DQuat::from_rotation_z(-u.yaw) * (sim.pos - u.pos);
+        if stop.is_none() && sim.gear.on_deck && (sim.vel - u.vel).length() < 0.5 {
+            stop = Some((t, local));
+        }
+        if std::env::var_os("IL2_TRACE").is_some()
+            && ((t / TICK).round() as usize).is_multiple_of(10)
+        {
+            eprintln!(
+                "  trap t={t:4.1} local {:.1?} vrel {:.1} deck {} towed {:?}",
+                local,
+                (sim.vel - u.vel).length(),
+                sim.gear.on_deck,
+                sim.gear.towed
+            );
+        }
+    }
+    format!(
+        "trap: wire {}, peak {:.1} g, stopped {}",
+        caught.map_or("none".to_owned(), |w| w.to_string()),
+        max_g,
+        stop.map_or("never".to_owned(), |(t, l)| format!(
+            "after {t:.1} s at {:.0} m from the ship's centre, {:.1} m above the deck",
+            l.x,
+            l.z - deck_z
+        ))
     )
 }
 
@@ -1816,6 +1944,12 @@ enum Start {
         pos: DVec3,
         toward: DVec3,
         speed: f64,
+    },
+    /// On a carrier's deck: column name and unit index (`TAKEOFF … 0_Chief 0`).
+    Deck {
+        chief: String,
+        unit: usize,
+        fallback: DVec3,
     },
     Default,
 }
@@ -1945,7 +2079,17 @@ fn main() {
         );
         let ends = world::load_runways(&vfs, &args.map);
         if let Some(w0) = wing.waypoints.first() {
-            start = if w0.kind.starts_with("TAKEOFF") {
+            let ship = w0
+                .target
+                .clone()
+                .filter(|(t, _)| t.ends_with("_Chief") && w0.kind.starts_with("TAKEOFF"));
+            start = if let Some((chief, unit)) = ship {
+                Start::Deck {
+                    chief,
+                    unit: unit as usize,
+                    fallback: DVec3::new(w0.x, w0.y, 500.0),
+                }
+            } else if w0.kind.starts_with("TAKEOFF") {
                 match world::takeoff_spot(&ends, w0.x, w0.y) {
                     Some((x, y, heading)) => Start::Takeoff { x, y, heading },
                     None => Start::Air {
@@ -1992,10 +2136,17 @@ fn main() {
             ground::Ground::from_mission(&vfs, &fms, m, &field, &objects::season(&vfs, &args.map))
         });
     let mut traffic = mission.as_ref().filter(|_| !args.no_ai).map(|m| {
-        traffic::Traffic::from_mission(&vfs, &fms, m, &field, &world::load_runways(&vfs, &args.map))
+        traffic::Traffic::from_mission(
+            &vfs,
+            &fms,
+            m,
+            &field,
+            &world::load_runways(&vfs, &args.map),
+            columns.as_ref(),
+        )
     });
 
-    if args.test && !matches!(start, Start::Takeoff { .. }) {
+    if args.test && !matches!(start, Start::Takeoff { .. } | Start::Deck { .. }) {
         let fmd = fms.sect_file(&fmd_name).unwrap_or_else(|e| fail(e));
         let p = |k: &str| fmd.get("Params", k).unwrap_or("?").to_owned();
         for alt in [500.0, 3000.0, p("HofVmax").parse().unwrap_or(6000.0)] {
@@ -2117,6 +2268,37 @@ fn main() {
             world::spawn_on_ground(assets.fm.clone(), &field, x, y, heading, h, pitch)
         }
         Start::Air { pos, toward, speed } => world::spawn_at(assets.fm.clone(), pos, toward, speed),
+        Start::Deck {
+            ref chief,
+            unit,
+            fallback,
+        } => match columns.as_ref().and_then(|g| {
+            let m = mission.as_ref()?;
+            let slot = traffic::deck_slots(m)
+                .get(&(m.player_wing.clone()?, m.player_num as usize))
+                .map_or(0, |s| s.2);
+            g.carrier_takeoff(chief, unit, slot, assets.fm.length, assets.fm.wingspan)
+        }) {
+            Some((at, heading, vel)) => {
+                eprintln!("start: on the deck of {chief} at {at:.0?}");
+                let mut sim = world::spawn_on_ground(
+                    assets.fm.clone(),
+                    &field,
+                    at.x,
+                    at.y,
+                    heading,
+                    h,
+                    pitch,
+                );
+                sim.pos.z = at.z + h;
+                sim.vel = vel;
+                sim
+            }
+            None => {
+                eprintln!("start: no carrier deck for {chief}; starting in the air");
+                world::spawn_at(assets.fm.clone(), fallback, fallback + DVec3::Y, 100.0)
+            }
+        },
         Start::Default => {
             let mut sim = world::spawn_airborne(assets.fm.clone(), &field, args.agl, 110.0);
             if let Some([x, y]) = args
@@ -2169,13 +2351,31 @@ fn main() {
     let effects =
         particles::Effects::load(&vfs, particles::known_effects().iter().map(String::as_str));
     let mut view = view::WorldView::new(map_objects, forest, roads, Some(tracers), effects);
-    let on_ground_start = matches!(start, Start::Takeoff { .. });
+    let on_ground_start = matches!(start, Start::Takeoff { .. })
+        || (matches!(start, Start::Deck { .. }) && sim.vel.length() < 30.0 && sim.pos.z < 100.0);
     let gear0 = if on_ground_start { 1.0 } else { 0.0 };
     sim.ct.gear = gear0;
     let throttle0 = if on_ground_start { 0.0 } else { 0.8 };
     sim.ct.throttle = throttle0;
     if args.test && on_ground_start {
-        println!("{}", takeoff_test(sim, &field));
+        let trap = match (&start, &mut columns) {
+            (Start::Deck { chief, .. }, Some(_)) if sim.ac.arrestor_hook.is_some() => {
+                let mut fresh = ground::Ground::from_mission(
+                    &vfs,
+                    &fms,
+                    mission.as_ref().unwrap(),
+                    &field,
+                    &objects::season(&vfs, &args.map),
+                );
+                let s2 = world::spawn_airborne(assets.fm.clone(), &field, 0.0, 0.0);
+                Some(trap_test(s2, &field, &mut fresh, chief, h))
+            }
+            _ => None,
+        };
+        println!("{}", takeoff_test(sim, &field, columns.as_mut()));
+        if let Some(t) = trap {
+            println!("{t}");
+        }
         return;
     }
 
@@ -2194,7 +2394,6 @@ fn main() {
             inputs.gear = g(4, gear0);
             sim.ct = inputs;
         }
-        let ground = |x: f64, y: f64| field.height_at(x, y);
         let mut combat = Combat::new(guns, stores);
         let triggers = [args.fire, args.fire, args.fire, args.fire];
         let mut af = new_airframe(&assets);
@@ -2217,7 +2416,7 @@ fn main() {
         );
         let mut max_g = (0.0f64, 0.0f64);
         for _ in 0..(args.seconds / TICK) as usize {
-            sim.tick(&inputs, &world::Surface(&field));
+            sim.tick(&inputs, &ground::Surface(&field, columns.as_ref()));
             let targets =
                 build_targets(&sim, &assets, &af, traffic.as_ref(), columns.as_ref(), None);
             combat.step(&mut sim, &triggers, &field, &mut view, &targets);
@@ -2273,6 +2472,7 @@ fn main() {
                 let names = target_names(mission.as_ref(), columns.as_ref());
                 t.step(
                     &field,
+                    columns.as_ref(),
                     TICK,
                     pl,
                     &mut combat.rng,
@@ -2608,6 +2808,7 @@ fn bomb_test(
     while time < 200.0 {
         t.step(
             &field,
+            None,
             TICK,
             (DVec3::new(0.0, 0.0, -1000.0), DVec3::ZERO, 0, false),
             &mut rng,
