@@ -268,3 +268,32 @@ operable fraction; below 12 % the engine dies. Readiness multiplies engine torqu
 - For 3–6 the manifold threshold is `0.5 + (CompressorMaxATARPM − 0.5)·throttle`.
 
 `Vmin` and `Vmax` are `[Params]` values in km/h.
+
+## Mixture, magnetos, negative g, rough running
+- **Magnetos** (`cMagneto`, default present): switch 0 off (stops the engine), 1 left, 2 right,
+  3 both. Each working magneto gives 87 % of the torque, both together 100 %.
+- **Mixture** (`MixerType`, `MixerAltitude`, `cMix`): lever 0…1.2, 1 normal (type 1 can't go
+  below 1). With `v = p(MixerAltitude)/p₀ · mixture` and `pe` the outside pressure in
+  atmospheres (with the ram term):
+  - `v < pe` (lean): full power while `v > 0.25·pe`, else `v/(0.25·pe)`; below 0.03 the engine
+    stops;
+  - `v > pe` (rich): power `pe/v`, rough running `35·(1 − pe/v)`; type 3 at mixture ≤ 1 is not
+    affected.
+  Mixture only matters with complex engine management (the realism option, on for the player;
+  `--easy-engine` turns it off). AI aircraft always have the right mixture, as in the runtime.
+- **Negative g** with float carburetors (`Carburetor` 3 and 4): a counter rises by 0.03 per step
+  under negative g and falls by 0.015 (type 4: 0.03) afterwards, while the carburetor floods.
+  - Type 3: torque × `max(throttle − 0.1·counter, 0.3)` and rough running `10 + 5·counter`. The
+    engine stops when the counter passes `U(5, 8)`.
+  - Type 4 at full throttle: × `0.52 − counter` at first; past 0.5 the counter holds at 0.51;
+    past 0.8 it falls back. Below full throttle it is like type 3 with 0.2 per count and
+    `U(7.5, 9.5)`.
+- **Rough running** (`DisP0x/y`, `DisP1x/y`: rpm and percent): the amplitude is
+  `a·w² + b·w + c` through the two points, plus `9.25·(lost cylinders share)²` and the rough
+  running above (11.25 with two or fewer cylinders left). Torque is multiplied by
+  `1 + U(−1, 0.1)·amplitude`, and is 0 when that is negative below mid rpm.
+  OpenIL2 feeds the propeller governor the acceleration without this noise, so the governor
+  doesn't chase it.
+
+Keys: H richer, J leaner, M next magneto setting. The speed bar shows both. DeviceLink keys 106/108
+read the magneto and 107/109 switch it.

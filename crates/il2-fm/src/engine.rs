@@ -79,6 +79,15 @@ pub struct EngineParams {
     pub w_max_allowed: f64,
     pub reductor: f64,
     pub carburetor: i32,
+    /// `MixerType`: 0 automatic, 1 rich/lean lever (at least 1.0), 2/3 manual mixture.
+    pub mixer_type: i32,
+    /// Pressure at `MixerAltitude` over sea-level pressure (where full mixture is right).
+    pub mixer_low_pressure: f64,
+    /// `cMix`, `cMagneto`: the pilot has the lever / switch.
+    pub has_mix: bool,
+    pub has_magneto: bool,
+    /// Rough running (`DisP0x/y`, `DisP1x/y`): amplitude `a·w² + b·w + c`.
+    pub dist: [f64; 3],
     pub boost_factor: f64,
     pub acceleration: f64,
     pub engine_i: f64,
@@ -273,6 +282,31 @@ impl EngineParams {
                 .map_or(250.0, |r| rad_s(r as f64)),
             reductor: num("Reductor", 1.0),
             carburetor: num("Carburetor", 0.0) as i32,
+            mixer_type: num("MixerType", 0.0) as i32,
+            mixer_low_pressure: raw("MixerAltitude")
+                .and_then(atof)
+                .map_or(0.0, |h| atmosphere::pressure(h as f64) / atmosphere::P0),
+            has_mix: num("cMix", 1.0) != 0.0,
+            has_magneto: num("cMagneto", 1.0) != 0.0,
+            dist: match (
+                raw("DisP0x").and_then(atof),
+                raw("DisP0y").and_then(atof),
+                raw("DisP1x").and_then(atof),
+                raw("DisP1y").and_then(atof),
+            ) {
+                (Some(x0), Some(y0), Some(x1), Some(y1)) => {
+                    let (x0, y0, x1, y1) = (
+                        rad_s(x0 as f64),
+                        y0 as f64 * 0.01,
+                        rad_s(x1 as f64),
+                        y1 as f64 * 0.01,
+                    );
+                    let d = (x1 - x0) * (x1 - x0);
+                    let k = y1 - y0;
+                    [k / d, -2.0 * k * x0 / d, y0 + k * x0 * x0 / d]
+                }
+                _ => [0.0; 3],
+            },
             boost_factor: num("BoostFactor", 1.0),
             acceleration: num("EngineAcceleration", 1.0),
             engine_i: num("EngineI", 1.0),
@@ -423,6 +457,21 @@ pub struct EngineState {
     /// Oil system damage 0..1 (raises the oil temperature target by up to 35 %).
     pub oil_damage: f64,
     rng: u64,
+    /// Mixture lever (1 normal; below leaner, above richer up to 1.2).
+    pub mix: f64,
+    /// Magneto switch: 0 off, 1 left, 2 right, 3 both.
+    pub magneto: u8,
+    /// Magnetos still working.
+    pub magnetos_ok: [bool; 2],
+    /// Load factor of the last step (negative g starves float carburetors).
+    pub overload: f64,
+    /// Complex engine management (the realism option): mixture matters. Off, the mixture is
+    /// always right, as for AI aircraft.
+    pub complex: bool,
+    neg_g: f64,
+    flood_carb: bool,
+    /// Extra rough running this step.
+    produced_dist: f64,
     /// Malfunctions that happened, for messages (`overheat`, `cylinder`, `oil`, `fire`, …).
     pub events: Vec<&'static str>,
 }
@@ -489,6 +538,14 @@ impl EngineState {
             cylinders_out: 0.0,
             oil_damage: 0.0,
             rng: 0x9E37_79B9_7F4A_7C15 ^ (p.horse_powers.to_bits() ^ p.thrust_max.to_bits()),
+            mix: 1.0,
+            magneto: 3,
+            magnetos_ok: [true; 2],
+            overload: 1.0,
+            complex: false,
+            neg_g: 0.0,
+            flood_carb: false,
+            produced_dist: 0.0,
             events: Vec::new(),
         }
     }
@@ -1171,13 +1228,23 @@ impl EngineState {
             1.0
         };
         let boost = if wep { boost * p.wep_boost } else { boost };
-        let torque_curve = (torque_curve * boost).max(-0.8 * self.w / p.w_max * p.m_max);
+        let mut torque_curve = (torque_curve * boost).max(-0.8 * self.w / p.w_max * p.m_max);
         let running = self.stage == 6;
+        self.produced_dist = 0.0;
+        if running {
+            torque_curve *= self.negative_g(p, throttle);
+        }
+        let pe_bar = pe;
         let mut m = if running {
-            torque_curve * c * self.readyness
+            torque_curve * c * self.readyness * self.magneto_factor() * self.mix_factor(p, pe_bar)
         } else {
             0.0
         };
+        // Rough running shakes the rotor; the governor reads the smooth acceleration (OpenIL2).
+        let m_smooth = m;
+        if running && m > 0.0 {
+            m *= self.dist_factor(p);
+        }
         if !running {
             // Friction of a stopped engine (dt-scaled like the runtime).
             self.friction = (self.friction + 0.1 * dt).min(1.0);
@@ -1190,11 +1257,16 @@ impl EngineState {
         }
 
         // 6. Rotation.
-        let mut aw = (m - q) / (p.prop_i + p.engine_i);
-        if aw > 0.0 {
-            aw *= p.acceleration;
-        }
-        self.aw = aw;
+        let accel = |m: f64| {
+            let a = (m - q) / (p.prop_i + p.engine_i);
+            if a > 0.0 {
+                a * p.acceleration
+            } else {
+                a
+            }
+        };
+        let aw = accel(m);
+        self.aw = accel(m_smooth);
         self.w = (self.w + aw * dt).clamp(0.0, 2.0 * p.w_max_allowed);
 
         // Fuel: specific use at the power produced (torque × compressor), per hour.
@@ -1210,6 +1282,171 @@ impl EngineState {
         self.thrust = thrust;
         self.prop_torque = q;
         self.torque = p.direction * (q + p.prop_i * aw * p.reductor);
+    }
+
+    /// Float carburetors under negative g (the runtime's carburetor types 3 and 4): power falls off,
+    /// the engine runs rough and floods afterwards, and stays out for long spells of negative g.
+    fn negative_g(&mut self, p: &EngineParams, throttle: f64) -> f64 {
+        let negative = self.overload < 0.0;
+        match p.carburetor {
+            3 => {
+                let k = (throttle - self.neg_g * 0.1).max(0.3);
+                if negative && self.neg_g >= 0.0 {
+                    self.neg_g += 0.03;
+                    self.produced_dist += 10.0 + 5.0 * self.neg_g;
+                    let limit = self.rand_range(5.0, 8.0);
+                    if self.neg_g > limit {
+                        self.set_stage(0);
+                        self.events.push("engine stopped");
+                    }
+                    k
+                } else if !negative && self.neg_g > 0.0 {
+                    self.neg_g -= 0.015;
+                    self.produced_dist += 10.0 + 5.0 * self.neg_g;
+                    self.flood_carb = true;
+                    k
+                } else {
+                    self.flood_carb = false;
+                    self.neg_g = 0.0;
+                    1.0
+                }
+            }
+            4 => {
+                let k = {
+                    let v = throttle - self.neg_g * 0.2;
+                    if v <= 0.0 {
+                        0.1
+                    } else {
+                        v
+                    }
+                };
+                let full = throttle.min(1.0) >= 0.95;
+                if negative && self.neg_g >= 0.0 {
+                    self.neg_g += 0.03;
+                    if full && self.neg_g < 0.5 {
+                        self.produced_dist += 15.0 + 5.0 * self.neg_g;
+                        0.52 - self.neg_g
+                    } else if full && self.neg_g <= 0.8 {
+                        self.neg_g = 0.51;
+                        self.flood_carb = false;
+                        1.0
+                    } else if full {
+                        self.neg_g -= 0.045;
+                        self.produced_dist += 10.0 + 5.0 * self.neg_g;
+                        self.flood_carb = true;
+                        k
+                    } else {
+                        self.produced_dist += 10.0 + 5.0 * self.neg_g;
+                        let limit = self.rand_range(7.5, 9.5);
+                        if self.neg_g > limit {
+                            self.set_stage(0);
+                            self.events.push("engine stopped");
+                        }
+                        k
+                    }
+                } else if !negative && self.neg_g > 0.0 {
+                    self.neg_g -= 0.03;
+                    self.flood_carb = true;
+                    if full {
+                        1.0
+                    } else {
+                        self.produced_dist += 10.0 + 5.0 * self.neg_g;
+                        k
+                    }
+                } else {
+                    self.neg_g = 0.0;
+                    self.flood_carb = false;
+                    1.0
+                }
+            }
+            _ => 1.0,
+        }
+    }
+
+    /// Magnetos: each gives 87 % of the power, both together all of it.
+    fn magneto_factor(&self) -> f64 {
+        let one = |i: usize| if self.magnetos_ok[i] { 0.87 } else { 0.0 };
+        match self.magneto {
+            0 => 0.0,
+            1 => one(0),
+            2 => one(1),
+            _ => (one(0) + one(1)).min(1.0),
+        }
+    }
+
+    /// Mixture against the outside pressure `pe` (atmospheres): too lean loses power and stops the
+    /// engine, too rich loses power and runs rough.
+    fn mix_factor(&mut self, p: &EngineParams, pe: f64) -> f64 {
+        match p.mixer_type {
+            1 if self.mix == 1.0 => return 1.0,
+            1..=3 => {}
+            _ => return 1.0,
+        }
+        if p.mixer_low_pressure <= 0.0 {
+            return 1.0;
+        }
+        if !self.complex {
+            // Only a fully closed mixture stops the engine.
+            if p.mixer_low_pressure * self.mix < 0.03 && p.mixer_low_pressure * self.mix < pe {
+                self.set_stage(0);
+            }
+            return 1.0;
+        }
+        let v = p.mixer_low_pressure * self.mix;
+        if v < pe {
+            if v < 0.03 {
+                self.set_stage(0);
+                self.events.push("engine stopped: mixture too lean");
+            }
+            if v > pe * 0.25 {
+                1.0
+            } else {
+                v / (pe * 0.25)
+            }
+        } else if p.mixer_type == 3 && self.mix <= 1.0 {
+            1.0
+        } else {
+            self.produced_dist += 35.0 * (1.0 - pe / (v + 1e-4));
+            pe / (v + 1e-4)
+        }
+    }
+
+    /// Rough running: a random factor `1 + U(−1, 0.1)·amplitude`.
+    fn dist_factor(&mut self, p: &EngineParams) -> f64 {
+        let ratio = 1.0 - self.cylinders_out / p.cylinders.max(1.0);
+        let amp = if p.cylinders - self.cylinders_out > 2.0 {
+            let r = 1.0 - ratio;
+            p.dist[0] * self.w * self.w
+                + p.dist[1] * self.w
+                + p.dist[2]
+                + 9.25 * r * r
+                + self.produced_dist
+        } else {
+            11.25
+        };
+        let f = 1.0 + self.rand_range(-1.0, 0.1) * amp;
+        if f < 0.0 && self.w < 0.5 * (p.w_max + p.w_min) {
+            0.0
+        } else {
+            f
+        }
+    }
+
+    /// Mixture lever (−/+ steps of 0.05), where the engine has one.
+    pub fn set_mix(&mut self, p: &EngineParams, v: f64) {
+        if p.has_mix {
+            self.mix = if p.mixer_type == 1 { v.max(1.0) } else { v }.clamp(0.0, 1.2);
+        }
+    }
+
+    /// Magneto switch; off stops the engine.
+    pub fn set_magneto(&mut self, p: &EngineParams, m: u8) {
+        if p.has_magneto {
+            self.magneto = m.min(3);
+            if self.magneto == 0 && self.stage == 6 {
+                self.set_stage(0);
+            }
+        }
     }
 
     pub fn rpm(&self) -> f64 {

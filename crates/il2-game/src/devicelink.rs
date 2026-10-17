@@ -17,6 +17,8 @@ pub enum Command {
     PropPitch(f64),
     Trim(usize, f64),
     ToggleEngine,
+    /// Next magneto setting.
+    Magneto,
     ToggleWep,
     ToggleGear,
     ToggleAirbrake,
@@ -165,12 +167,13 @@ fn answer(key: u32, values: &[String]) -> String {
 /// The get keys OpenIL2 answers.
 const GETS: &[u32] = &[
     2, 4, 6, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 46, 48, 50, 52, 54, 56, 58, 60, 62,
-    64, 66, 68, 70, 72, 74, 80, 82, 84, 86, 88, 90, 92, 94, 96, 98, 104, 164, 172, 174, 180, 182,
-    184, 186, 188,
+    64, 66, 68, 70, 72, 74, 80, 82, 84, 86, 88, 90, 92, 94, 96, 98, 104, 106, 108, 164, 172, 174,
+    180, 182, 184, 186, 188,
 ];
 /// The set keys OpenIL2 accepts.
 const SETS: &[u32] = &[
-    81, 83, 85, 87, 89, 91, 93, 95, 97, 99, 103, 105, 165, 173, 175, 181, 183, 185, 187, 189,
+    81, 83, 85, 87, 89, 91, 93, 95, 97, 99, 103, 105, 107, 109, 165, 173, 175, 181, 183, 185, 187,
+    189,
 ];
 
 fn handle(data: &[u8], r: &Readings, commands: &mut Vec<Command>) -> Vec<String> {
@@ -221,7 +224,8 @@ fn handle(data: &[u8], r: &Readings, commands: &mut Vec<Command>) -> Vec<String>
             52 => Some(one(s.overload)),
             54 => Some(one(0.0)),
             56 | 58 | 60 => Some(one(s.ct.gear)),
-            62 => engine.map(|e| vec![e.to_string(), "3".into()]),
+            62 => engine.map(|e| vec![e.to_string(), s.engines[e].magneto.to_string()]),
+            106 | 108 => Some(vec![s.engines.first().map_or(0, |e| e.magneto).to_string()]),
             64 => engine.map(|e| vec![e.to_string(), fmt(s.engines[e].rpm())]),
             66 => engine.map(|e| vec![e.to_string(), fmt(s.engines[e].manifold * 1.01325)]),
             68 => engine.map(|e| vec![e.to_string(), fmt(s.engines[e].t_oil_in)]),
@@ -266,6 +270,7 @@ fn handle(data: &[u8], r: &Readings, commands: &mut Vec<Command>) -> Vec<String>
             93 => axis(num(0)).map(Command::PropPitch),
             95 | 97 | 99 => axis(num(0)).map(|v| Command::Trim(((key - 95) / 2) as usize, v)),
             103 => Some(Command::ToggleEngine),
+            107 | 109 => Some(Command::Magneto),
             105 => Some(Command::ToggleWep),
             165 => Some(Command::ToggleGear),
             173 => Some(Command::ToggleAirbrake),

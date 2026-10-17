@@ -93,6 +93,9 @@ struct Args {
     /// Fly this aircraft even in a mission that names another (multiplayer).
     #[arg(long)]
     force_aircraft: Option<String>,
+    /// Easier engine management: the mixture looks after itself.
+    #[arg(long)]
+    easy_engine: bool,
     /// Leave the flight after this many seconds (automated runs).
     #[arg(long)]
     quit_after: Option<f64>,
@@ -667,7 +670,7 @@ fn hud_lines(s: &Sim, field: &HeightField) -> Vec<String> {
     )];
     if let Some(e) = s.engines.first() {
         l.push(format!(
-            "Engine {}  {:.0} rpm   Oil {:.0}°   Water {:.0}°   Rad {}   Prop {}   Fuel {:.0} kg",
+            "Engine {}  {:.0} rpm   Oil {:.0}°   Water {:.0}°   Rad {}   Prop {}   Mix {:.0}%   Mag {}   Fuel {:.0} kg",
             match e.stage {
                 0 => "off",
                 1..=5 => "starting",
@@ -682,6 +685,8 @@ fn hud_lines(s: &Sim, field: &HeightField) -> Vec<String> {
                 .map_or("auto".to_owned(), |r| format!("{:.0}%", r * 100.0)),
             e.prop_manual
                 .map_or("auto".to_owned(), |p| format!("{:.0}%", p * 100.0)),
+            e.mix * 100.0,
+            ["off", "L", "R", "L+R"][e.magneto.min(3) as usize],
             s.fuel
         ));
     }
@@ -1070,6 +1075,7 @@ impl Game {
                     .sim
                     .toggle_engines(self.sim.on_ground && self.sim.vel.length() < 1.0),
                 C::ToggleWep => i.wep = !i.wep,
+                C::Magneto => self.sim.cycle_magneto(),
                 C::ToggleGear => i.gear = if i.gear > 0.5 { 0.0 } else { 1.0 },
                 C::ToggleAirbrake => i.airbrake = if i.airbrake > 0.5 { 0.0 } else { 1.0 },
                 C::ToggleTailLock => i.tail_lock = !i.tail_lock,
@@ -1470,6 +1476,9 @@ impl ApplicationHandler for Game {
                                 self.sim.set_prop(Some((cur + d).clamp(0.0, 1.0)));
                             }
                             KeyCode::KeyL => self.inputs.tail_lock = !self.inputs.tail_lock,
+                            KeyCode::KeyJ => self.sim.change_mix(-0.05),
+                            KeyCode::KeyH => self.sim.change_mix(0.05),
+                            KeyCode::KeyM => self.sim.cycle_magneto(),
                             KeyCode::KeyN => {
                                 self.inputs.airbrake =
                                     if self.inputs.airbrake > 0.5 { 0.0 } else { 1.0 }
@@ -1550,9 +1559,17 @@ impl ApplicationHandler for Game {
 fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
     let ground = |_: f64, _: f64| 0.0;
     // Like the reference figures: healthy engine, radiator closed.
+    // Start at the test altitude, with the propeller set for the speed there.
+    let speed = sim.vel.length().max(0.85 * sim.ac.vmax_h);
+    sim = Sim::new(
+        sim.ac.clone(),
+        DVec3::new(sim.pos.x, sim.pos.y, alt),
+        sim.ori,
+        speed,
+    );
+    sim.ct.gear = 0.0;
     sim.engine_overheat = false;
     sim.set_radiator(Some(0.0));
-    sim.pos.z = alt;
     let mut inputs = Inputs {
         throttle: 1.1,
         wep: true,
@@ -1574,6 +1591,9 @@ fn level_flight_test(mut sim: Sim, alt: f64) -> (f64, f64) {
                 step as f64 * TICK, sim.pos.z, sim.vel.length() * 3.6, sim.vel.z, pitch, sim.bank_deg(), sim.aoa,
                 (sim.w * 100.0).round() / 100.0, inputs.elevator, sim.thrust
             );
+            if let Some(e) = sim.engines.first() {
+                eprintln!("   engine stage {} rpm {:.0} pitch {:.1} target {:.1} manifold {:.2} overload {:.2}", e.stage, e.rpm(), e.phi.to_degrees(), e.phi_target.to_degrees(), e.manifold, sim.overload);
+            }
         }
         if !sim.pos.is_finite() {
             return (f64::NAN, f64::NAN);
@@ -2026,6 +2046,8 @@ fn main() {
         sim.pos.z = sim.pos.z.max(ground + assets.parked.0);
     }
     sim.structure.twin_fin = assets.twin_fin;
+    // Full realism: the pilot sets the mixture (`--easy-engine` leaves it to the engine).
+    sim.complex_engine = !args.easy_engine;
     if let Some(class) = &args.enemy {
         let fwd = sim.ori * DVec3::X;
         let pos = sim.pos + fwd * 150.0;

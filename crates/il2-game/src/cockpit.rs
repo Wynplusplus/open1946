@@ -251,8 +251,8 @@ fn world_table(
         put("getStage()", e.stage as f64);
         put("getReadyness()", e.readyness);
         put("getControlThrottle()", ct.throttle);
-        put("getControlMix()", 1.0);
-        put("getControlMagnetos()", 3.0);
+        put("getControlMix()", e.mix);
+        put("getControlMagnetos()", e.magneto as f64);
         put("getControlCompressor()", 0.0);
         put("getControlRadiator()", e.radiator);
         put("getControlProp()", e.prop_manual.unwrap_or(1.0));

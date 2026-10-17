@@ -102,6 +102,8 @@ pub struct Sim {
     pub overload: f64,
     /// Flown by the AI: the simplified flight model (`ai_fm`).
     pub ai: bool,
+    /// Realism option "complex engine management": mixture and supercharger by hand.
+    pub complex_engine: bool,
     /// Rotation rates the AI's controls command, body axes (the runtime's `Wtrue`).
     pub wtrue: DVec3,
 }
@@ -130,6 +132,27 @@ impl Sim {
     pub fn set_prop(&mut self, l: Option<f64>) {
         for st in &mut self.engines {
             st.prop_manual = l;
+        }
+    }
+
+    /// Moves every engine's mixture lever by `d` (0..1.2; 1 is normal).
+    pub fn change_mix(&mut self, d: f64) {
+        for (p, st) in self.ac.engines.iter().zip(&mut self.engines) {
+            let v = st.mix + d;
+            st.set_mix(p, v);
+        }
+    }
+
+    /// Next magneto setting (both → left → right → off → both).
+    pub fn cycle_magneto(&mut self) {
+        for (p, st) in self.ac.engines.iter().zip(&mut self.engines) {
+            let next = match st.magneto {
+                3 => 1,
+                1 => 2,
+                2 => 0,
+                _ => 3,
+            };
+            st.set_magneto(p, next);
         }
     }
 
@@ -236,6 +259,7 @@ impl Sim {
             structure,
             overload: 1.0,
             ai: false,
+            complex_engine: false,
             wtrue: DVec3::ZERO,
         }
     }
@@ -392,6 +416,8 @@ impl Sim {
                 _ => (throttle, self.fuel > 0.0),
             };
             let wep = p.wep_active(t, self.ct.wep, self.nitro > 0.0);
+            st.overload = self.overload;
+            st.complex = self.complex_engine && !self.ai;
             st.step_any(p, t, wep, vflow.x, v, self.pos.z, dt, fuel_left);
             let env = EngineEnv {
                 dt,

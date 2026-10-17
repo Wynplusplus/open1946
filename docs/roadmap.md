@@ -55,5 +55,4 @@ What works today through OpenIL2's own designs, and would be replaced by ports o
   armed vehicles and ships;
 - the detailed per-class damage model (`xx…` bones, `hitBone`) and the meshes' collision shapes;
 - DGen's own generator logic (front movement, squadron rosters, ranks, awards);
-- the original GUI screens; carrier operations and water landings; mixture, magnetos and negative-g
-  cut-out; bridge destruction.
+- the original GUI screens; carrier operations and water landings; bridge destruction.
