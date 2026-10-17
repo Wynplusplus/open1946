@@ -123,9 +123,20 @@ belongs to the first entry of the runtime's part list its name starts with: `Aro
 - **Chunk damage** (`hitChunk`): the TNT over the part's `[Toughness]`·10⁻⁴ (on an intact `_D0`
   chunk other than gear: 1 + the TNT beyond 0.01 kg over the toughness, or TNT/0.01 below that)
   plus the fraction carried from earlier hits gives whole damage levels; the rest is carried.
-- OpenIL2, until the classes' `hitBone` runs: a chunk hull takes chunk damage, internal parts are
-  only traced. Chunks without hulls use the box around their geometry. A shell's explosive adds half
-  its TNT to the chunk struck.
+- **`hitBone`** is each class's own code (88 classes override it): armour plates (`xxarmor…`)
+  call `getEnergyPastArmor` with their thickness (often divided by the cosine of the impact angle,
+  from the round's direction in aircraft axes, the runtime's `Aircraft.v1`), control runs
+  (`xxcontrols…`) cut controls, spars (`xxspar…`) add damage levels to wings and tail, tanks
+  (`xxtank…`), engines (`xxeng…`: cylinders, magnetos, superchargers, propeller gear, oil),
+  guns (`xxmgun…`, `xxcannon…`: jams), crew (`xpilot…`, `xhead…`: `hitFlesh`) and the chunk hulls
+  (`x<part>`: `hitChunk`), each with its own thresholds and odds, acting through the aircraft
+  state (`Systems` below).
+- OpenIL2 runs the classes' `hitBone` from the install with its bytecode interpreter; the
+  interpreter hands everything the code does to the aircraft or asks of the world to OpenIL2's
+  aircraft state, airframe and random numbers. When the code can't run, a chunk hull takes the
+  generic chunk damage. Chunks without hulls use the box around their geometry. A shell's
+  explosive adds half its TNT to the chunk struck. `IL2_TRACE=1` logs each part hit with the energy
+  before and after and the system states.
 
 ### Flight-model effects
 The runtime keeps per-part areas: six wing sections (the `.fmd` sections, mirrored), stabilizer,

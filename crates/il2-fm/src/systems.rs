@@ -317,8 +317,9 @@ impl Sim {
         }
     }
 
-    fn explode_tank(&mut self, t: usize) {
-        if self.part_there(self.systems.tank_parts[t]) {
+    /// Tank `t` explodes (`explodeTank`).
+    pub fn explode_tank(&mut self, t: usize) {
+        if t < 4 && self.part_there(self.systems.tank_parts[t]) {
             self.systems.events.push(Event::TankExplodes(t));
             self.systems
                 .events

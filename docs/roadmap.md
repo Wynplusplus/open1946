@@ -53,6 +53,7 @@ What works today through OpenIL2's own designs, and would be replaced by ports o
 - AI: the runtime's `Maneuver` (air combat, ground attack, takeoff and landing maneuvers) and
   `AirGroup` formations; ground and naval units with `ChiefGround` road formations, bridges,
   armed vehicles and ships;
-- the detailed per-class damage model (`xx…` bones, `hitBone`) and the meshes' collision shapes;
+- explosions on aircraft by distance to each collision part (`msgExplosion`), and the `TSPD`
+  smoke-trail ribbons;
 - DGen's own generator logic (front movement, squadron rosters, ranks, awards);
 - the original GUI screens; the ships' collision meshes and deck traffic (`carrier.md`).

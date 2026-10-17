@@ -11,6 +11,7 @@ mod flak;
 mod forest;
 mod ground;
 mod gunners;
+mod hitbone;
 mod hitbox;
 mod hud;
 mod joystick;
@@ -430,7 +431,8 @@ fn apply_aircraft_hits(
     af: &mut airframe::Airframe,
     assets: &world::AircraftAssets,
     mut traffic: Option<&mut traffic::Traffic>,
-) {
+) -> Vec<(i32, i32)> {
+    let mut player_jams = Vec::new();
     for (b, h) in &combat.hits {
         let weapons::Hit::Aircraft(id, node, _, parts) = h else {
             continue;
@@ -452,7 +454,9 @@ fn apply_aircraft_hits(
         }
         if *id == 0 {
             let mut shot = airframe::Shot::new(b.vel, sim.vel, sim.ori, ty.mass, ty.shot_type());
-            af.bullet(sim, parts, &assets.hulls, &mut shot, &assets.toughness);
+            let mut jams = Vec::new();
+            hitbone::bullet(af, sim, assets, parts, &mut shot, &mut jams);
+            player_jams.extend(jams);
             if blast > 0.0 {
                 af.shot(sim, *node, blast, &assets.toughness);
             }
@@ -465,6 +469,7 @@ fn apply_aircraft_hits(
             }
         }
     }
+    player_jams
 }
 
 /// Our rounds that hit other pilots' aircraft: the damage goes to their owners.
@@ -1249,13 +1254,14 @@ impl Game {
             );
             self.combat
                 .step(&mut self.sim, &triggers, field, &mut self.view, &targets);
-            apply_aircraft_hits(
+            let jams = apply_aircraft_hits(
                 &self.combat,
                 &mut self.sim,
                 &mut self.airframe,
                 &self.assets,
                 self.traffic.as_mut(),
             );
+            weapons::jam(&mut self.combat.guns, &jams);
             if let Some(n) = self.net.as_mut() {
                 net_hits(&self.combat, n);
             }
@@ -2598,7 +2604,8 @@ fn main() {
             let targets =
                 build_targets(&sim, &assets, &af, traffic.as_ref(), columns.as_ref(), None);
             combat.step(&mut sim, &triggers, &field, &mut view, &targets);
-            apply_aircraft_hits(&combat, &mut sim, &mut af, &assets, traffic.as_mut());
+            let jams = apply_aircraft_hits(&combat, &mut sim, &mut af, &assets, traffic.as_mut());
+            weapons::jam(&mut combat.guns, &jams);
             aircraft_blasts(
                 &combat,
                 &targets,

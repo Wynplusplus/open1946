@@ -381,8 +381,9 @@ impl Traffic {
         };
         let a = &self.classes[p.class].assets;
         let mut shot = crate::airframe::Shot::new(vel, p.sim.vel, p.sim.ori, mass, power_type);
-        p.airframe
-            .bullet(&mut p.sim, parts, &a.hulls, &mut shot, &a.toughness);
+        let mut jams = Vec::new();
+        crate::hitbone::bullet(&mut p.airframe, &mut p.sim, a, parts, &mut shot, &mut jams);
+        weapons::jam(&mut p.guns, &jams);
     }
 
     /// One simulation tick for every AI aircraft: choose whom to fight, fly, shoot.

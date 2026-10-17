@@ -34,6 +34,8 @@ pub enum EngineKind {
 pub struct EngineParams {
     pub kind: EngineKind,
     pub piston: bool,
+    /// `Type Radial` (the runtime's engine type 1; inline is 0).
+    pub radial: bool,
     /// `Thrust` (kgf) in newtons.
     pub thrust_max: f64,
     pub horse_powers: f64,
@@ -242,6 +244,7 @@ impl EngineParams {
         ];
         Some(EngineParams {
             kind,
+            radial: ty.ends_with("Radial"),
             piston,
             thrust_max,
             horse_powers: hp,
@@ -822,6 +825,13 @@ impl EngineState {
             self.readyness = 0.0;
             self.w = 0.0;
             self.events.push("seized");
+        }
+    }
+
+    /// The engine stops as if switched off (it can be restarted).
+    pub fn stop(&mut self) {
+        if (1..=6).contains(&self.stage) {
+            self.set_stage(0);
         }
     }
 

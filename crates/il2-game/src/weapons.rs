@@ -96,6 +96,20 @@ pub struct Gun {
     pub(crate) count: u32,
 }
 
+/// Puts out of action the guns a hit destroyed (`setJamBullets(trigger, n)`: the `n`-th gun on
+/// that trigger loses its ammunition).
+pub fn jam(guns: &mut [Gun], jams: &[(i32, i32)]) {
+    for &(trigger, n) in jams {
+        if let Some(g) = guns
+            .iter_mut()
+            .filter(|g| g.trigger == trigger)
+            .nth(n.max(0) as usize)
+        {
+            g.ammo = 0;
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Bullet {
     pub pos: DVec3,

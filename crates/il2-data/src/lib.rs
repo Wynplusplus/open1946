@@ -2,7 +2,7 @@
 //! Formats: `docs/formats/krypto.md`. All key material is read from the user's install.
 
 pub mod anim;
-mod classfile;
+pub mod classfile;
 pub mod container;
 pub mod keys;
 mod pe;
@@ -359,6 +359,17 @@ impl<'a> Classes<'a> {
     }
 
     /// Short names of the class and its superclasses, most derived first (`BF_109G6`, `BF_109`, …).
+    /// The loaded classes from `class` up through its `com.maddox` superclasses (for running
+    /// class code such as `hitBone`).
+    pub fn class_chain(&self, class: &str) -> Vec<classfile::ClassFile> {
+        let full = if class.starts_with("com.") {
+            class.to_owned()
+        } else {
+            format!("com.maddox.il2.objects.{class}")
+        };
+        self.chain(&full)
+    }
+
     pub fn lineage(&self, class: &str) -> Vec<String> {
         let full = if class.starts_with("com.") {
             class.to_owned()

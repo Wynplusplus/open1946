@@ -110,6 +110,8 @@ pub struct AircraftAssets {
     /// hooks).
     pub tank_chunks: [Option<String>; 4],
     pub engine_chunks: Vec<Option<String>>,
+    /// The class chain when the class has its own `hitBone` damage code.
+    pub hit_chain: Option<std::sync::Arc<Vec<il2_data::classfile::ClassFile>>>,
     /// `[Toughness]` per part (`il2_fm::damage::PART_NAMES`), × 10⁻⁴; `NullPart` can't be damaged.
     pub toughness: [f64; 44],
     /// The class implements `TypeFighter`.
@@ -300,6 +302,7 @@ pub fn load_aircraft_with(
         hulls: Default::default(),
         tank_chunks: Default::default(),
         engine_chunks: Vec::new(),
+        hit_chain: None,
         toughness: [0.01; 44],
         fighter: false,
         turret_arcs: None,
@@ -489,6 +492,10 @@ pub fn load_aircraft_with(
         hulls,
         tank_chunks,
         engine_chunks,
+        hit_chain: {
+            let chain = classes.class_chain(class);
+            il2_data::anim::has_hit_bone(&chain).then(|| std::sync::Arc::new(chain))
+        },
         toughness,
         fighter: classes.interfaces(class).iter().any(|i| i == "TypeFighter"),
         turret_arcs: {

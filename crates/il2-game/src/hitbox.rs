@@ -13,6 +13,8 @@ pub struct PartHit {
     pub node: usize,
     pub hull: Option<usize>,
     pub t: f64,
+    /// Where the part is entered, aircraft (body) coordinates.
+    pub point: glam::DVec3,
 }
 
 pub struct Target {
@@ -104,6 +106,7 @@ impl Target {
                                 node: *node,
                                 hull: Some(k),
                                 t,
+                                point: ab.lerp(bb, t as f32).as_dvec3(),
                             });
                         }
                     }
@@ -114,6 +117,7 @@ impl Target {
                             node: *node,
                             hull: None,
                             t,
+                            point: ab.lerp(bb, t as f32).as_dvec3(),
                         });
                     }
                 }

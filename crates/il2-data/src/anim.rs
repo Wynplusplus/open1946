@@ -187,6 +187,60 @@ struct Machine<'a> {
     pc: usize,
     /// The first failure inside a helper that cockpit code recovered from.
     soft_error: Option<String>,
+    /// Running damage code (`run_hit_bone`): world calls and reads go here.
+    host: Option<&'a mut (dyn Host + 'a)>,
+    /// The `Shot` object on the heap while `host` is set.
+    shot_obj: Option<usize>,
+}
+
+/// A value passed between class code and its `Host`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HostVal {
+    Num(f64),
+    Str(String),
+    /// A symbolic object: `this`, `shot`, `point`, or a path such as `FM.AS`,
+    /// `FM.EI.engines[0]`, `World.Rnd()`.
+    Path(String),
+    Null,
+}
+
+impl HostVal {
+    pub fn num(&self) -> f64 {
+        match self {
+            HostVal::Num(x) => *x,
+            _ => 0.0,
+        }
+    }
+    pub fn str(&self) -> &str {
+        match self {
+            HostVal::Str(s) | HostVal::Path(s) => s,
+            _ => "",
+        }
+    }
+}
+
+/// The round damage code works on (the runtime's `Shot`): energy (J), mass (kg) and kind.
+#[derive(Clone, Debug, Default)]
+pub struct ShotState {
+    pub power: f64,
+    pub mass: f64,
+    pub power_type: i32,
+}
+
+/// What class code reaches outside itself while it runs under `run_hit_bone`.
+pub trait Host {
+    /// A call on `recv`: `this` (the aircraft; return `None` to run the class's own code), a
+    /// static class's short name (`Aircraft`, `World`), `shot`, or a symbolic path. `None`
+    /// means "not handled" (the result is then a default).
+    fn call(
+        &mut self,
+        recv: &str,
+        name: &str,
+        args: &[HostVal],
+        shot: &mut ShotState,
+    ) -> Option<HostVal>;
+    /// A number of the world at `path` (`FM.AS.astateTankStates[0]`, …).
+    fn get(&mut self, path: &str) -> f64;
 }
 
 /// Zero value of a field or return descriptor.
@@ -255,6 +309,139 @@ fn short(class: &str) -> &str {
 }
 
 impl<'a> Machine<'a> {
+    fn to_host(&self, v: &V) -> HostVal {
+        match v {
+            V::I(i) => HostVal::Num(*i as f64),
+            V::L(l) => HostVal::Num(*l as f64),
+            V::F(f) => HostVal::Num(*f as f64),
+            V::D(d) => HostVal::Num(*d),
+            V::Str(s) => HostVal::Str(s.clone()),
+            V::Sym(p) => HostVal::Path(p.clone()),
+            V::This => HostVal::Path("this".into()),
+            V::Obj(o) if Some(*o) == self.shot_obj => HostVal::Path("shot".into()),
+            V::Obj(o) => match self.objects[*o].1.get("$s") {
+                Some(V::Str(s)) => HostVal::Str(s.clone()),
+                _ => HostVal::Path(format!("obj{o}")),
+            },
+            _ => HostVal::Null,
+        }
+    }
+
+    fn shot_state(&self) -> ShotState {
+        let Some(o) = self.shot_obj else {
+            return ShotState::default();
+        };
+        let f = |k: &str| match self.objects[o].1.get(k) {
+            Some(V::F(x)) => *x as f64,
+            Some(V::D(x)) => *x,
+            Some(V::I(x)) => *x as f64,
+            _ => 0.0,
+        };
+        ShotState {
+            power: f("power"),
+            mass: f("mass"),
+            power_type: f("powerType") as i32,
+        }
+    }
+
+    fn set_shot_state(&mut self, s: &ShotState) {
+        if let Some(o) = self.shot_obj {
+            let fields = &mut self.objects[o].1;
+            fields.insert("power".into(), V::F(s.power as f32));
+            fields.insert("mass".into(), V::F(s.mass as f32));
+            fields.insert("powerType".into(), V::I(s.power_type));
+        }
+    }
+
+    /// Offers a call to the host; `Some` when it handled it (with the typed result).
+    fn host_call(&mut self, recv: &str, name: &str, desc: &str, args: &[V]) -> Option<Option<V>> {
+        self.host.as_ref()?;
+        let hargs: Vec<HostVal> = args.iter().map(|a| self.to_host(a)).collect();
+        let mut shot = self.shot_state();
+        let r = self
+            .host
+            .as_deref_mut()?
+            .call(recv, name, &hargs, &mut shot);
+        self.set_shot_state(&shot);
+        let ret = ret_of(desc);
+        r.map(|h| {
+            (ret != "V").then(|| match h {
+                HostVal::Num(x) => typed(ret, x),
+                HostVal::Str(s) => V::Str(s),
+                HostVal::Path(p) => V::Sym(p),
+                HostVal::Null => default_of(ret),
+            })
+        })
+    }
+
+    /// `java.lang.String` methods on a string value.
+    fn string_call(s: &str, name: &str, desc: &str, args: &[V]) -> Option<Option<V>> {
+        let arg_str = |i: usize| match args.get(i) {
+            Some(V::Str(t)) => Some(t.as_str()),
+            _ => None,
+        };
+        let arg_int = |i: usize| match args.get(i) {
+            Some(V::I(n)) => Some(*n),
+            _ => None,
+        };
+        let chars: Vec<char> = s.chars().collect();
+        let b = |x: bool| Some(Some(V::I(x as i32)));
+        match (name, desc) {
+            ("startsWith", _) => b(s.starts_with(arg_str(0)?)),
+            ("endsWith", _) => b(s.ends_with(arg_str(0)?)),
+            ("equals", _) => b(arg_str(0) == Some(s)),
+            ("equalsIgnoreCase", _) => b(arg_str(0).is_some_and(|t| t.eq_ignore_ascii_case(s))),
+            ("length", _) => Some(Some(V::I(chars.len() as i32))),
+            ("charAt", _) => Some(Some(V::I(
+                chars.get(arg_int(0)? as usize).map_or(0, |&c| c as i32),
+            ))),
+            ("substring", "(I)Ljava/lang/String;") => Some(Some(V::Str(
+                chars.get(arg_int(0)?.max(0) as usize..)?.iter().collect(),
+            ))),
+            ("substring", _) => {
+                let (a, e) = (arg_int(0)?.max(0) as usize, arg_int(1)?.max(0) as usize);
+                Some(Some(V::Str(chars.get(a..e)?.iter().collect())))
+            }
+            ("toLowerCase", _) => Some(Some(V::Str(s.to_lowercase()))),
+            ("toUpperCase", _) => Some(Some(V::Str(s.to_uppercase()))),
+            ("trim", _) | ("intern", _) | ("toString", _) => {
+                Some(Some(V::Str(s.trim().to_owned())))
+            }
+            ("compareTo", _) => Some(Some(V::I(match s.cmp(arg_str(0)?) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            }))),
+            ("indexOf", "(Ljava/lang/String;)I") => Some(Some(V::I(
+                s.find(arg_str(0)?)
+                    .map_or(-1, |i| s[..i].chars().count() as i32),
+            ))),
+            ("indexOf", "(I)I") => Some(Some(V::I(
+                chars
+                    .iter()
+                    .position(|&c| c as i32 == arg_int(0).unwrap_or(-1))
+                    .map_or(-1, |i| i as i32),
+            ))),
+            ("lastIndexOf", "(Ljava/lang/String;)I") => Some(Some(V::I(
+                s.rfind(arg_str(0)?)
+                    .map_or(-1, |i| s[..i].chars().count() as i32),
+            ))),
+            ("lastIndexOf", "(I)I") => Some(Some(V::I(
+                chars
+                    .iter()
+                    .rposition(|&c| c as i32 == arg_int(0).unwrap_or(-1))
+                    .map_or(-1, |i| i as i32),
+            ))),
+            ("concat", _) => Some(Some(V::Str(format!("{s}{}", arg_str(0)?)))),
+            ("hashCode", _) => {
+                Some(Some(V::I(s.chars().fold(0i32, |h, c| {
+                    h.wrapping_mul(31).wrapping_add(c as i32)
+                }))))
+            }
+            _ => None,
+        }
+    }
+
     /// The simulation's value at `path`, typed by `desc`: objects stay symbolic, numbers come from
     /// `world` (0 when unknown).
     fn world_value(&mut self, path: String, desc: &str) -> Option<V> {
@@ -266,6 +453,10 @@ impl<'a> Machine<'a> {
         match desc.chars().next() {
             Some('V') => None,
             Some('L' | '[') => Some(V::Sym(path)),
+            _ if self.host.is_some() => {
+                let x = self.host.as_deref_mut().map_or(0.0, |h| h.get(&path));
+                Some(typed(desc, x))
+            }
             _ => {
                 let x = match self.world.as_ref().and_then(|w| w.get(&path)) {
                     Some(&x) => x,
@@ -735,7 +926,10 @@ impl<'a> Machine<'a> {
                 0xB4 => {
                     let (_, name, desc) = cf.member(u16_at(pc + 1)?).ok_or(Abort)?;
                     let v = match pop!() {
-                        V::This => self.fields.get(name).cloned(),
+                        V::This => match self.fields.get(name).cloned() {
+                            None if self.host.is_some() => self.world_value(name.to_owned(), desc),
+                            v => v,
+                        },
                         V::Obj(o) => self.objects[o].1.get(name).cloned(),
                         V::Sym(p) => self.world_value(format!("{p}.{name}"), desc),
                         _ if self.lenient => None,
@@ -1072,6 +1266,11 @@ impl<'a> Machine<'a> {
                 return Ok(Some(V::Str(n.clone())));
             }
         }
+        if name != "cvt" {
+            if let Some(r) = self.host_call(short(class), name, desc, &args) {
+                return Ok(r);
+            }
+        }
         if self.record.contains(&name) {
             let vals = args.iter().map(|a| self.export(a, 0)).collect();
             self.recorded.push((name.to_owned(), vals));
@@ -1085,7 +1284,7 @@ impl<'a> Machine<'a> {
             )));
         }
         let Some((cf, m)) = self.resolve(Some(class), name, desc) else {
-            if self.world.is_some() {
+            if self.world.is_some() || self.host.is_some() {
                 return Ok(self.world_value(format!("{}.{name}()", short(class)), ret_of(desc)));
             }
             if self.lenient {
@@ -1130,6 +1329,25 @@ impl<'a> Machine<'a> {
         args: Vec<V>,
         depth: usize,
     ) -> Result<Option<V>, Abort> {
+        if let V::Str(s) = &recv {
+            if let Some(r) = Self::string_call(s, name, desc, &args) {
+                return Ok(r);
+            }
+        }
+        let host_recv = match &recv {
+            V::Sym(p) => Some(p.clone()),
+            V::This => Some("this".to_owned()),
+            V::Obj(o) if Some(*o) == self.shot_obj => Some("shot".to_owned()),
+            _ => None,
+        };
+        if let Some(hr) = host_recv.filter(|_| self.host.is_some()) {
+            if let Some(r) = self.host_call(&hr, name, desc, &args) {
+                return Ok(r);
+            }
+            if hr == "shot" {
+                return Ok((ret_of(desc) != "V").then(|| default_of(ret_of(desc))));
+            }
+        }
         match recv {
             V::Sym(p) => {
                 let strs: Vec<String> = args
@@ -1353,6 +1571,8 @@ pub fn evaluate(classes: &[ClassFile], name: &str, desc: &str) -> Result<Value, 
         missing: HashSet::new(),
         pc: 0,
         soft_error: None,
+        host: None,
+        shot_obj: None,
     };
     let (cf, meth) = m
         .resolve(None, name, desc)
@@ -1396,6 +1616,8 @@ pub fn call_bool(
         missing: HashSet::new(),
         pc: 0,
         soft_error: None,
+        host: None,
+        shot_obj: None,
     };
     let (cf, meth) = m
         .resolve(None, name, desc)
@@ -1441,6 +1663,8 @@ pub fn record_clinit(
         missing: HashSet::new(),
         pc: 0,
         soft_error: None,
+        host: None,
+        shot_obj: None,
     };
     if let Some(c) = classes.first() {
         let name = c.this_class.clone();
@@ -1474,6 +1698,8 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
         missing: HashSet::new(),
         pc: 0,
         soft_error: None,
+        host: None,
+        shot_obj: None,
     };
     let mut frames: Vec<BTreeMap<String, NodeState>> = Vec::new();
     let virtual_name = match ch {
@@ -1561,6 +1787,88 @@ pub fn sample(chain: &[ClassFile], ch: Channel) -> Option<Track> {
     })
 }
 
+/// Runs the aircraft class's `hitBone(bone, shot, point)` (`docs/behavior/damage.md`, "Bullet
+/// hits"): `chain` from the class up, `point` the hit in aircraft coordinates and `dir` the round's
+/// direction there (the runtime's `Aircraft.v1`). Everything the code does to the aircraft goes
+/// through `host`; `shot` carries the round's energy in and out.
+pub fn run_hit_bone(
+    chain: &[ClassFile],
+    host: &mut dyn Host,
+    bone: &str,
+    shot: &mut ShotState,
+    point: [f64; 3],
+    dir: [f64; 3],
+) -> Result<(), String> {
+    const DESC: &str = "(Ljava/lang/String;Lcom/maddox/il2/ai/Shot;Lcom/maddox/JGP/Point3d;)V";
+    let mut m = Machine {
+        chain,
+        arrays: vec![vec![0.0; 3], vec![0.0; 3]],
+        oarrays: Vec::new(),
+        objects: Vec::new(),
+        out: BTreeMap::new(),
+        budget: 300_000,
+        statics: HashMap::new(),
+        fields: HashMap::new(),
+        clinit_done: HashSet::new(),
+        lenient: true,
+        record: &[],
+        recorded: Vec::new(),
+        world: None,
+        interps: Vec::new(),
+        missing: HashSet::new(),
+        pc: 0,
+        soft_error: None,
+        host: Some(host),
+        shot_obj: None,
+    };
+    let vec3 = |m: &mut Machine, class: &str, v: [f64; 3]| {
+        let mut f = HashMap::new();
+        f.insert("x".to_owned(), V::D(v[0]));
+        f.insert("y".to_owned(), V::D(v[1]));
+        f.insert("z".to_owned(), V::D(v[2]));
+        m.objects.push((class.to_owned(), f));
+        V::Obj(m.objects.len() - 1)
+    };
+    let p = vec3(&mut m, "com/maddox/JGP/Point3d", point);
+    let v1 = vec3(&mut m, "com/maddox/JGP/Vector3d", dir);
+    m.statics
+        .insert("com/maddox/il2/objects/air/Aircraft.v1".into(), v1);
+    let shot_p = vec3(&mut m, "com/maddox/JGP/Point3d", point);
+    let shot_v = vec3(&mut m, "com/maddox/JGP/Vector3d", dir);
+    let mut f = HashMap::new();
+    f.insert("power".to_owned(), V::F(shot.power as f32));
+    f.insert("mass".to_owned(), V::F(shot.mass as f32));
+    f.insert("powerType".to_owned(), V::I(shot.power_type));
+    f.insert("initiator".to_owned(), V::Sym("initiator".into()));
+    f.insert("p".to_owned(), shot_p);
+    f.insert("v".to_owned(), shot_v);
+    f.insert("tickOffset".to_owned(), V::F(0.0));
+    m.objects.push(("com/maddox/il2/ai/Shot".to_owned(), f));
+    let shot_obj = m.objects.len() - 1;
+    m.shot_obj = Some(shot_obj);
+    m.fields.insert("FM".into(), V::Sym("FM".into()));
+    let (cf, meth) = m
+        .resolve(None, "hitBone", DESC)
+        .ok_or_else(|| "no hitBone".to_owned())?;
+    let r = m.call(
+        cf,
+        meth,
+        vec![V::This, V::Str(bone.to_owned()), V::Obj(shot_obj), p],
+        0,
+    );
+    *shot = m.shot_state();
+    r.map(|_| ()).map_err(|_| last_abort())
+}
+
+/// Whether the class (or a superclass short of `Aircraft`) overrides `hitBone`.
+pub fn has_hit_bone(chain: &[ClassFile]) -> bool {
+    const DESC: &str = "(Ljava/lang/String;Lcom/maddox/il2/ai/Shot;Lcom/maddox/JGP/Point3d;)V";
+    chain
+        .iter()
+        .take_while(|c| c.this_class != "com/maddox/il2/objects/air/Aircraft")
+        .any(|c| c.method("hitBone", DESC).is_some())
+}
+
 /// A cockpit's instrument code, run against the simulation (`docs/behavior/cockpit.md`,
 /// "Instruments").
 ///
@@ -1602,6 +1910,8 @@ impl Instruments {
             missing: HashSet::new(),
             pc: 0,
             soft_error: None,
+            host: None,
+            shot_obj: None,
         };
         let first = chain.first()?;
         m.run_clinit(&first.this_class, 0);
